@@ -1,0 +1,43 @@
+
+— launching chromium with the unpacked extension —
+  extension id eeigeeoncncieklfpglafmdgdpofaojp
+  ok   installs with access to no store whatsoever (no <all_urls>)
+  ok   the only pages it may touch at install are our own collect screen
+  ok   asks only for the four narrow APIs
+  store origin granted (stands in for the popup prompt)
+
+— run A: ordinary store, Crawl-delay 2, one path disallowed —
+  ok   the store origin is granted before the run
+  ok   run A finished
+  ok   the page said hello
+  ok   the server planned the run
+  ok   robots.txt was fetched before anything else
+  ok   the sitemap was read
+  ok   four products were imported
+  ok   the robots-disallowed product was never opened
+  ok   and the plan reported it as blocked
+  ok   the pace came from the store's Crawl-delay, not our floor
+  ok   every gap between product pages was at least the 2s the store asked for
+  ok   gaps varied — the rhythm is not machine-flat
+  ok   captured markup is well under the 3 MB cap
+  ok   the real extractor found a product in every capture
+  ok   it read the name, brand and price from the captured DOM
+  ok   the lazy gallery was woken by the scroll (2 real images, no data-URI)
+
+— run B: the store answers 403 —
+  ok   the run halted and said why
+  ok   it named the refusal
+  ok   it stopped after exactly two refusals, not more
+
+— run C: Stop mid-run —
+  ok   nothing was imported after Stop
+  ok   the store stopped being asked for pages
+
+— run D: 21 products, to catch the rest —
+  ok   run D finished
+  ok   with no Crawl-delay the 1.5s floor was applied
+  ok   a ~10s rest landed after the 20th page
+
+  27 passed, 0 failed
+
+EXIT=0

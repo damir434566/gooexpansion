@@ -1,0 +1,2436 @@
+diff --git a/AUDIT_PLAN_BRIEF.md b/AUDIT_PLAN_BRIEF.md
+index 021ad7d..cfe21bc 100644
+--- a/AUDIT_PLAN_BRIEF.md
++++ b/AUDIT_PLAN_BRIEF.md
+@@ -157,6 +157,7 @@
+ | 2026-09-16 | Третья плашка от CEO — снова без кнопки. Собран сквозной прогон «настоящий сервер → настоящий экран» (раньше половинки проверялись порознь): `discoverProductUrls` реально ходит в магазин, отвечающий 403, его ответ сериализуется как в роуте и в таком виде отдаётся настоящему компоненту страницы. На коде **из `master` (#854, то, что на проде)** ответ — `{ok:false, status:403, isSingleProduct:true, error:"Upstream responded 403"}`, и кнопка рисуется. Значит серверная часть на проде здорова, а в браузере крутится клиент старее ответа, который он показывает (вкладка, открытая до выката; service worker в проекте отсутствует, своих cache-заголовков нет — лечится перезагрузкой или приватным окном). Чтобы текст подсказки не отправлял к кнопке, которой на старом бандле нет, обе ветки отказа теперь называют и панель: «Paste page» во вкладке Parse URL | `src/lib/server/parser/crawl.ts` | Знать на будущее: подсказка, ссылающаяся на элемент UI, живёт дольше, чем сборка этого UI |
+ | 2026-09-16 | Родство фотографий в галерее не работает на коротких именах файлов: `stem()` оставляет только буквы и цифры, а `isNumberedFrame` требует восьми символов — поэтому `nebula-1.jpg` / `nebula-2.jpg` (7 символов) сиблингами не считаются, и со страницы уезжает одно фото из четырёх. Для магазина, который называет файлы `1.jpg`, `2.jpg`, галерея теряется вся. Порог осознанный (чужое фото в каталоге хуже пропущенного), поэтому не тронут | `src/lib/server/parser/gallery.ts:200` | Низкая: на реальных именах (`nebula-jacket-aurelio-01.jpg`) галерея собирается полностью — проверено |
+ | 2026-09-20 | **Жук доставал не весь каталог, а его верхушку.** Проверено по коду: `sitemap.ts` знал три имени и не умел `.gz` (каталог любого размера отдаёт сайтмап сжатым, `fetchHtml` возвращал бы его декодированной кашей), считал документом и 404-й промах (пять «документов» кончались на трёх неверных догадках), открывал максимум три дочерних сайтмапа и читал `<loc>` только без `CDATA` — у WordPress и Magento сайтмап поэтому читался пустым; `looksLikeProductPath` требовал сегмента `/product(s)/` или цифрового кода, поэтому магазин со slug-адресами (`/shop/nebula-jacket-aurelio`) давал «сайтмап читается, товаров 0»; сайтмап вообще читался только при полностью пустом обходе, а не при коротком; потолки — 500 товаров в `crawl.ts`, 60 якорей на страницу в `extractProductLinks`, 40 товаров и 1 страница по умолчанию на экране; в `direct` не было cookie-jar, то есть каждый запрос к мягкой стене был тем самым первым, который она и отклоняет. **Сделано по прямому указанию CEO** (блок «добыча», шаги 2–4 бесплатного плана; деньги не задействованы, провайдер по решению CEO не берём): семь имён сайтмапа + три `.gz` через новый `fetchBinary` с распознаванием по магическим байтам (только `direct` — провайдер отдаёт текст), `CDATA` в `<loc>`, раздельные бюджеты (18 запросов / 12 прочитанных документов / 10 детей), файл, который магазин сам назвал `product-*`, считается его собственным словом — его URL минуют тест формы адреса, но не плоские отказы (`/cart`); четвёртая форма товарного адреса (секция магазина + слаг из трёх слов, с отсечкой листинговых слов и родителей вида `/collections/<slug>`); сайтмап теперь добирает недобранное, а не только спасает пустое; потолки 2 000 товаров, вся сетка со страницы листинга, по умолчанию 100/3 страницы; cookie-jar на хост (10 минут, `direct`), стук во входную дверь на молчаливом 403 — один раз на хост и только когда сам отказ куку не выдал. **Доказательство:** 51/51 на пяти фиктивных магазинах через настоящий HTTP и настоящий `direct`-fetch (имена ведут на 127.0.0.1 через `/etc/hosts`, поэтому SSRF-гард видит публичный хост и путь кода не подменён): gzip-сайтмап найден после шести мёртвых имён (3 товара, ≤18 запросов); robots → индекс с `CDATA` → `product-sitemap.xml` даёт 3 вещи, включая короткий слаг `/shop/tee`, `/cart` отброшен, `page-sitemap.xml` не открыт; мягкая стена с кукой в самом отказе — ровно один повтор, во входную дверь не стучались; стена с кукой только на главной — 403, один стук в `/`, повтор с кукой прошёл; вторая страница того же магазина прошла с первого раза одним запросом; каталог 1 500 URL собран целиком (потолок 500 снят), якоря листинга внутри, подсказка говорит «added»; сетка из 120 карточек отдаёт 120 при лимите и 60 по умолчанию; магазин, отказывающий во всём, по-прежнему отвечает 403 с подсказкой про Paste page; вставленная одна вещь в slug-форме опознана как товар и сайтмап не читался. `tsc --noEmit` чист, `eslint` по парсеру, роутам и экрану чист, `npm run build` exit 0 | `src/lib/server/parser/{sitemap,fetch,extract,crawl}.ts`, `src/app/api/admin/parser/crawl/route.ts`, `src/app/goo-studio/parser/page.tsx`, `PARSER.md` | Закрыто. Осталось от бесплатного плана: порядок шифров/JA3 (в Node не воспроизводится — нужен свой curl_cffi, решение за CEO). Блоки B (наличие, SKU, размеры, история цен) и C (очередь, возобновление, расписание) не начаты |
++| 2026-09-21 | **Каталог с защищённого магазина: руки перенесены в браузер CEO, мозги остались на сервере.** Продолжение блока «добыча» (2026-09-20): последний оставшийся бесплатный шаг — порядок шифров/JA3 — в Node не воспроизводится, поэтому **по прямому указанию CEO** (вне порядка волн, деньги не задействованы) задача обойдена целиком: страницы открывает расширение Chrome на машине CEO (его адрес, его куки, уже пройденная проверка), а что открывать и как быстро — решает сервер. Новое: `robots.ts` — разбор robots.txt строго по группе `*` (Googlebot'ом не представляемся), Allow/Disallow по длиннейшему совпадению с `*` и `$`, Crawl-delay, Sitemap, разбор чистый (сеть не трогает); `plan-collection.ts` — чистая функция «страница + сайтмапы + robots → товарные адреса, пауза, что дочитать следующим кругом» поверх существующих `extractProductLinks`/`looksLikeProductPath`/`isNonProductPath` и хелперов `sitemap.ts` (они для этого экспортированы, ни одной копии не заведено; `fromRobots` переведён на общий разбор, дубль исчез); роут `collect` с действиями `plan` и `ingest` (`ingest` зовёт `parsePage` с готовым html — в магазин не ходит вовсе, без html отвечает 400, а не молча фетчит); экран-приёмник `/goo-studio/parser/collect` — мост postMessage ↔ API обычной сессией Clerk; `extension/` (MV3): popup, service worker с очередью и темпом, content script-санитайзер один в один с букмарклетом, bridge. **Ключей в расширении нет** — оно не умеет звать API, только просить открытую вкладку; доступ к магазину через `optional_host_permissions` + запрос по клику. Вежливость: Disallow соблюдается, пауза `max(Crawl-delay, 1.5 с)` + случайный разброс, ~10 с отдыха каждые 20 страниц, два 403/429 подряд — остановка с объяснением, Stop мгновенный (гасит и текущую паузу, и приёмник перестаёт принимать). **Доказательство:** 39/39 на настоящих модулях `robots.ts`/`plan-collection.ts` (длиннейшее совпадение, ничья в пользу Allow, пустой Disallow, `*` и `$`, слитые группы агентов, robots.txt отданный HTML-страницей, пол и потолок паузы, дедуп по `seen`, индекс → дети) и 27/27 сквозным прогоном настоящего расширения в настоящем Chromium против фиктивного магазина: при установке не выдан ни один хост (`explicit_host: []`, скриптуется только собственный экран приёмника, из API — `activeTab`, `scripting`, `storage`, `webRequest`); robots.txt прочитан первым, сайтмап вторым кругом; запрещённый `/product/secret-*` не открыт ни разу и посчитан как blocked; темп 2 с взят из Crawl-delay магазина, разброс между запросами есть; страница ~430 КБ ужата до <300 КБ, JSON-LD цел, лениво подгруженная галерея приехала отрисованной (2 настоящих фото вместо data-URI), настоящий `parsePage` собрал товар из снятого DOM (имя, бренд Fixture Atelier, 249 EUR) при нуле запросов в магазин с нашей стороны; на 403 прогон встал ровно после второй страницы, не третьей; после Stop ни одного импорта и ни одного запроса в магазин; на 21 товаре без Crawl-delay применён пол 1.5 с и после двадцатой страницы лёг отдых 11 с. `tsc --noEmit` чист, `npm run build` exit 0, `eslint` по новым файлам и по `extension/` чист, база линта не выросла (13 ошибок / 52 предупреждения до и после — все чужие, по моим файлам ноль) | `src/lib/server/parser/{robots,plan-collection,sitemap}.ts`, `src/lib/server/audit.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/*` | Закрыто в коде. **Не проверено мной:** живой магазин и установка в Chrome — из контейнера это серверный IP, то есть ровно тот, от которого уходим; проверку на настоящем магазине делает CEO |
+ 
+ ---
+ 
+diff --git a/extension/background.js b/extension/background.js
+new file mode 100644
+index 0000000..76777e4
+--- /dev/null
++++ b/extension/background.js
+@@ -0,0 +1,510 @@
++/**
++ * The hands of the operation.
++ *
++ * Everything that has to happen from the admin's own address happens here:
++ * reading robots.txt, pulling sitemaps down, opening each product page in a
++ * real tab, waiting for it to render, taking the DOM and closing the tab again.
++ * What to open, and how fast, is not decided here — the collect tab asks the
++ * server and passes the answer back. This worker is deliberately without
++ * judgement about what a product is.
++ *
++ * ## Why this is paced the way it is
++ *
++ * The cost of being rude has moved. A crawler on a Vercel function that gets
++ * itself blocked costs an address nobody will miss. This runs on the admin's
++ * home connection, under the address they also shop and bank from, and a block
++ * earned here is earned on every store at once and cannot be rotated away.
++ *
++ * So four rules, and none of them is an optimisation to be tuned away:
++ *
++ *   - robots.txt is obeyed. The server applies it; nothing here can override it.
++ *   - Between pages, the store's own Crawl-delay, never faster than 1.5s, plus
++ *     a random spread so the pattern does not read as clockwork.
++ *   - A ten-second rest every twenty pages, because a steady rate held for an
++ *     hour is what a rate limiter is built to notice.
++ *   - Two refusals in a row and the run stops and says so. One refusal can be a
++ *     bad page; two in a row is the store telling us to go away, and carrying on
++ *     past that is how an address ends up on a list.
++ *
++ * Stop is immediate. It wakes every pending pause rather than waiting one out,
++ * and the collect tab independently refuses to import anything after it — so a
++ * page already in flight cannot land after the button.
++ */
++
++// ── Politeness constants ─────────────────────────────────────────────────────
++
++/** Never faster than this, whatever robots.txt does or does not ask for. */
++const MIN_DELAY_MS = 1_500;
++/** Random spread added on top of the pause, as a fraction of it. */
++const JITTER = 0.4;
++/** Pages between rests. */
++const REST_EVERY = 20;
++/** How long a rest lasts. */
++const REST_MS = 10_000;
++/** Consecutive refusals that end the run. */
++const REFUSAL_LIMIT = 2;
++/**
++ * Statuses counted as the store refusing us.
++ *
++ * 403 and 429 only, deliberately. A 500 or a 404 is a broken page and the run
++ * should step over it; these two are the store saying no, and the difference
++ * matters because only one of them is a reason to stop.
++ */
++const REFUSAL_STATUSES = new Set([403, 429]);
++
++/** Give up on a page that will not finish loading. */
++const PAGE_TIMEOUT_MS = 45_000;
++/** Let a loaded page settle before reading it. */
++const SETTLE_MS = 500;
++/** Planning rounds before we call a store done. */
++const MAX_ROUNDS = 12;
++/** Pause between sitemap fetches — cheap requests, but still requests. */
++const SITEMAP_GAP_MS = 400;
++
++// ── Run state ────────────────────────────────────────────────────────────────
++
++const state = {
++  running: false,
++  stopped: false,
++  store: "",
++  phase: "idle",
++  message: "",
++  planned: 0,
++  done: 0,
++  imported: 0,
++  failed: 0,
++  delayMs: MIN_DELAY_MS,
++  studioTabId: null,
++};
++
++function publicState() {
++  return { ...state };
++}
++
++// ── Abortable waiting ────────────────────────────────────────────────────────
++
++/** Pending sleeps, so Stop can cut every one of them short at once. */
++const sleepers = new Set();
++
++function sleep(ms) {
++  return new Promise((resolve) => {
++    const entry = {};
++    entry.resolve = () => {
++      clearTimeout(entry.timer);
++      sleepers.delete(entry);
++      resolve();
++    };
++    entry.timer = setTimeout(entry.resolve, ms);
++    sleepers.add(entry);
++  });
++}
++
++function wakeAll() {
++  for (const entry of [...sleepers]) entry.resolve();
++}
++
++/** The store's pace plus a spread, so the rhythm is not machine-flat. */
++function politePause() {
++  const base = Math.max(state.delayMs, MIN_DELAY_MS);
++  return sleep(base + Math.random() * base * JITTER);
++}
++
++// ── Talking to the collect tab ───────────────────────────────────────────────
++
++async function rememberStudioTab(tabId) {
++  state.studioTabId = tabId ?? null;
++  try {
++    await chrome.storage.session.set({ studioTabId: state.studioTabId });
++  } catch {
++    /* session storage is a convenience, not a requirement */
++  }
++}
++
++async function studioTab() {
++  if (state.studioTabId != null) return state.studioTabId;
++  try {
++    const { studioTabId } = await chrome.storage.session.get("studioTabId");
++    if (typeof studioTabId === "number") state.studioTabId = studioTabId;
++  } catch {
++    /* ignore */
++  }
++  return state.studioTabId;
++}
++
++const NO_TAB =
++  "The collect tab is not reachable. Open Goo Studio → Parser → Collect, reload that tab, and try again.";
++
++/** Ask the collect tab to call the API, and wait for what it got back. */
++async function askPage(type, payload) {
++  const tabId = await studioTab();
++  if (tabId == null) return { ok: false, error: NO_TAB };
++  try {
++    const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
++    return res ?? { ok: false, error: "The collect tab did not answer" };
++  } catch {
++    await rememberStudioTab(null);
++    return { ok: false, error: NO_TAB };
++  }
++}
++
++/** Tell the collect tab something. Failures here never stop a run. */
++async function tellPage(type, payload) {
++  const tabId = await studioTab();
++  if (tabId == null) return;
++  try {
++    await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
++  } catch {
++    /* the screen is a display, not a dependency */
++  }
++}
++
++function pushProgress() {
++  void tellPage("progress", {
++    planned: state.planned,
++    delayMs: state.delayMs,
++    store: state.store,
++  });
++}
++
++// ── Reading what does not need a tab ─────────────────────────────────────────
++
++/**
++ * robots.txt and sitemaps, fetched from the worker.
++ *
++ * These are public documents meant for machines, and they do not need a
++ * rendered page — so they cost a tab nothing. Cookies are sent because the
++ * whole premise is that this looks like the admin's browser rather than a
++ * stranger; a store that varies robots.txt by session should see the session
++ * it is actually answering.
++ */
++async function fetchText(url) {
++  try {
++    const res = await fetch(url, { credentials: "include", redirect: "follow" });
++    if (!res.ok) return null;
++    const bytes = new Uint8Array(await res.arrayBuffer());
++    // Gzip announces itself in its first two bytes, whatever the URL ends with —
++    // and a large catalogue's sitemap is routinely shipped compressed.
++    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
++      const stream = new Response(bytes).body.pipeThrough(new DecompressionStream("gzip"));
++      return await new Response(stream).text();
++    }
++    return new TextDecoder().decode(bytes);
++  } catch {
++    return null;
++  }
++}
++
++// ── Reading a page that does need a tab ──────────────────────────────────────
++
++/**
++ * Status codes for the pages we open.
++ *
++ * `chrome.tabs` will not tell us whether a navigation was a 200 or a 403 — the
++ * tab simply shows whatever came back. Observing the main-frame response is the
++ * only way to know we are being refused, and knowing that is what the two-in-a-
++ * row rule is built on. Observation only: nothing here blocks or rewrites a
++ * request.
++ */
++const mainFrameStatus = new Map();
++
++chrome.webRequest.onCompleted.addListener(
++  (details) => {
++    if (details.type === "main_frame" && details.tabId >= 0) {
++      mainFrameStatus.set(details.tabId, details.statusCode);
++    }
++  },
++  { urls: ["<all_urls>"], types: ["main_frame"] },
++);
++
++function waitForLoad(tabId) {
++  return new Promise((resolve) => {
++    let settled = false;
++
++    const finish = (value) => {
++      if (settled) return;
++      settled = true;
++      chrome.tabs.onUpdated.removeListener(onUpdated);
++      clearTimeout(timer);
++      resolve(value);
++    };
++
++    const onUpdated = (id, info) => {
++      if (id === tabId && info.status === "complete") finish(true);
++    };
++
++    chrome.tabs.onUpdated.addListener(onUpdated);
++    const timer = setTimeout(() => finish(false), PAGE_TIMEOUT_MS);
++
++    // The tab can reach "complete" before the listener is attached.
++    chrome.tabs
++      .get(tabId)
++      .then((tab) => {
++        if (tab && tab.status === "complete") finish(true);
++      })
++      .catch(() => finish(false));
++  });
++}
++
++/**
++ * Open one page, let it render, take the DOM, close the tab.
++ *
++ * The tab is created in the background so a run does not take the admin's
++ * screen away from them, and it is always removed — a run that leaves tabs
++ * behind is one nobody will start twice.
++ */
++async function snapshotPage(url) {
++  let tab;
++  try {
++    tab = await chrome.tabs.create({ url, active: false });
++  } catch (err) {
++    return { error: err?.message ?? "Could not open a tab" };
++  }
++
++  const tabId = tab.id;
++  mainFrameStatus.delete(tabId);
++
++  try {
++    const loaded = await waitForLoad(tabId);
++    const status = mainFrameStatus.get(tabId) ?? 0;
++
++    if (REFUSAL_STATUSES.has(status)) return { refused: true, status };
++    if (status >= 400) return { error: `HTTP ${status}`, status };
++    if (!loaded) return { error: "The page did not finish loading" };
++
++    await sleep(SETTLE_MS);
++    if (state.stopped) return { error: "Stopped" };
++
++    const [injected] = await chrome.scripting.executeScript({
++      target: { tabId },
++      files: ["snapshot.js"],
++    });
++    const result = injected?.result;
++    if (!result || !result.ok) {
++      return { error: result?.error ?? "Could not read the page" };
++    }
++    return { html: result.html, status };
++  } catch (err) {
++    return { error: err?.message ?? "Could not read the page" };
++  } finally {
++    mainFrameStatus.delete(tabId);
++    try {
++      await chrome.tabs.remove(tabId);
++    } catch {
++      /* already gone */
++    }
++  }
++}
++
++// ── The run ──────────────────────────────────────────────────────────────────
++
++function halt(message) {
++  state.running = false;
++  state.phase = "halted";
++  state.message = message;
++  void tellPage("error", { message });
++}
++
++function finish() {
++  state.running = false;
++  state.phase = state.stopped ? "stopped" : "done";
++  void tellPage("done", {});
++}
++
++async function run({ storeUrl, limit }) {
++  let origin;
++  try {
++    origin = new URL(storeUrl).origin;
++  } catch {
++    halt("That does not look like a store address.");
++    return;
++  }
++
++  Object.assign(state, {
++    running: true,
++    stopped: false,
++    store: storeUrl,
++    phase: "planning",
++    message: "",
++    planned: 0,
++    done: 0,
++    imported: 0,
++    failed: 0,
++    delayMs: MIN_DELAY_MS,
++  });
++
++  // The collect tab has to be there before anything is asked of the store —
++  // failing here costs the store nothing, failing later wastes its bandwidth.
++  const hello = await askPage("hello", {});
++  if (!hello.ok) {
++    halt(hello.error ?? NO_TAB);
++    return;
++  }
++
++  const robotsTxt = (await fetchText(`${origin}/robots.txt`)) ?? "";
++  if (state.stopped) return finish();
++
++  // The page the admin pointed at, rendered. Its anchors are one source of
++  // product addresses and its markup is the only one a store without a sitemap
++  // has at all.
++  state.message = "Reading the store…";
++  const first = await snapshotPage(storeUrl);
++  if (first.refused) {
++    halt(
++      `The store refused the first page (HTTP ${first.status}). Nothing else was requested. Open it in a normal tab, clear whatever check it is showing, and try again.`,
++    );
++    return;
++  }
++
++  let html = first.html ?? "";
++  let docs = [];
++  const readDocs = new Set();
++  const seen = [];
++  let collected = 0;
++  let refusals = 0;
++  let sinceRest = 0;
++
++  for (let round = 0; round < MAX_ROUNDS; round++) {
++    if (state.stopped || collected >= limit) break;
++
++    state.phase = "planning";
++    state.message = "";
++    const planned = await askPage("plan", {
++      url: storeUrl,
++      html,
++      robotsTxt,
++      sitemaps: docs,
++      seen,
++      limit: limit - collected,
++    });
++    html = ""; // the start page is only worth sending once
++
++    if (!planned.ok) {
++      halt(planned.error ?? "The collect tab could not plan the run.");
++      return;
++    }
++
++    const plan = planned.data ?? {};
++    const urls = Array.isArray(plan.urls) ? plan.urls : [];
++    state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
++    state.planned = collected + urls.length;
++    pushProgress();
++
++    state.phase = "collecting";
++
++    for (const url of urls) {
++      if (state.stopped || collected >= limit) break;
++      seen.push(url);
++
++      await politePause();
++      if (state.stopped) break;
++
++      const snap = await snapshotPage(url);
++
++      if (snap.refused) {
++        refusals++;
++        state.failed++;
++        if (refusals >= REFUSAL_LIMIT) {
++          halt(
++            `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
++          );
++          return;
++        }
++        continue;
++      }
++      refusals = 0;
++
++      if (!snap.html) {
++        state.failed++;
++        state.done = ++collected;
++        continue;
++      }
++
++      const ingested = await askPage("ingest", { url, html: snap.html });
++      collected++;
++      state.done = collected;
++      if (ingested.ok) state.imported++;
++      else state.failed++;
++      pushProgress();
++
++      sinceRest++;
++      if (sinceRest >= REST_EVERY && collected < limit && !state.stopped) {
++        sinceRest = 0;
++        state.message = "Resting so the store does not notice a rhythm…";
++        await sleep(REST_MS);
++        state.message = "";
++      }
++    }
++
++    if (state.stopped || collected >= limit) break;
++
++    // Sitemaps for the next round. The server names them; we fetch them.
++    const next = (Array.isArray(plan.fetchNext) ? plan.fetchNext : []).filter(
++      (u) => !readDocs.has(u),
++    );
++    if (!next.length) break;
++
++    docs = [];
++    for (const docUrl of next) {
++      if (state.stopped) break;
++      readDocs.add(docUrl);
++      const xml = await fetchText(docUrl);
++      if (xml) docs.push({ url: docUrl, xml });
++      await sleep(SITEMAP_GAP_MS);
++    }
++    if (!docs.length) break;
++  }
++
++  finish();
++}
++
++function stop() {
++  state.stopped = true;
++  state.phase = "stopped";
++  wakeAll();
++}
++
++// ── Messages ─────────────────────────────────────────────────────────────────
++
++chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
++  if (!msg || typeof msg.type !== "string") return undefined;
++  // Anything addressed to the bridge is delivered to a tab, not to us.
++  if (msg.target === "bridge") return undefined;
++
++  switch (msg.type) {
++    case "bridge-ready":
++      void rememberStudioTab(sender?.tab?.id);
++      sendResponse({ ok: true });
++      return undefined;
++
++    case "state":
++      sendResponse(publicState());
++      return undefined;
++
++    case "stop":
++      stop();
++      sendResponse({ ok: true });
++      return undefined;
++
++    case "start": {
++      if (state.running) {
++        sendResponse({ ok: false, error: "A run is already going." });
++        return undefined;
++      }
++      const storeUrl = msg.payload?.storeUrl;
++      const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, 2_000));
++      run({ storeUrl, limit }).catch((err) => {
++        halt(err?.message ?? "The run failed unexpectedly.");
++      });
++      sendResponse({ ok: true });
++      return undefined;
++    }
++
++    default:
++      return undefined;
++  }
++});
++
++// A collect tab that goes away should not be talked to.
++chrome.tabs.onRemoved.addListener((tabId) => {
++  if (tabId === state.studioTabId) void rememberStudioTab(null);
++});
+diff --git a/extension/bridge.js b/extension/bridge.js
+new file mode 100644
+index 0000000..584a9b1
+--- /dev/null
++++ b/extension/bridge.js
+@@ -0,0 +1,113 @@
++/**
++ * The wire between the worker and the collect tab.
++ *
++ * The extension cannot call our admin API. The session is a Clerk cookie that
++ * will not travel from a chrome-extension:// origin, and an API token baked
++ * into an extension is a secret shipped to everyone who installs it. So the
++ * worker asks this content script, this script asks the page it is running in,
++ * and the page — already signed in as an admin — makes the call.
++ *
++ * Two hops, each one crossing a boundary the one before it cannot:
++ *
++ *   worker  --chrome.runtime-->  bridge  --window.postMessage-->  page
++ *
++ * The bridge also tells the worker which tab it is in. That is what lets the
++ * whole extension work without the "tabs" permission: rather than querying
++ * every tab for one whose URL looks like ours — which is a permission to read
++ * the admin's browsing — the collect tab introduces itself.
++ */
++
++const FROM_EXT = "goo-collect/ext";
++const FROM_PAGE = "goo-collect/page";
++
++/**
++ * The one page this bridge belongs on.
++ *
++ * `matches` in the manifest already narrows injection to this path, but the
++ * guard is repeated here because the consequence of being wrong is specific:
++ * the worker learns which tab to trust from whichever bridge announces itself
++ * first, and a bridge running on some other page of the site would take that
++ * place and send every API call somewhere that cannot answer it.
++ */
++const COLLECT_PATH = "/goo-studio/parser/collect";
++
++/** How long to wait for the page before calling a request lost. */
++const REPLY_TIMEOUT_MS = 120_000;
++
++let nextId = 1;
++/** id → resolver, for requests the page has not answered yet. */
++const pending = new Map();
++
++window.addEventListener("message", (event) => {
++  // Same window, same origin, our marker. `postMessage` is shoutable by any
++  // script on the page, and this bridge relays to a privileged worker.
++  if (event.source !== window) return;
++  if (event.origin !== window.location.origin) return;
++
++  const msg = event.data;
++  if (!msg || msg.source !== FROM_PAGE) return;
++
++  if (typeof msg.id === "number") {
++    const entry = pending.get(msg.id);
++    if (!entry) return;
++    pending.delete(msg.id);
++    entry(msg.ok ? { ok: true, data: msg.data } : { ok: false, error: msg.error });
++    return;
++  }
++
++  // One-way instructions from the screen. Stop is the one that matters, and it
++  // has to reach the worker whatever it is in the middle of.
++  if (msg.type === "stop") {
++    chrome.runtime.sendMessage({ type: "stop" }).catch(() => {});
++  }
++});
++
++/** Ask the page something and wait for its answer. */
++function ask(type, payload) {
++  return new Promise((resolve) => {
++    const id = nextId++;
++    const timer = setTimeout(() => {
++      if (pending.delete(id)) {
++        resolve({ ok: false, error: "The collect tab did not answer in time" });
++      }
++    }, REPLY_TIMEOUT_MS);
++
++    pending.set(id, (value) => {
++      clearTimeout(timer);
++      resolve(value);
++    });
++
++    window.postMessage({ source: FROM_EXT, id, type, payload: payload ?? {} }, window.location.origin);
++  });
++}
++
++/** Tell the page something with no answer expected (progress, run finished). */
++function tell(type, payload) {
++  window.postMessage({ source: FROM_EXT, type, payload: payload ?? {} }, window.location.origin);
++}
++
++chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
++  if (!msg || msg.target !== "bridge") return undefined;
++
++  if (msg.type === "ping") {
++    sendResponse({ ok: true });
++    return undefined;
++  }
++
++  // Notices need no reply and must not hold the channel open.
++  if (msg.type === "progress" || msg.type === "done" || msg.type === "error") {
++    tell(msg.type, msg.payload);
++    sendResponse({ ok: true });
++    return undefined;
++  }
++
++  ask(msg.type, msg.payload).then(sendResponse);
++  return true; // keep the channel open for the async reply
++});
++
++// Introduce this tab to the worker, and greet the page so it can show that the
++// extension is connected rather than leaving the admin guessing.
++if (window.location.pathname.startsWith(COLLECT_PATH)) {
++  chrome.runtime.sendMessage({ type: "bridge-ready" }).catch(() => {});
++  ask("hello", {});
++}
+diff --git a/extension/manifest.json b/extension/manifest.json
+new file mode 100644
+index 0000000..87d34be
+--- /dev/null
++++ b/extension/manifest.json
+@@ -0,0 +1,39 @@
++{
++  "manifest_version": 3,
++  "name": "Goo Collect",
++  "version": "1.0.0",
++  "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
++  "minimum_chrome_version": "116",
++  "permissions": [
++    "activeTab",
++    "scripting",
++    "storage",
++    "webRequest"
++  ],
++  "optional_host_permissions": [
++    "http://*/*",
++    "https://*/*"
++  ],
++  "background": {
++    "service_worker": "background.js",
++    "type": "module"
++  },
++  "action": {
++    "default_title": "Goo Collect",
++    "default_popup": "popup.html"
++  },
++  "content_scripts": [
++    {
++      "matches": [
++        "http://localhost/goo-studio/parser/collect*",
++        "http://127.0.0.1/goo-studio/parser/collect*",
++        "https://goo-fashion.com/goo-studio/parser/collect*",
++        "https://www.goo-fashion.com/goo-studio/parser/collect*"
++      ],
++      "js": [
++        "bridge.js"
++      ],
++      "run_at": "document_idle"
++    }
++  ]
++}
+diff --git a/extension/popup.css b/extension/popup.css
+new file mode 100644
+index 0000000..e8758ee
+--- /dev/null
++++ b/extension/popup.css
+@@ -0,0 +1,210 @@
++/**
++ * Popup styling.
++ *
++ * The site's token layer lives in the Next.js app and does not reach a
++ * chrome-extension:// page, so the popup defines its own — but it defines one
++ * rather than scattering colours through the rules, and it answers the system
++ * dark mode the same way the site does.
++ */
++
++:root {
++  --surface: #ffffff;
++  --background: #fafafa;
++  --foreground: #111111;
++  --foreground-muted: #5c5c5c;
++  --foreground-subtle: #8e8e8e;
++  --border: #e4e4e4;
++  --ok: #059669;
++  --warn: #b45309;
++}
++
++@media (prefers-color-scheme: dark) {
++  :root {
++    --surface: #161616;
++    --background: #1e1e1e;
++    --foreground: #f2f2f2;
++    --foreground-muted: #a8a8a8;
++    --foreground-subtle: #767676;
++    --border: #2e2e2e;
++    --ok: #34d399;
++    --warn: #fbbf24;
++  }
++}
++
++* {
++  box-sizing: border-box;
++}
++
++body {
++  width: 320px;
++  margin: 0;
++  padding: 16px;
++  background: var(--surface);
++  color: var(--foreground);
++  font:
++    13px/1.45 ui-sans-serif,
++    system-ui,
++    -apple-system,
++    "Segoe UI",
++    sans-serif;
++}
++
++h1 {
++  margin: 0;
++  font-size: 13px;
++  font-weight: 600;
++  letter-spacing: 0.12em;
++  text-transform: uppercase;
++}
++
++.sub {
++  margin: 4px 0 0;
++  font-size: 11px;
++  color: var(--foreground-muted);
++  overflow-wrap: anywhere;
++}
++
++.rows {
++  margin: 14px 0;
++  display: grid;
++  gap: 8px;
++}
++
++.row {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 10px;
++  font-size: 11px;
++  letter-spacing: 0.06em;
++  text-transform: uppercase;
++  color: var(--foreground-subtle);
++}
++
++input {
++  width: 150px;
++  padding: 6px 8px;
++  font: inherit;
++  font-size: 12px;
++  text-transform: none;
++  letter-spacing: normal;
++  color: var(--foreground);
++  background: var(--background);
++  border: 1px solid var(--border);
++  border-radius: 8px;
++  outline: none;
++}
++
++input:focus {
++  border-color: var(--foreground);
++}
++
++.actions {
++  display: flex;
++  gap: 8px;
++}
++
++button {
++  flex: 1;
++  padding: 9px 12px;
++  font: inherit;
++  font-size: 11px;
++  font-weight: 500;
++  letter-spacing: 0.1em;
++  text-transform: uppercase;
++  border-radius: 8px;
++  border: 1px solid transparent;
++  cursor: pointer;
++}
++
++button:disabled {
++  opacity: 0.4;
++  cursor: not-allowed;
++}
++
++.primary {
++  background: var(--foreground);
++  color: var(--surface);
++}
++
++.primary:hover:not(:disabled) {
++  opacity: 0.85;
++}
++
++.ghost {
++  background: transparent;
++  color: var(--foreground-muted);
++  border-color: var(--border);
++}
++
++.ghost:hover:not(:disabled) {
++  color: var(--foreground);
++  border-color: var(--foreground);
++}
++
++.progress {
++  margin-top: 14px;
++}
++
++.bar {
++  height: 3px;
++  border-radius: 999px;
++  background: var(--border);
++  overflow: hidden;
++}
++
++.bar > div {
++  height: 100%;
++  width: 0;
++  background: var(--foreground);
++  transition: width 0.3s;
++}
++
++.counts {
++  margin: 8px 0 0;
++  display: flex;
++  gap: 10px;
++  align-items: baseline;
++  font-size: 11px;
++  font-variant-numeric: tabular-nums;
++  color: var(--foreground-muted);
++}
++
++.counts strong {
++  font-size: 15px;
++  font-weight: 500;
++  color: var(--foreground);
++}
++
++.ok {
++  color: var(--ok);
++}
++
++.warn {
++  color: var(--warn);
++}
++
++.pace,
++.note,
++.foot {
++  font-size: 10px;
++  color: var(--foreground-subtle);
++}
++
++.pace {
++  margin: 4px 0 0;
++}
++
++.note {
++  margin: 10px 0 0;
++  padding: 8px 10px;
++  border-radius: 8px;
++  border: 1px solid var(--border);
++  color: var(--warn);
++}
++
++.foot {
++  margin: 14px 0 0;
++  padding-top: 10px;
++  border-top: 1px solid var(--border);
++}
+diff --git a/extension/popup.html b/extension/popup.html
+new file mode 100644
+index 0000000..251c73f
+--- /dev/null
++++ b/extension/popup.html
+@@ -0,0 +1,49 @@
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="utf-8" />
++    <title>Goo Collect</title>
++    <link rel="stylesheet" href="popup.css" />
++  </head>
++  <body>
++    <header>
++      <h1>Goo Collect</h1>
++      <p class="sub" id="store">Reading this tab…</p>
++    </header>
++
++    <section class="rows">
++      <label class="row" for="limit">
++        <span>Products to collect</span>
++        <input id="limit" type="number" min="1" max="2000" value="30" />
++      </label>
++
++      <label class="row" for="studio">
++        <span>Goo Studio</span>
++        <input id="studio" type="url" spellcheck="false" placeholder="https://www.goo-fashion.com" />
++      </label>
++    </section>
++
++    <div class="actions">
++      <button id="start" class="primary">Collect this store</button>
++      <button id="stop" class="ghost" hidden>Stop</button>
++    </div>
++
++    <section id="progress" class="progress" hidden>
++      <div class="bar"><div id="fill"></div></div>
++      <p class="counts">
++        <strong id="done">0</strong><span id="planned"></span>
++        <span class="ok" id="imported"></span>
++        <span class="warn" id="failed"></span>
++      </p>
++      <p class="pace" id="pace"></p>
++    </section>
++
++    <p id="note" class="note" hidden></p>
++
++    <p class="foot">
++      Pages open on your machine, at the pace the store asks for. robots.txt is obeyed.
++    </p>
++
++    <script src="popup.js"></script>
++  </body>
++</html>
+diff --git a/extension/popup.js b/extension/popup.js
+new file mode 100644
+index 0000000..cd405fd
+--- /dev/null
++++ b/extension/popup.js
+@@ -0,0 +1,189 @@
++/**
++ * The popup: pick a store, say how much, start, watch, stop.
++ *
++ * Two things have to happen here rather than in the worker, and both are
++ * because Chrome requires them to happen under a click:
++ *
++ *   1. Asking for permission to read this store. The extension ships with none
++ *      — `optional_host_permissions` rather than `<all_urls>` — so installing
++ *      it grants access to nothing, and each store is granted by the admin,
++ *      once, on the store they are actually looking at. `permissions.request`
++ *      is only honoured during a user gesture.
++ *   2. Opening the collect tab if it is not already there.
++ *
++ * Everything after that belongs to the worker, which survives this popup being
++ * closed — as it will be, since a run takes minutes.
++ */
++
++const DEFAULT_STUDIO = "https://www.goo-fashion.com";
++const COLLECT_PATH = "/goo-studio/parser/collect";
++
++const el = {
++  store: document.getElementById("store"),
++  limit: document.getElementById("limit"),
++  studio: document.getElementById("studio"),
++  start: document.getElementById("start"),
++  stop: document.getElementById("stop"),
++  progress: document.getElementById("progress"),
++  fill: document.getElementById("fill"),
++  done: document.getElementById("done"),
++  planned: document.getElementById("planned"),
++  imported: document.getElementById("imported"),
++  failed: document.getElementById("failed"),
++  pace: document.getElementById("pace"),
++  note: document.getElementById("note"),
++};
++
++let activeUrl = "";
++
++function note(message) {
++  el.note.textContent = message ?? "";
++  el.note.hidden = !message;
++}
++
++function send(type, payload) {
++  return chrome.runtime.sendMessage({ type, payload }).catch(() => null);
++}
++
++// ── Setup ────────────────────────────────────────────────────────────────────
++
++async function init() {
++  const stored = await chrome.storage.sync.get(["studioOrigin", "limit"]);
++  el.studio.value = stored.studioOrigin || DEFAULT_STUDIO;
++  if (stored.limit) el.limit.value = stored.limit;
++
++  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
++  activeUrl = tab?.url ?? "";
++
++  if (/^https?:/i.test(activeUrl)) {
++    el.store.textContent = activeUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70);
++  } else {
++    el.store.textContent = "Open a store page in this tab first.";
++    el.start.disabled = true;
++  }
++
++  render(await send("state"));
++}
++
++// ── Starting ─────────────────────────────────────────────────────────────────
++
++/**
++ * The collect tab, opened if needed.
++ *
++ * The worker learns which tab it is when the bridge content script announces
++ * itself, so after opening one we wait for that to happen rather than assuming
++ * it has. A tab that was already open before the extension was installed has no
++ * content script in it until it is reloaded — hence the honest timeout message.
++ */
++async function ensureCollectTab(studioOrigin) {
++  const known = await send("state");
++  if (known?.studioTabId != null) return true;
++
++  await chrome.tabs.create({ url: `${studioOrigin}${COLLECT_PATH}`, active: false });
++
++  for (let i = 0; i < 40; i++) {
++    await new Promise((r) => setTimeout(r, 250));
++    const s = await send("state");
++    if (s?.studioTabId != null) return true;
++  }
++  return false;
++}
++
++async function start() {
++  note("");
++  el.start.disabled = true;
++
++  let origin;
++  try {
++    origin = new URL(activeUrl).origin;
++  } catch {
++    note("This tab is not a store page.");
++    el.start.disabled = false;
++    return;
++  }
++
++  const studioOrigin = (el.studio.value || DEFAULT_STUDIO).replace(/\/+$/, "");
++  const limit = Math.max(1, Math.min(Number(el.limit.value) || 30, 2000));
++  await chrome.storage.sync.set({ studioOrigin, limit });
++
++  // Must be inside the click: Chrome refuses a permission prompt without one.
++  let granted = false;
++  try {
++    granted = await chrome.permissions.request({ origins: [`${origin}/*`] });
++  } catch (err) {
++    note(err?.message ?? "Could not ask for permission.");
++    el.start.disabled = false;
++    return;
++  }
++  if (!granted) {
++    note("Without permission for this store the extension cannot read its pages.");
++    el.start.disabled = false;
++    return;
++  }
++
++  if (!(await ensureCollectTab(studioOrigin))) {
++    note(
++      `Could not reach ${studioOrigin}${COLLECT_PATH}. Open it, make sure you are signed in as an admin, reload it, then try again.`,
++    );
++    el.start.disabled = false;
++    return;
++  }
++
++  const res = await send("start", { storeUrl: activeUrl, limit });
++  if (res && res.ok === false) {
++    note(res.error ?? "Could not start.");
++    el.start.disabled = false;
++    return;
++  }
++  render(await send("state"));
++}
++
++// ── Display ──────────────────────────────────────────────────────────────────
++
++function render(state) {
++  if (!state) return;
++
++  const running = state.running && !state.stopped;
++  el.start.hidden = running;
++  el.stop.hidden = !running;
++  el.start.disabled = running || !/^https?:/i.test(activeUrl);
++
++  const show = running || state.done > 0;
++  el.progress.hidden = !show;
++
++  if (show) {
++    const pct = state.planned ? Math.min(100, Math.round((state.done / state.planned) * 100)) : 0;
++    el.fill.style.width = `${state.phase === "planning" ? 4 : pct}%`;
++    el.done.textContent = String(state.done);
++    el.planned.textContent = state.planned ? `of ${state.planned}` : "";
++    el.imported.textContent = state.imported ? `${state.imported} in` : "";
++    el.failed.textContent = state.failed ? `${state.failed} skipped` : "";
++    el.pace.textContent =
++      state.message ||
++      (running ? `One page every ${(state.delayMs / 1000).toFixed(1)}s or slower` : "");
++  }
++
++  if (state.phase === "halted" && state.message) note(state.message);
++  else if (state.phase === "stopped") note("Stopped.");
++  else if (state.phase === "done") note("");
++}
++
++// ── Wiring ───────────────────────────────────────────────────────────────────
++
++el.start.addEventListener("click", () => {
++  start().catch((err) => {
++    note(err?.message ?? "Could not start.");
++    el.start.disabled = false;
++  });
++});
++
++el.stop.addEventListener("click", async () => {
++  await send("stop");
++  render(await send("state"));
++});
++
++// The popup is a window onto the worker, so it polls while it is open.
++const poll = setInterval(async () => render(await send("state")), 700);
++window.addEventListener("unload", () => clearInterval(poll));
++
++init().catch((err) => note(err?.message ?? "Could not read this tab."));
+diff --git a/extension/snapshot.js b/extension/snapshot.js
+new file mode 100644
+index 0000000..6999dcb
+--- /dev/null
++++ b/extension/snapshot.js
+@@ -0,0 +1,61 @@
++/**
++ * Take the rendered page and hand back markup small enough to post.
++ *
++ * This is the bookmarklet in `src/lib/parser-bookmarklet.ts`, with the clicking
++ * automated. The strip list is deliberately identical — scripts except JSON-LD,
++ * styles, stylesheet links, SVG, noscript, iframes, templates, and inline
++ * data-URIs — because the server runs the very same extractor over what comes
++ * out of here as over a pasted page. Diverging here would mean a product
++ * imported by the extension could differ from the same product pasted by hand,
++ * and there would be no way to tell which was right.
++ *
++ * What the strip is for: a retail page is several megabytes, almost all of it
++ * script and style the parser never reads, and the route on the other end takes
++ * 3 MB. Stripping takes a typical page to a couple of hundred kilobytes.
++ *
++ * Why JSON-LD survives: it is the densest source of truth on a retail page —
++ * name, brand, every image, price, currency, colour and material as data rather
++ * than as markup to mine.
++ *
++ * Before reading anything it scrolls the page. That is the whole reason a real
++ * tab is worth its cost over a server fetch: a gallery that lazy-loads on
++ * scroll is a spinner in the markup until something scrolls past it, and plain
++ * `<img src>` afterwards.
++ *
++ * Injected with `chrome.scripting.executeScript`, so the completion value of
++ * the last statement is what the worker receives.
++ */
++
++(async () => {
++  /** Nodes the parser never reads, and that account for nearly all the weight. */
++  const DROP =
++    'script:not([type="application/ld+json"]),style,link[rel=stylesheet],svg,noscript,iframe,template';
++
++  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++
++  try {
++    // Walk the page so lazy images commit to a real `src`. Four steps is enough
++    // for the galleries this is aimed at without turning a snapshot into a
++    // visible scroll animation the admin has to wait through.
++    const height = document.body ? document.body.scrollHeight : 0;
++    if (height > window.innerHeight) {
++      for (let i = 1; i <= 4; i++) {
++        window.scrollTo(0, (height / 4) * i);
++        await sleep(220);
++      }
++      window.scrollTo(0, 0);
++      await sleep(150);
++    }
++
++    const root = document.documentElement.cloneNode(true);
++    root.querySelectorAll(DROP).forEach((n) => n.remove());
++    // An inline data-URI is a whole image encoded in the attribute. The parser
++    // cannot use one and it can be megabytes on its own, so the attribute goes
++    // and the element stays.
++    root.querySelectorAll('[src^="data:"]').forEach((n) => n.removeAttribute("src"));
++
++    return { ok: true, url: location.href, html: `<html>${root.innerHTML}</html>` };
++  } catch (err) {
++    return { ok: false, error: err && err.message ? err.message : String(err) };
++  }
++})();
+diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
+new file mode 100644
+index 0000000..888330e
+--- /dev/null
++++ b/src/app/api/admin/parser/collect/route.ts
+@@ -0,0 +1,215 @@
++/**
++ * Catalogue collection driven from the admin's own browser.
++ *
++ * The sibling of `crawl/route.ts`, for the stores that route cannot reach. The
++ * difference is where the fetching happens: `crawl` asks the store from our
++ * server and is refused by anyone with anti-bot in front of them, while this
++ * route never touches the store at all. A Chrome extension opens each page in a
++ * real tab on the admin's machine — their address, their cookies, the challenge
++ * their browser already passed — and hands back the rendered DOM.
++ *
++ * So the server keeps the judgement and gives up the reach:
++ *
++ *   plan   — page + sitemaps + robots.txt in, product addresses and a pace out
++ *   ingest — one page's markup in, one product in the catalogue out
++ *
++ * `ingest` is the bookmarklet's route with the clicking automated. It passes
++ * `html` to `parsePage`, which skips the fetch and the storefront probe
++ * entirely, so nothing is asked of the store from here — and then runs the same
++ * extractor, gallery harvester and import as every other path into the
++ * catalogue. There is no second code path for extension-collected products.
++ *
++ * The extension cannot call this route itself: our session is a Clerk cookie
++ * that will not travel cross-origin, and an API token shipped inside an
++ * extension is a key under the doormat. It talks to the collect screen instead,
++ * which calls this with the admin's ordinary session.
++ */
++import { NextResponse } from "next/server";
++import { revalidatePath } from "next/cache";
++import { requireAdmin } from "@/lib/server/admin-auth";
++import { logAdminAction } from "@/lib/server/audit";
++import { clerkClient } from "@clerk/nextjs/server";
++import { parsePage } from "@/lib/server/parser/parse-page";
++import { importParsedProduct } from "@/lib/server/parser/import-product";
++import { planCollection, type FetchedSitemap } from "@/lib/server/parser/plan-collection";
++import {
++  getFetchSettings,
++  getFetchApiKey,
++  getSiteConfigs,
++  getAiSettings,
++} from "@/lib/server/parser/configs";
++import type { CrawlItemResult } from "@/lib/server/parser/types";
++
++export const maxDuration = 60;
++
++/**
++ * Largest page we accept, matching `parse/route.ts`.
++ *
++ * The content script strips what the bookmarklet strips before sending, so a
++ * page arriving over this means the strip did not run — worth saying plainly
++ * rather than letting the platform refuse the body with an opaque error.
++ */
++const MAX_PAGE_HTML = 3_000_000;
++
++/** Largest sitemap document we will read in one `plan` call. */
++const MAX_SITEMAP_XML = 5_000_000;
++
++/** Sitemap documents accepted per `plan` call. */
++const MAX_SITEMAPS = 12;
++
++/** Addresses the caller may say it has already seen, for de-duplication. */
++const MAX_SEEN = 5_000;
++
++function str(v: unknown): string {
++  return typeof v === "string" ? v.trim() : "";
++}
++
++export async function POST(req: Request) {
++  const admin = await requireAdmin();
++  if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
++
++  const body = await req.json().catch(() => null);
++  const action = body?.action === "ingest" ? "ingest" : "plan";
++
++  // ── plan ───────────────────────────────────────────────────────────────────
++  // Pure: nothing here reaches the network. Everything it reasons about was
++  // fetched by the browser and posted here.
++  if (action === "plan") {
++    const url = str(body?.url);
++    if (!url) return NextResponse.json({ error: "url is required" }, { status: 400 });
++
++    const html = typeof body?.html === "string" ? body.html : "";
++    if (html.length > MAX_PAGE_HTML) {
++      return NextResponse.json({ error: "Page markup is over the 3 MB limit" }, { status: 413 });
++    }
++
++    const sitemaps: FetchedSitemap[] = (Array.isArray(body?.sitemaps) ? body.sitemaps : [])
++      .filter(
++        (s: unknown): s is FetchedSitemap =>
++          !!s &&
++          typeof s === "object" &&
++          typeof (s as FetchedSitemap).url === "string" &&
++          typeof (s as FetchedSitemap).xml === "string" &&
++          (s as FetchedSitemap).xml.length <= MAX_SITEMAP_XML,
++      )
++      .slice(0, MAX_SITEMAPS);
++
++    const seen = (Array.isArray(body?.seen) ? body.seen : [])
++      .filter((u: unknown): u is string => typeof u === "string")
++      .slice(0, MAX_SEEN);
++
++    const plan = planCollection({
++      startUrl: url,
++      html: html || undefined,
++      robotsTxt: typeof body?.robotsTxt === "string" ? body.robotsTxt : undefined,
++      sitemaps,
++      seen,
++      limit: Number(body?.limit) || 60,
++    });
++
++    return NextResponse.json({ ok: true, ...plan });
++  }
++
++  // ── ingest ─────────────────────────────────────────────────────────────────
++  const url = str(body?.url);
++  if (!url) return NextResponse.json({ error: "url is required" }, { status: 400 });
++
++  const html = typeof body?.html === "string" ? body.html : "";
++  if (!html.trim()) {
++    // Without markup this route would fall through to a server fetch — the very
++    // request the extension exists to avoid. Refuse instead of quietly doing it.
++    return NextResponse.json({ error: "html is required for ingest" }, { status: 400 });
++  }
++  if (html.length > MAX_PAGE_HTML) {
++    return NextResponse.json(
++      {
++        error: `Page is ${Math.round(html.length / 1_000_000)} MB, over the ${MAX_PAGE_HTML / 1_000_000} MB limit. The content script should have stripped scripts and styles before sending.`,
++      },
++      { status: 413 },
++    );
++  }
++
++  const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
++    getFetchSettings(),
++    getFetchApiKey(),
++    getSiteConfigs(),
++    getAiSettings(),
++  ]);
++
++  const useAi = typeof body?.useAi === "boolean" ? body.useAi : aiSettings.enabled;
++  const mirrorImages =
++    typeof body?.mirrorImages === "boolean" ? body.mirrorImages : aiSettings.downloadImages;
++  const dryRun = body?.dryRun === true;
++
++  let result: CrawlItemResult;
++
++  try {
++    const parsed = await parsePage(url, {
++      fetchSettings,
++      fetchApiKey: keyInfo.key,
++      siteConfigs,
++      aiSettings,
++      useAi,
++      html,
++    });
++
++    const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
++    const product = parsed.products[0];
++
++    if (!parsed.ok) {
++      result = { url, status: "failed", reason: parsed.error ?? "Could not read the page", usedAi };
++    } else if (!product || !product.name) {
++      result = {
++        url,
++        status: "skipped",
++        reason: parsed.diagnostics.aiError ?? "No product data on the page",
++        usedAi,
++      };
++    } else if (dryRun) {
++      result = { url, status: "skipped", reason: "Dry run", name: product.name, usedAi };
++    } else {
++      const imported = await importParsedProduct(
++        product as unknown as Record<string, unknown>,
++        product.sourceUrl || url,
++        { mirrorImages },
++      );
++      result = imported.ok
++        ? {
++            url,
++            status: imported.updated ? "updated" : "imported",
++            productId: imported.productId ?? undefined,
++            name: product.name,
++            usedAi,
++            imagesMirrored: imported.imagesMirrored ?? 0,
++          }
++        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
++    }
++  } catch (err) {
++    result = {
++      url,
++      status: "failed",
++      reason: err instanceof Error ? err.message : "Unexpected error",
++    };
++  }
++
++  if (result.status === "imported" || result.status === "updated") {
++    revalidatePath("/goo-studio/products");
++    revalidatePath("/");
++    try {
++      const cc = await clerkClient();
++      const adminUser = await cc.users.getUser(admin.userId);
++      void logAdminAction({
++        admin_id: admin.userId,
++        admin_email: adminUser.emailAddresses[0]?.emailAddress,
++        action: "parser.collect_ingest",
++        target_type: "product",
++        target_id: result.productId,
++        metadata: { url, status: result.status },
++      });
++    } catch {
++      /* non-critical */
++    }
++  }
++
++  return NextResponse.json({ ok: true, result });
++}
+diff --git a/src/app/goo-studio/parser/collect/page.tsx b/src/app/goo-studio/parser/collect/page.tsx
+new file mode 100644
+index 0000000..8998723
+--- /dev/null
++++ b/src/app/goo-studio/parser/collect/page.tsx
+@@ -0,0 +1,419 @@
++"use client";
++
++/**
++ * The screen the extension talks to.
++ *
++ * The extension has the reach and this tab has the session, so the work is
++ * split exactly there. Chrome opens the store pages — the admin address, the
++ * admin cookies, the anti-bot check their browser already passed — and hands
++ * back rendered markup. This tab does the one thing an extension cannot: call
++ * our admin API as the logged-in admin.
++ *
++ * Why not let the extension call the API itself? Our session is a Clerk cookie
++ * that will not travel from a chrome-extension:// origin, and the alternative —
++ * shipping a long-lived API token inside an extension anyone can unpack — is a
++ * key under the doormat. Nothing secret is in the extension. It knows how to
++ * ask this page, and this page is only useful to whoever is already signed in
++ * as an admin in it.
++ *
++ * The wire is `window.postMessage`, which means the extension's content script
++ * and this page share an origin. Every inbound message is checked for that
++ * origin and for `event.source === window` before it is read: `postMessage` is
++ * shoutable by any script on the page, and a bridge that skipped the check
++ * would let one do our importing for us.
++ *
++ * Stop is enforced on both ends. The tab tells the worker to stop *and* starts
++ * refusing ingest calls, so a worker that is mid-page when the button is
++ * pressed cannot land one more product after it.
++ */
++
++import { useCallback, useEffect, useRef, useState } from "react";
++import type { CrawlItemResult } from "@/lib/server/parser/types";
++
++// ── Wire protocol ────────────────────────────────────────────────────────────
++
++/** Messages from the extension's content script to this page. */
++const FROM_EXT = "goo-collect/ext";
++/** Messages from this page back to the extension. */
++const FROM_PAGE = "goo-collect/page";
++
++interface ExtMessage {
++  source: typeof FROM_EXT;
++  /** Correlates a request with its reply; absent on one-way notices. */
++  id?: number;
++  type: "hello" | "plan" | "ingest" | "progress" | "done" | "error";
++  payload?: Record<string, unknown>;
++}
++
++// ── goo-studio recipes (DESIGN_SYSTEM.md §9) ─────────────────────────────────
++
++const labelCls =
++  "block text-[10px] tracking-[0.14em] uppercase text-[var(--foreground-subtle)] mb-1.5";
++const btnGhost =
++  "px-4 py-2 text-[11px] tracking-[0.12em] uppercase border border-[var(--border)] text-[var(--foreground-muted)] hover:border-[var(--foreground)] hover:text-[var(--foreground)] transition-colors rounded-lg";
++const cardCls = "rounded-xl border border-[var(--border)] bg-[var(--background)]";
++
++const Spinner = () => (
++  <span className="inline-block w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
++);
++
++type Phase = "idle" | "planning" | "collecting" | "done" | "stopped" | "halted";
++
++interface RobotsInfo {
++  parsed: boolean;
++  crawlDelayMs: number | null;
++  blocked: number;
++  sitemaps: string[];
++}
++
++export default function CollectPage() {
++  const [connected, setConnected] = useState(false);
++  const [phase, setPhase] = useState<Phase>("idle");
++  const [store, setStore] = useState("");
++  const [results, setResults] = useState<CrawlItemResult[]>([]);
++  const [planned, setPlanned] = useState(0);
++  const [delayMs, setDelayMs] = useState(0);
++  const [robots, setRobots] = useState<RobotsInfo | null>(null);
++  const [notice, setNotice] = useState("");
++
++  /**
++   * Stop as a ref, not state: the message handler is registered once and would
++   * otherwise close over the value it had when it was registered — which is
++   * exactly the moment before the admin presses the button.
++   */
++  const stoppedRef = useRef(false);
++
++  const reply = useCallback((id: number | undefined, ok: boolean, data: unknown) => {
++    if (typeof id !== "number") return;
++    window.postMessage(
++      { source: FROM_PAGE, id, ok, ...(ok ? { data } : { error: data }) },
++      window.location.origin,
++    );
++  }, []);
++
++  /** A one-way instruction to the worker (stop), with no reply expected. */
++  const command = useCallback((type: string) => {
++    window.postMessage({ source: FROM_PAGE, type }, window.location.origin);
++  }, []);
++
++  const callApi = useCallback(async (payload: Record<string, unknown>) => {
++    const res = await fetch("/api/admin/parser/collect", {
++      method: "POST",
++      headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(payload),
++    });
++    const data = await res.json().catch(() => null);
++    if (!res.ok || !data?.ok) {
++      throw new Error(data?.error ?? `Request failed (${res.status})`);
++    }
++    return data as Record<string, unknown>;
++  }, []);
++
++  useEffect(() => {
++    async function onMessage(event: MessageEvent) {
++      // Only this page, in this tab, on this origin. `postMessage` is open to
++      // anything running here, and the bridge is a privileged one.
++      if (event.source !== window) return;
++      if (event.origin !== window.location.origin) return;
++
++      const msg = event.data as ExtMessage | null;
++      if (!msg || msg.source !== FROM_EXT || typeof msg.type !== "string") return;
++
++      const payload = msg.payload ?? {};
++
++      switch (msg.type) {
++        case "hello": {
++          setConnected(true);
++          reply(msg.id, true, { ready: true });
++          return;
++        }
++
++        case "plan": {
++          if (stoppedRef.current) return reply(msg.id, false, "Stopped by the admin");
++          setConnected(true);
++          setPhase("planning");
++          setNotice("");
++          const target = typeof payload.url === "string" ? payload.url : "";
++          setStore(target);
++          try {
++            const data = await callApi({ action: "plan", ...payload });
++            const urls = Array.isArray(data.urls) ? (data.urls as string[]) : [];
++            setPlanned((n) => n + urls.length);
++            setDelayMs(Number(data.delayMs) || 0);
++            setRobots((data.robots as RobotsInfo) ?? null);
++            if (urls.length) setPhase("collecting");
++            reply(msg.id, true, data);
++          } catch (err) {
++            const message = err instanceof Error ? err.message : "Plan failed";
++            setNotice(message);
++            setPhase("idle");
++            reply(msg.id, false, message);
++          }
++          return;
++        }
++
++        case "ingest": {
++          // Refusing here is what makes Stop immediate: a worker already
++          // mid-page cannot land one more product after the button.
++          if (stoppedRef.current) return reply(msg.id, false, "Stopped by the admin");
++          setConnected(true);
++          setPhase("collecting");
++          try {
++            const data = await callApi({ action: "ingest", ...payload });
++            const result = data.result as CrawlItemResult | undefined;
++            if (result) setResults((prev) => [...prev, result]);
++            reply(msg.id, true, data);
++          } catch (err) {
++            const message = err instanceof Error ? err.message : "Ingest failed";
++            const url = typeof payload.url === "string" ? payload.url : "";
++            setResults((prev) => [...prev, { url, status: "failed", reason: message }]);
++            reply(msg.id, false, message);
++          }
++          return;
++        }
++
++        case "progress": {
++          setConnected(true);
++          if (typeof payload.planned === "number") setPlanned(payload.planned);
++          if (typeof payload.delayMs === "number") setDelayMs(payload.delayMs);
++          if (typeof payload.store === "string" && payload.store) setStore(payload.store);
++          return;
++        }
++
++        case "error": {
++          // The worker stopping itself — two refusals in a row, most often.
++          setNotice(typeof payload.message === "string" ? payload.message : "The run stopped");
++          setPhase("halted");
++          return;
++        }
++
++        case "done": {
++          setPhase((p) => (p === "stopped" ? "stopped" : "done"));
++          return;
++        }
++      }
++    }
++
++    window.addEventListener("message", onMessage);
++    return () => window.removeEventListener("message", onMessage);
++  }, [callApi, reply]);
++
++  function stop() {
++    stoppedRef.current = true;
++    setPhase("stopped");
++    command("stop");
++  }
++
++  function reset() {
++    stoppedRef.current = false;
++    setResults([]);
++    setPlanned(0);
++    setNotice("");
++    setRobots(null);
++    setPhase("idle");
++  }
++
++  const done = results.length;
++  const imported = results.filter((r) => r.status === "imported").length;
++  const updated = results.filter((r) => r.status === "updated").length;
++  const failed = results.filter((r) => r.status === "failed" || r.status === "skipped").length;
++  const photos = results.reduce((n, r) => n + (r.imagesMirrored ?? 0), 0);
++  const running = phase === "planning" || phase === "collecting";
++  const pct = planned ? Math.min(100, Math.round((done / planned) * 100)) : 0;
++
++  return (
++    <div className="max-w-[1440px] mx-auto px-6 md:px-12 py-8 space-y-5">
++      <header>
++        <h1 className="font-display text-2xl font-light text-[var(--foreground)]">
++          Collect with the browser extension
++        </h1>
++        <p className="text-xs text-[var(--foreground-muted)] mt-1">
++          Keep this tab open. The extension opens store pages on your machine and this tab imports
++          what they contain, signed in as you.
++        </p>
++      </header>
++
++      {/* Connection */}
++      <div className={`${cardCls} px-5 py-4 flex items-center gap-3 flex-wrap`}>
++        <span
++          aria-hidden="true"
++          className={`w-2 h-2 rounded-full flex-shrink-0 ${
++            connected ? "bg-emerald-500" : "bg-[var(--foreground-subtle)]"
++          }`}
++        />
++        <p className="text-[11px] tracking-[0.12em] uppercase text-[var(--foreground)]">
++          {connected ? "Extension connected" : "Waiting for the extension"}
++        </p>
++        {store && (
++          <span className="text-[11px] text-[var(--foreground-muted)] truncate max-w-[420px]">
++            {store.replace(/^https?:\/\/(www\.)?/, "")}
++          </span>
++        )}
++        <div className="ml-auto flex items-center gap-2">
++          {running ? (
++            <button onClick={stop} className={btnGhost} aria-label="Stop the run">
++              Stop
++            </button>
++          ) : (
++            results.length > 0 && (
++              <button onClick={reset} className={btnGhost}>
++                Clear
++              </button>
++            )
++          )}
++        </div>
++      </div>
++
++      {!connected && (
++        <div className={`${cardCls} px-5 py-4 space-y-2`}>
++          <p className={labelCls}>Install it once</p>
++          <ol className="text-[12px] text-[var(--foreground-muted)] space-y-1 list-decimal pl-4">
++            <li>
++              Open <span className="text-[var(--foreground)]">chrome://extensions</span> and turn on
++              Developer mode.
++            </li>
++            <li>
++              Choose <span className="text-[var(--foreground)]">Load unpacked</span> and pick the{" "}
++              <span className="text-[var(--foreground)]">extension/</span> folder from the
++              repository.
++            </li>
++            <li>
++              Open the store you want, click the Goo icon, set how many products to collect and
++              press <span className="text-[var(--foreground)]">Collect this store</span>.
++            </li>
++            <li>Chrome will ask once for permission to read that store. Grant it.</li>
++          </ol>
++        </div>
++      )}
++
++      {notice && (
++        <div className="rounded-xl border border-amber-400/30 bg-amber-400/15 px-5 py-3 text-[12px] text-amber-500">
++          {notice}
++        </div>
++      )}
++
++      {robots && (
++        <div className={`${cardCls} px-5 py-3 flex items-center gap-4 flex-wrap text-[11px]`}>
++          <span className={labelCls + " mb-0"}>robots.txt</span>
++          <span className="text-[var(--foreground-muted)]">
++            {robots.parsed ? "read" : "none published"}
++          </span>
++          <span className="text-[var(--foreground-muted)]">
++            crawl-delay{" "}
++            <span className="text-[var(--foreground)] tabular-nums">
++              {robots.crawlDelayMs ? `${(robots.crawlDelayMs / 1000).toFixed(1)}s` : "not set"}
++            </span>
++          </span>
++          <span className="text-[var(--foreground-muted)]">
++            pacing at{" "}
++            <span className="text-[var(--foreground)] tabular-nums">
++              {(delayMs / 1000).toFixed(1)}s
++            </span>
++          </span>
++          {robots.blocked > 0 && (
++            <span className="text-amber-500 tabular-nums">{robots.blocked} disallowed, skipped</span>
++          )}
++        </div>
++      )}
++
++      {/* Progress + outcomes */}
++      {(running || results.length > 0) && (
++        <div className={`${cardCls} overflow-hidden`}>
++          <div className="px-5 py-3.5 border-b border-[var(--border)] space-y-2.5">
++            <div className="flex items-center gap-4 flex-wrap">
++              <p className="text-xs tracking-[0.12em] uppercase font-medium text-[var(--foreground)] inline-flex items-center gap-1.5">
++                {running && <Spinner />}
++                {phase === "planning" && "Reading the store…"}
++                {phase === "collecting" && `Collecting ${done}/${planned || "…"}`}
++                {phase === "done" && "Finished"}
++                {phase === "stopped" && "Stopped"}
++                {phase === "halted" && "Halted"}
++                {phase === "idle" && "Ready"}
++              </p>
++              <div className="ml-auto flex items-center gap-3 text-[11px] tabular-nums">
++                <span className="text-emerald-500">{imported} new</span>
++                <span className="text-[var(--foreground-muted)]">{updated} updated</span>
++                {failed > 0 && <span className="text-amber-500">{failed} skipped</span>}
++                {!running && results.length > 0 && (
++                  <a
++                    href="/goo-studio/products"
++                    className="underline hover:no-underline text-[var(--foreground)]"
++                  >
++                    View products →
++                  </a>
++                )}
++              </div>
++            </div>
++            <div className="h-1 rounded-full bg-[var(--fg-overlay-08)] overflow-hidden">
++              <div
++                className="h-full bg-[var(--foreground)] transition-[width] duration-300"
++                style={{ width: `${phase === "planning" ? 4 : pct}%` }}
++              />
++            </div>
++            {photos > 0 && (
++              <p className="text-[10px] text-[var(--foreground-subtle)]">
++                {photos} photo{photos === 1 ? "" : "s"} copied to our storage
++              </p>
++            )}
++          </div>
++
++          {results.length > 0 && (
++            <div className="max-h-[420px] overflow-y-auto divide-y divide-[var(--border)]">
++              {results.map((r, i) => (
++                <div
++                  key={`${r.url}-${i}`}
++                  className="px-5 py-2.5 flex items-center gap-3 text-[11px]"
++                >
++                  <StatusPill status={r.status} />
++                  <span className="text-[var(--foreground)] truncate flex-1 min-w-0">
++                    {r.name || r.url.replace(/^https?:\/\/(www\.)?/, "")}
++                  </span>
++                  {r.reason && (
++                    <span
++                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[220px] flex-shrink-0"
++                      title={r.reason}
++                    >
++                      {r.reason}
++                    </span>
++                  )}
++                  <a
++                    href={r.url}
++                    target="_blank"
++                    rel="noreferrer"
++                    aria-label="Open this page in a new tab"
++                    className="text-[var(--foreground-subtle)] hover:text-[var(--foreground)] flex-shrink-0"
++                  >
++                    ↗
++                  </a>
++                </div>
++              ))}
++            </div>
++          )}
++        </div>
++      )}
++
++      {!running && results.length === 0 && connected && (
++        <p className="px-4 py-12 text-center text-sm text-[var(--foreground-subtle)]">
++          Nothing collected yet. Start a run from the extension on a store page.
++        </p>
++      )}
++    </div>
++  );
++}
++
++function StatusPill({ status }: { status: CrawlItemResult["status"] }) {
++  const map: Record<CrawlItemResult["status"], { label: string; cls: string }> = {
++    imported: { label: "new", cls: "text-emerald-500 bg-emerald-500/10" },
++    updated: { label: "upd", cls: "text-[var(--foreground-muted)] bg-[var(--fg-overlay-05)]" },
++    skipped: { label: "skip", cls: "text-amber-500 bg-amber-500/10" },
++    failed: { label: "fail", cls: "text-red-400 bg-red-500/10" },
++  };
++  const { label, cls } = map[status];
++  return (
++    <span
++      className={`text-[9px] tracking-[0.1em] uppercase px-1.5 py-0.5 rounded flex-shrink-0 w-10 text-center ${cls}`}
++    >
++      {label}
++    </span>
++  );
++}
+diff --git a/src/lib/server/audit.ts b/src/lib/server/audit.ts
+index 3f2bb65..fbba421 100644
+--- a/src/lib/server/audit.ts
++++ b/src/lib/server/audit.ts
+@@ -15,6 +15,7 @@ export type AdminAction =
+   | "parser.config_updated"
+   | "parser.product_imported"
+   | "parser.crawl_batch"
++  | "parser.collect_ingest"
+   | "categories.updated"
+   | "products.recategorized"
+   | "products.recategorize_undone"
+diff --git a/src/lib/server/parser/plan-collection.ts b/src/lib/server/parser/plan-collection.ts
+new file mode 100644
+index 0000000..9004d57
+--- /dev/null
++++ b/src/lib/server/parser/plan-collection.ts
+@@ -0,0 +1,255 @@
++/**
++ * What to collect next, decided on the server, fetched by the browser.
++ *
++ * The split this module exists for: the extension has the *access* — the
++ * admin's address, their cookies, the anti-bot check their browser already
++ * passed — and the server has the *judgement*. Nothing here asks the network
++ * anything. It is handed the page and the sitemap documents the browser
++ * already pulled down, and it answers three questions:
++ *
++ *   which of these addresses are products worth opening,
++ *   how long to wait between opening them,
++ *   and which sitemap documents are worth pulling down next round.
++ *
++ * Being pure is what makes that honest. A planner that could fetch would
++ * eventually fetch — one "just robots.txt this once" — from a Vercel address
++ * the store has already refused, and the run would fail for a reason the admin
++ * could not see. It cannot fetch, so it cannot.
++ *
++ * Nothing here re-implements the parser's reading of a URL either:
++ * `extractProductLinks`, `looksLikeProductPath` and `isNonProductPath` decide
++ * what a product address looks like, and `sitemap.ts` decides how a sitemap
++ * document is read. This module only sequences them and applies robots.txt.
++ */
++import { extractProductLinks, looksLikeProductPath, isNonProductPath } from "./extract";
++import {
++  locations as sitemapLocations,
++  isIndex as isSitemapIndex,
++  namesProducts,
++  rankChild,
++  CANDIDATES as SITEMAP_CANDIDATES,
++} from "./sitemap";
++import { parseRobots, isUrlAllowed, type RobotsRules } from "./robots";
++
++/**
++ * The floor under the store's own Crawl-delay.
++ *
++ * A store asking for nothing does not mean "as fast as you like" — it means it
++ * never considered the question. One and a half seconds is slow enough that a
++ * run reads as a person browsing rather than as a script, which is the only
++ * thing standing between the admin's home address and a block list.
++ */
++export const MIN_DELAY_MS = 1_500;
++
++/** Sitemap documents worth naming for the next round in one answer. */
++const MAX_FETCH_NEXT = 8;
++
++/** Child sitemaps to take out of one index document. */
++const MAX_CHILDREN_PER_INDEX = 10;
++
++/** A sitemap document the browser has already fetched. */
++export interface FetchedSitemap {
++  /** The document's own address — its name is evidence about what is inside. */
++  url: string;
++  /** Its body, as text. Gzip is the browser's problem, not ours. */
++  xml: string;
++}
++
++export interface CollectionPlanInput {
++  /** The address the admin pointed at: a category, a brand page, a whole store. */
++  startUrl: string;
++  /** That page's rendered markup, if the browser has opened it. */
++  html?: string;
++  /** The body of the store's robots.txt, if the browser has fetched it. */
++  robotsTxt?: string;
++  /** Sitemap documents fetched so far, this round and before. */
++  sitemaps?: FetchedSitemap[];
++  /** Addresses already planned or visited in earlier rounds. */
++  seen?: string[];
++  /** How many product addresses the admin asked for, in total. */
++  limit: number;
++}
++
++export interface CollectionPlan {
++  /** Product addresses to open, in order: deduped, same-host, robots-allowed. */
++  urls: string[];
++  /** The gap to leave between page loads, in milliseconds. */
++  delayMs: number;
++  /** Sitemap documents worth fetching before the next call. */
++  fetchNext: string[];
++  /** True when the address the admin pasted is itself a product page. */
++  isSingleProduct: boolean;
++  /** What robots.txt said, so the screen can show it rather than assert it. */
++  robots: {
++    /** False when there was no readable robots.txt — then nothing is forbidden. */
++    parsed: boolean;
++    /** The store's own Crawl-delay, before our floor is applied. */
++    crawlDelayMs: number | null;
++    /** Sitemaps robots.txt pointed at. */
++    sitemaps: string[];
++    /** Candidates dropped because robots.txt forbids them. */
++    blocked: number;
++  };
++  /** Addresses the sitemaps listed, product-shaped or not — a readable sitemap
++   *  that yields nothing is a different problem from one that is refused. */
++  locsSeen: number;
++  /** Sitemap documents read this call. */
++  sitemapsRead: number;
++}
++
++/** The store's host, without `www.`, or "" when the URL is unusable. */
++function hostOf(url: string): string {
++  try {
++    return new URL(url).hostname.replace(/^www\./, "");
++  } catch {
++    return "";
++  }
++}
++
++/** Strip the fragment: `/a#reviews` and `/a` are one page, and we open it once. */
++function canonical(url: string): string {
++  return url.split("#")[0];
++}
++
++/**
++ * Product addresses out of one sitemap document.
++ *
++ * The trust rule is `sitemap.ts`'s and is kept identical: a document the store
++ * named after its products is the store telling us what is inside, which beats
++ * our own reading of a URL's shape — so those are filtered only by the flat
++ * refusals, and everything else has to look like a product.
++ */
++function productsFromSitemap(doc: FetchedSitemap, host: string): string[] {
++  const trusted = namesProducts(doc.url);
++  const out: string[] = [];
++  for (const loc of sitemapLocations(doc.xml)) {
++    let path: string;
++    try {
++      const u = new URL(loc);
++      if (u.hostname.replace(/^www\./, "") !== host) continue;
++      path = u.pathname;
++    } catch {
++      continue;
++    }
++    if (trusted ? isNonProductPath(path) : !looksLikeProductPath(path)) continue;
++    out.push(canonical(loc));
++  }
++  return out;
++}
++
++/** Child sitemaps worth opening out of an index, best first. */
++function childrenFromIndex(doc: FetchedSitemap, host: string): string[] {
++  return sitemapLocations(doc.xml)
++    .filter((u) => hostOf(u) === host)
++    .map((u) => ({ u, rank: rankChild(u) }))
++    .filter((c) => c.rank < 2)
++    .sort((a, b) => a.rank - b.rank)
++    .slice(0, MAX_CHILDREN_PER_INDEX)
++    .map((c) => c.u);
++}
++
++/**
++ * Turn what the browser has fetched into what it should open next.
++ *
++ * Order is deliberate. Sitemap addresses come before addresses scraped out of
++ * the page, because a sitemap is the shop listing its own catalogue for
++ * machines to read, while an anchor on a category page is our inference — and
++ * when the two disagree the shop is right.
++ */
++export function planCollection(input: CollectionPlanInput): CollectionPlan {
++  const host = hostOf(input.startUrl);
++  const rules: RobotsRules = parseRobots(input.robotsTxt ?? "");
++  const limit = Math.max(1, Math.min(Number(input.limit) || 1, 2_000));
++
++  const docs = input.sitemaps ?? [];
++  const seen = new Set((input.seen ?? []).map(canonical));
++  const read = new Set(docs.map((d) => d.url));
++
++  const candidates: string[] = [];
++  const fetchNext: string[] = [];
++  let locsSeen = 0;
++
++  // ── Sitemaps the browser already pulled down ───────────────────────────────
++  for (const doc of docs) {
++    if (!/<loc>/i.test(doc.xml)) continue;
++    if (isSitemapIndex(doc.xml)) {
++      for (const child of childrenFromIndex(doc, host)) {
++        if (!read.has(child) && !fetchNext.includes(child)) fetchNext.push(child);
++      }
++      continue;
++    }
++    locsSeen += sitemapLocations(doc.xml).length;
++    candidates.push(...productsFromSitemap(doc, host));
++  }
++
++  // ── The page the admin pointed at ──────────────────────────────────────────
++  // Its own address counts as a candidate when it is itself a product: pasting
++  // a single piece is a legitimate one-item run, not a failed crawl.
++  const isSingleProduct = (() => {
++    try {
++      return looksLikeProductPath(new URL(input.startUrl).pathname);
++    } catch {
++      return false;
++    }
++  })();
++  if (isSingleProduct) candidates.unshift(canonical(input.startUrl));
++  if (input.html) candidates.push(...extractProductLinks(input.html, input.startUrl, limit));
++
++  // ── Sitemaps robots.txt named, for the round after this one ────────────────
++  for (const sm of rules.sitemaps) {
++    if (hostOf(sm) !== host) continue; // an index can name anything; only ours counts
++    if (!read.has(sm) && !fetchNext.includes(sm)) fetchNext.push(sm);
++  }
++
++  // Nothing read yet and robots.txt named nothing: fall back to the conventional
++  // locations. These are `sitemap.ts`'s list rather than a second copy of it —
++  // the browser does the fetching now, but which names are worth trying is the
++  // parser's knowledge and stays in one place. A wrong guess is one 404.
++  if (!docs.length) {
++    try {
++      const origin = new URL(input.startUrl).origin;
++      for (const path of SITEMAP_CANDIDATES) {
++        const guess = `${origin}${path}`;
++        if (!read.has(guess) && !fetchNext.includes(guess)) fetchNext.push(guess);
++      }
++    } catch {
++      /* an unusable start URL yields no guesses */
++    }
++  }
++
++  // ── Filter, in the order the reasons matter ────────────────────────────────
++  const urls: string[] = [];
++  const taken = new Set<string>();
++  let blocked = 0;
++
++  for (const raw of candidates) {
++    if (urls.length >= limit) break;
++    const url = canonical(raw);
++    if (taken.has(url) || seen.has(url)) continue;
++    if (hostOf(url) !== host) continue;
++    // robots.txt last, so that what it refuses is counted rather than merely
++    // absent — an admin looking at "14 of 60 blocked by robots.txt" knows why
++    // a run came back small, and "46 products" alone tells them nothing.
++    if (!isUrlAllowed(rules, url)) {
++      blocked++;
++      continue;
++    }
++    taken.add(url);
++    urls.push(url);
++  }
++
++  return {
++    urls,
++    delayMs: Math.max(rules.crawlDelayMs ?? 0, MIN_DELAY_MS),
++    fetchNext: fetchNext.slice(0, MAX_FETCH_NEXT),
++    isSingleProduct,
++    robots: {
++      parsed: rules.parsed,
++      crawlDelayMs: rules.crawlDelayMs,
++      sitemaps: rules.sitemaps,
++      blocked,
++    },
++    locsSeen,
++    sitemapsRead: docs.length,
++  };
++}
+diff --git a/src/lib/server/parser/robots.ts b/src/lib/server/parser/robots.ts
+new file mode 100644
+index 0000000..7ce95f3
+--- /dev/null
++++ b/src/lib/server/parser/robots.ts
+@@ -0,0 +1,215 @@
++/**
++ * robots.txt — what the store says we may read, and how fast.
++ *
++ * This matters more here than in the rest of the parser, because collection no
++ * longer runs on our server. It runs in the admin's own browser, on their home
++ * connection, under their address. A crawl that ignores robots.txt from a
++ * Vercel function costs us an IP nobody will miss; the same crawl from a
++ * kitchen in Kyiv costs the admin their own address, on every store at once,
++ * and there is no rotating it back.
++ *
++ * So the rules are read and obeyed rather than logged. Three things come out of
++ * the file:
++ *
++ *   Disallow/Allow — which paths are ours to open, by the longest-match rule
++ *   Crawl-delay    — the pace the store itself asked for
++ *   Sitemap        — where the catalogue is listed, which saves walking the HTML
++ *
++ * Two deliberate narrowings:
++ *
++ * **Only the `*` group is read.** We are not Googlebot and will not pretend to
++ * be: taking the Googlebot group would be claiming permissions granted to a
++ * crawler that sends traffic back, which we do not. Where a store writes a
++ * kinder rule for search engines and a stricter one for everyone, everyone is
++ * us.
++ *
++ * **Parsing is pure.** `parseRobots` takes text and returns rules; it asks the
++ * network nothing. The fetch happens in the admin's browser, which is the whole
++ * point of the extension — their IP, their cookies, their already-passed
++ * challenge. The server only ever sees the text that came back.
++ */
++
++/**
++ * The rules from one robots.txt, already reduced to the `*` group.
++ *
++ * Patterns are kept as written rather than pre-compiled, because the longest
++ * match is decided on the *pattern's* length and keeping the source string is
++ * what makes that legible when a decision has to be explained.
++ */
++export interface RobotsRules {
++  /** `Allow:` patterns from the `*` group, in file order. */
++  allow: string[];
++  /** `Disallow:` patterns from the `*` group, in file order. Empty values dropped. */
++  disallow: string[];
++  /** `Crawl-delay:` in milliseconds, or null when the store did not ask for one. */
++  crawlDelayMs: number | null;
++  /** Every `Sitemap:` line in the file — these are global, not per-group. */
++  sitemaps: string[];
++  /** False when the text could not be read as robots.txt at all (404 page, HTML). */
++  parsed: boolean;
++}
++
++/** What an absent or unreadable robots.txt means: nothing is forbidden. */
++export const PERMISSIVE: RobotsRules = {
++  allow: [],
++  disallow: [],
++  crawlDelayMs: null,
++  sitemaps: [],
++  parsed: false,
++};
++
++/**
++ * A robots.txt path pattern as a regex anchored at the start of the path.
++ *
++ * The format is not a glob and not a regex: `*` stands for any run of
++ * characters, a trailing `$` anchors the end, and every other character is
++ * literal — including the `.` and `?` that turn up in `/*.php?` style rules and
++ * would otherwise quietly match far more than the store wrote.
++ */
++function patternToRegex(pattern: string): RegExp {
++  let out = "";
++  for (let i = 0; i < pattern.length; i++) {
++    const ch = pattern[i];
++    if (ch === "*") {
++      out += ".*";
++      continue;
++    }
++    // `$` is an end-anchor only as the final character; anywhere else it is a
++    // literal dollar sign, which is how some stores write query-string rules.
++    if (ch === "$" && i === pattern.length - 1) {
++      out += "$";
++      continue;
++    }
++    out += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++  }
++  return new RegExp(`^${out}`);
++}
++
++/** The longest pattern in `patterns` that matches `path`, or -1 for none. */
++function longestMatch(patterns: string[], path: string): number {
++  let best = -1;
++  for (const p of patterns) {
++    if (p.length <= best) continue; // cannot win — skip the regex entirely
++    if (patternToRegex(p).test(path)) best = p.length;
++  }
++  return best;
++}
++
++/**
++ * Read robots.txt into rules, taking the `*` group only.
++ *
++ * Group structure is the fiddly part of the format: a run of consecutive
++ * `User-agent:` lines shares the rules that follow it, and the group ends at
++ * the next `User-agent:` after at least one rule. That is why the agent list
++ * accumulates and is only cleared once a rule has been seen — a file opening
++ * with `User-agent: Googlebot` / `User-agent: *` gives *both* agents the same
++ * block, and reading it any other way loses the block that applies to us.
++ *
++ * `Sitemap:` is deliberately handled outside the group machinery: the standard
++ * defines it as a global directive, and stores routinely put it at the top of
++ * the file, above any `User-agent:` line at all.
++ */
++export function parseRobots(text: string): RobotsRules {
++  const rules: RobotsRules = {
++    allow: [],
++    disallow: [],
++    crawlDelayMs: null,
++    sitemaps: [],
++    parsed: false,
++  };
++  if (typeof text !== "string" || !text.trim()) return rules;
++
++  // A store that answers /robots.txt with its 404 page hands us HTML. Treating
++  // that as "no rules" is right, but treating it as a *parsed* empty file is
++  // not — the caller shows the difference to the admin.
++  if (/^\s*</.test(text)) return rules;
++
++  /** Agents naming the group we are currently inside. */
++  let agents: string[] = [];
++  /** Whether a rule has been seen since the last `User-agent:` run began. */
++  let inRules = false;
++  /** Whether the group we are inside is the one addressed to everyone. */
++  let starGroup = false;
++  let sawDirective = false;
++
++  for (const rawLine of text.split(/\r?\n/)) {
++    const line = rawLine.split("#")[0].trim();
++    if (!line) continue;
++
++    const sep = line.indexOf(":");
++    if (sep < 0) continue;
++    const field = line.slice(0, sep).trim().toLowerCase();
++    const value = line.slice(sep + 1).trim();
++
++    if (field === "sitemap") {
++      sawDirective = true;
++      if (value) rules.sitemaps.push(value);
++      continue;
++    }
++
++    if (field === "user-agent") {
++      sawDirective = true;
++      // A `User-agent:` after rules starts a fresh group.
++      if (inRules) {
++        agents = [];
++        inRules = false;
++      }
++      agents.push(value.toLowerCase());
++      starGroup = agents.includes("*");
++      continue;
++    }
++
++    if (field !== "allow" && field !== "disallow" && field !== "crawl-delay") continue;
++
++    sawDirective = true;
++    inRules = true;
++    if (!starGroup) continue;
++
++    if (field === "crawl-delay") {
++      // Seconds in the file, and fractional values are legal. A nonsense value
++      // is ignored rather than guessed at.
++      const secs = Number(value.replace(",", "."));
++      if (Number.isFinite(secs) && secs > 0) {
++        rules.crawlDelayMs = Math.round(secs * 1000);
++      }
++      continue;
++    }
++
++    // An empty `Disallow:` is the documented way to say "nothing is forbidden",
++    // so it must not become a pattern that matches every path. An empty
++    // `Allow:` carries no meaning at all.
++    if (!value) continue;
++    if (field === "allow") rules.allow.push(value);
++    else rules.disallow.push(value);
++  }
++
++  rules.parsed = sawDirective;
++  return rules;
++}
++
++/**
++ * May we open this path?
++ *
++ * The longest-match rule, as the standard defines it: whichever of the Allow
++ * and Disallow patterns matches the most characters wins, and a tie goes to
++ * Allow. That ordering is not a detail — `Disallow: /` with `Allow: /products/`
++ * is the ordinary shape of a store that wants its catalogue indexed and nothing
++ * else, and reading it the other way round would refuse the one thing we came
++ * for.
++ */
++export function isPathAllowed(rules: RobotsRules, pathname: string): boolean {
++  const path = pathname || "/";
++  const deny = longestMatch(rules.disallow, path);
++  if (deny < 0) return true;
++  return longestMatch(rules.allow, path) >= deny;
++}
++
++/** May we open this absolute URL? Malformed URLs are refused, not assumed safe. */
++export function isUrlAllowed(rules: RobotsRules, url: string): boolean {
++  try {
++    const u = new URL(url);
++    return isPathAllowed(rules, `${u.pathname}${u.search}`);
++  } catch {
++    return false;
++  }
++}
+diff --git a/src/lib/server/parser/sitemap.ts b/src/lib/server/parser/sitemap.ts
+index 61b81ca..c236f7e 100644
+--- a/src/lib/server/parser/sitemap.ts
++++ b/src/lib/server/parser/sitemap.ts
+@@ -20,6 +20,7 @@
+ import { gunzipSync } from "node:zlib";
+ import { fetchHtml, fetchBinary } from "./fetch";
+ import { looksLikeProductPath, isNonProductPath } from "./extract";
++import { parseRobots } from "./robots";
+ import type { ParserFetchSettings } from "./types";
+ 
+ /**
+@@ -30,7 +31,7 @@ import type { ParserFetchSettings } from "./types";
+  * whole thing one directory down. Each is one request that only happens when
+  * the names before it gave nothing.
+  */
+-const CANDIDATES = [
++export const CANDIDATES = [
+   "/sitemap.xml",
+   "/sitemap_index.xml",
+   "/sitemap_products_1.xml",
+@@ -62,7 +63,7 @@ const MAX_DOCUMENTS = 12;
+  */
+ const MAX_REQUESTS = 18;
+ 
+-function locations(xml: string): string[] {
++export function locations(xml: string): string[] {
+   const out: string[] = [];
+   // `<loc>` holds a bare URL or a CDATA section; WordPress and Magento both
+   // ship the latter, and reading only the bare form made their sitemaps look
+@@ -84,7 +85,7 @@ function textFromBytes(bytes: Uint8Array): string | null {
+ }
+ 
+ /** An index lists sitemaps; a sitemap lists pages. They need different handling. */
+-function isIndex(xml: string): boolean {
++export function isIndex(xml: string): boolean {
+   return /<sitemapindex[\s>]/i.test(xml);
+ }
+ 
+@@ -101,7 +102,7 @@ interface Candidate {
+ }
+ 
+ /** Does this sitemap's own name say it lists products? */
+-function namesProducts(url: string): boolean {
++export function namesProducts(url: string): boolean {
+   return /product/i.test(url);
+ }
+ 
+@@ -109,7 +110,7 @@ function namesProducts(url: string): boolean {
+  * A child sitemap worth opening: the ones named after products first, and never
+  * the ones that certainly are not (blog posts, pages, collections).
+  */
+-function rankChild(url: string): number {
++export function rankChild(url: string): number {
+   const u = url.toLowerCase();
+   if (/product/.test(u)) return 0;
+   if (/(?:blog|article|page|collection|marketing)/.test(u)) return 2;
+@@ -140,12 +141,7 @@ async function fromRobots(
+ ): Promise<string[]> {
+   const txt = await getText(`${origin}/robots.txt`, settings, apiKey);
+   if (!txt) return [];
+-  const out: string[] = [];
+-  for (const line of txt.split(/\r?\n/)) {
+-    const m = line.match(/^\s*sitemap\s*:\s*(\S+)/i);
+-    if (m) out.push(m[1]);
+-  }
+-  return out;
++  return parseRobots(txt).sitemaps;
+ }
+ 
+ export interface SitemapOptions {

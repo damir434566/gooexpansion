@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Goo Collect</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Goo Collect</h1>
+      <p class="sub" id="store">Reading this tab…</p>
+    </header>
+
+    <section class="rows">
+      <label class="row" for="limit">
+        <span>Products to collect</span>
+        <input id="limit" type="number" min="1" max="2000" value="30" />
+      </label>
+
+      <label class="row" for="studio">
+        <span>Goo Studio</span>
+        <input id="studio" type="url" spellcheck="false" placeholder="https://www.goo-fashion.com" />
+      </label>
+    </section>
+
+    <div class="actions">
+      <button id="start" class="primary">Collect this store</button>
+      <button id="stop" class="ghost" hidden>Stop</button>
+    </div>
+
+    <section id="progress" class="progress" hidden>
+      <div class="bar"><div id="fill"></div></div>
+      <p class="counts">
+        <strong id="done">0</strong><span id="planned"></span>
+        <span class="ok" id="imported"></span>
+        <span class="warn" id="failed"></span>
+      </p>
+      <p class="pace" id="pace"></p>
+    </section>
+
+    <p id="note" class="note" hidden></p>
+
+    <p class="foot">
+      Pages open on your machine, at the pace the store asks for. robots.txt is obeyed.
+    </p>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,210 @@
+/**
+ * Popup styling.
+ *
+ * The site's token layer lives in the Next.js app and does not reach a
+ * chrome-extension:// page, so the popup defines its own — but it defines one
+ * rather than scattering colours through the rules, and it answers the system
+ * dark mode the same way the site does.
+ */
+
+:root {
+  --surface: #ffffff;
+  --background: #fafafa;
+  --foreground: #111111;
+  --foreground-muted: #5c5c5c;
+  --foreground-subtle: #8e8e8e;
+  --border: #e4e4e4;
+  --ok: #059669;
+  --warn: #b45309;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #161616;
+    --background: #1e1e1e;
+    --foreground: #f2f2f2;
+    --foreground-muted: #a8a8a8;
+    --foreground-subtle: #767676;
+    --border: #2e2e2e;
+    --ok: #34d399;
+    --warn: #fbbf24;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 320px;
+  margin: 0;
+  padding: 16px;
+  background: var(--surface);
+  color: var(--foreground);
+  font:
+    13px/1.45 ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}
+
+h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.sub {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--foreground-muted);
+  overflow-wrap: anywhere;
+}
+
+.rows {
+  margin: 14px 0;
+  display: grid;
+  gap: 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--foreground-subtle);
+}
+
+input {
+  width: 150px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--foreground);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+}
+
+input:focus {
+  border-color: var(--foreground);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  flex: 1;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.primary {
+  background: var(--foreground);
+  color: var(--surface);
+}
+
+.primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.ghost {
+  background: transparent;
+  color: var(--foreground-muted);
+  border-color: var(--border);
+}
+
+.ghost:hover:not(:disabled) {
+  color: var(--foreground);
+  border-color: var(--foreground);
+}
+
+.progress {
+  margin-top: 14px;
+}
+
+.bar {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.bar > div {
+  height: 100%;
+  width: 0;
+  background: var(--foreground);
+  transition: width 0.3s;
+}
+
+.counts {
+  margin: 8px 0 0;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--foreground-muted);
+}
+
+.counts strong {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.warn {
+  color: var(--warn);
+}
+
+.pace,
+.note,
+.foot {
+  font-size: 10px;
+  color: var(--foreground-subtle);
+}
+
+.pace {
+  margin: 4px 0 0;
+}
+
+.note {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--warn);
+}
+
+.foot {
+  margin: 14px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}

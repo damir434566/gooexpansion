@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Goo Collect",
+  "version": "1.0.0",
+  "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "webRequest"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Goo Collect",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/goo-studio/parser/collect*",
+        "http://127.0.0.1/goo-studio/parser/collect*",
+        "https://goo-fashion.com/goo-studio/parser/collect*",
+        "https://www.goo-fashion.com/goo-studio/parser/collect*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
