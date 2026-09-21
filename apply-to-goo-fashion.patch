@@ -10,6 +10,96 @@ index 021ad7d..cfe21bc 100644
  
  ---
  
+diff --git a/extension/README.md b/extension/README.md
+new file mode 100644
+index 0000000..5904719
+--- /dev/null
++++ b/extension/README.md
+@@ -0,0 +1,84 @@
++# Goo Collect — расширение Chrome
++
++Собирает каталог магазина в Goo Fashion, открывая страницы в твоём браузере:
++твой адрес, твои куки, уже пройденная проверка. Сервер решает, что собирать;
++расширение — только руки.
++
++---
++
++## Установка (один раз)
++
++1. Скачай папку `extension/` на компьютер и положи туда, откуда **не удалишь**:
++   Chrome читает файлы отсюда при каждом запуске. Например `Документы/goo-collect`.
++2. Открой `chrome://extensions`
++3. Включи **«Режим разработчика»** — тумблер в правом верхнем углу.
++4. Нажми **«Загрузить распакованное»** и выбери эту папку.
++5. В панели появится тёмная иконка со стрелкой. Нажми на пазл справа от адресной
++   строки и приколи её булавкой, чтобы была под рукой.
++
++Всё. Обновлять не нужно, пока не выйдет новая версия.
++
++> **Важно:** страница-приёмник `/goo-studio/parser/collect` должна существовать
++> на сайте. Если её ещё не выкатили, расширение работать не будет — ему не с кем
++> разговаривать.
++
++---
++
++## Как собрать магазин
++
++1. Зайди на Goo Studio и залогинься как админ.
++2. В другой вкладке открой магазин — **страницу категории** (список товаров), а
++   не главную.
++3. Нажми иконку расширения, впиши количество товаров, нажми **«Collect this store»**.
++4. Chrome один раз спросит про доступ к этому магазину — разреши. Спросит только
++   про него и только в первый раз.
++
++Дальше можно заниматься своими делами. Откроется вкладка приёмника со счётчиком:
++сколько собрано, что новое, что обновилось, что пропущено и почему.
++
++Фоновые вкладки будут мелькать внизу — так и надо, они закрываются сами.
++
++---
++
++## Настройки в popup
++
++| Поле | Что это |
++|---|---|
++| **Products to collect** | Сколько товаров собрать за прогон. |
++| **Goo Studio** | Адрес сайта. По умолчанию `https://www.goo-fashion.com`. Для локальной разработки — `http://localhost:3000`. |
++
++---
++
++## Почему так медленно
++
++Полторы–две секунды на товар, плюс десять секунд передышки каждые двадцать
++страниц. Это не тормоза, а единственное, что отделяет твой домашний IP от
++бан-листа магазина. Серверный адрес можно поменять, домашний — нет.
++
++Темп берётся из `Crawl-delay` в robots.txt магазина, но никогда не быстрее
++полутора секунд. Запреты `Disallow` соблюдаются.
++
++---
++
++## Если что-то пошло не так
++
++| Что видишь | Что делать |
++|---|---|
++| **«Waiting for the extension»** и ничего не происходит | Перезагрузи вкладку приёмника (F5). Так бывает, если она была открыта раньше, чем поставили расширение. |
++| **«The store refused two pages in a row»** | Магазин отбивается. Прогон остановился сам, чтобы не поймать бан. Попробуй через час. |
++| **«Could not reach …/goo-studio/parser/collect»** | Приёмник не выкачен на сайт, либо в popup неверный адрес Goo Studio, либо ты не залогинен админом. |
++| Надо остановить | Кнопка **Stop** в popup или на вкладке приёмника. Срабатывает мгновенно. |
++
++Во время прогона вкладку приёмника **не закрывай** и не давай компьютеру уснуть.
++Сворачивать браузер и работать в других вкладках можно.
++
++---
++
++## Что расширение может и чего не может
++
++Доступа к магазинам при установке у него **нет вообще** — ни одного. Каждый
++магазин ты разрешаешь сам, по клику, и только тот, который открыт.
++
++Ключей и токенов внутри тоже нет. Расширение не умеет обращаться к нашему API:
++оно просит об этом открытую вкладку приёмника, а та уже ходит твоей обычной
++сессией. Поэтому расширение бесполезно для того, кто не залогинен админом.
 diff --git a/extension/background.js b/extension/background.js
 new file mode 100644
 index 0000000..76777e4
@@ -645,12 +735,87 @@ index 0000000..584a9b1
 +  chrome.runtime.sendMessage({ type: "bridge-ready" }).catch(() => {});
 +  ask("hello", {});
 +}
+diff --git a/extension/icons/icon-128.png b/extension/icons/icon-128.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..07dd7b953b0dabf94b59983ca46babb72a43cee4
+GIT binary patch
+literal 1056
+zcmeAS@N?(olHy`uVBq!ia0vp^4Is?H1|$#LC7xzrV1DlD;uunK>+RjM7dIIQ94Pck
+zxYQ`>!P>`K@gPrl+JTd+RSPx<yloKDIk;PVzPa%SK6d*iffMik@mrtoop?9?kebW<
+zGnUg`I}TZv7o59#ZfAG#yJvH%g_<8-d$umGIP%Dft5d|aZ}V3#uekW=-m@J(tPcO)
+z=O5*W&uLq6OG<}nLDCj=W9^V)rW;0&CeIbzwvlm;N6DwcE=GlX>mVT=Wxa)a9Wy>k
+zPtwwxCBUM1bos@}cNL!PXG(Y?J%iJZ@xjdXtJNh~8uIR+c=h0})%=#1J-HkVW|bxR
+zVzn#*6IH$j?qxnO>HLFB6E5c0h&{NOzeoIq{4)i^ZHwM8ukh^Hx#BlN#=ji1=E(Af
+z;HSRp!d5@e+b%8oPpV5$B(nNZ$Wz{5Om=epfe+U&lsMq{^|L&~{of2%^Zzn@_^Z3{
+z)mM9leec;*W?9EF)bIlXl*&Lt@b}+;l{Rwj$A8wy@g9gz?mGYIJtqTm-JO-0vo0R>
+zR{gVg$*<(#lXgs76g+nRIQgC7lHiiK8bRL$AuK{&`e~vHyp2;Hbw{yzIV!CD@#q_4
+zkh{X#A4=v;L9PlLe<YPN1v@Kj{jq3!Q?R4L&L5BNv+DFZRDBHH!xP2T*!F03rL=`P
+zlkU;*uT~X$EVH`Szq4`3VY$_{{*!};4vSRx`fn~5u5fG-i~l-t!%Be+y?wuo8<Pby
+z^!HUUBnw1n?BitEudpGg#+ac^VME9tSB4z3*$e7#?uuKV?k=$U$G<qIcQ>EA**3iX
+zDrLg^d-Ip#b1a7L`}R+tQ2lKuqeBYAdVwSJzA;XaXs~OtocEK#L%^Xup|6dfp_6Hb
+zHr{Y%Vc=j8fT=jc`+$vMGee%-0ak`I#u%FhDIj%4?f@f@lCfz}I-1WG*~7X|GNgjR
+z?p@eEZudX@@t@Z)2TT?y4*bqIMde7$lv;+(@7V>qkF8x@E$`r(bjIZ?mxG^i#<HKM
+z;~5jg49tGTGcFJ}`1IyKOM>^JE62=O8v2D#28k~Z-&)6>@NIjG%bo3Y?_d4lY<Mps
+zJxSeeR^4@b76xzURPTN93<km)vOk>}N;qC{rr3V|JmFRwQ$nf2p4;=e9Jc!(NDG`b
+z+vfJduYXt_>Tl0rGwgL+|7&YsGDFE;$D=(PZgi}7n*Vhp!<WT5{xc1<kI23)EuWFx
+zHABe3zU$kT!n<Wl&Is)9{op<Ou=DK8C$qn@yUtm)Mx)s49w=-)UHx3vIVCg!0A}){
+AmjD0&
+
+literal 0
+HcmV?d00001
+
+diff --git a/extension/icons/icon-16.png b/extension/icons/icon-16.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..88fd2cedece0a8397bbd0916900a3f03260840fa
+GIT binary patch
+literal 207
+zcmeAS@N?(olHy`uVBq!ia0vp^0wB!61|;P_|4#%`(>z@qLn?0Fo$SqfK!K-i^~3T8
+zCYc2dheH%OSS@BUiWIyIGUB+oIPrFFyM5-bAGg$W85J0~8$=oWv+icE5dG|}yQK8n
+zz3|M*6Rs_s614Q`AHjs4hZ4%mr&u}UeDuu8VtOv~e2z7cZ5y@FamyoNg_eNhvWm$Y
+zkEo<e6<iTn@V0ijwu60YcCP(>YtM5Zr`X$HUS58W;pDVF7pY@!vVksS@O1TaS?83{
+F1OO~PP;meN
+
+literal 0
+HcmV?d00001
+
+diff --git a/extension/icons/icon-32.png b/extension/icons/icon-32.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6945c4e9820650e6e00d2f7998d19137a284e9e
+GIT binary patch
+literal 280
+zcmV+z0q6dSP)<h;3K|Lk000e1NJLTq001BW001Be1^@s6b9#F80002rNkl<Zc-rlk
+zK@Nl<3`Khc(gSf8w%o!M7vUn@fTOr);|vo_0A+-Zij%PTaiQfup)@TZB1B^E=Y)tB
+z5tox?!`dwNjLiii&KDTxnuAvYAZ{?uB~}1-)1U9{1cPucOD9c0O*o}gB5Gm+mEJj*
+zh`P=I7ytv{KL9xAo5GU=<nMjVsXL&x-k6r;zrExLY9Lz7NjdNhqSc(7gnJMa^Pg@(
+z3_&$N1Te;YB&94ul+1n18czm@uNb9YsHqVH09wi|RgVX-wT&lLM@?z>w!Hgb(tR|0
+e#BkbeJbwZCR4|EG`Zfjt0000<MNUMnLSTZIUT{YM
+
+literal 0
+HcmV?d00001
+
+diff --git a/extension/icons/icon-48.png b/extension/icons/icon-48.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba1b09e263650f8ef6ec4ee28a5603f1269abda4
+GIT binary patch
+literal 366
+zcmeAS@N?(olHy`uVBq!ia0vp^1|ZDA1|-9oezr3(Fq(S0IEGZ*dOPbpZ>s{&v6%~n
+z4Vr{4nzMH_3Rje>$ecK`TRhIg<fC9k(|S?wsvmq3!TaUwZyj00;NW_N;Q$K*8$*ub
+z%)8FQpCzkSaL@k7x_CW<6+=XP#=i@@s(F}7^v&L_{>=F0bh_OZp<g@+5;N`RbC#w^
+zpAPB0by+05p)=+8na?sJN6msnj5p^-2Z-DkVqg@2Aq_?Yo@UwOhASi--qeb}E^OGA
+z`*xE~;O3P@hB0fDqF=;!)Sq2Er*XG{#IuWhg?cR0DzE5F;cCp3v+a#@Oqi{{lG%`h
+z>vKx$nf3)n^I0!^|9f4Y&D^ii!*IUzZ?T5>#Jd)$szGW0{NA`T%<Ir)U<%-B2x2<G
+zd*F^{%9K+YDa*Rp*nf)&|5l3^%?<n3`%Y_}R7l~?=DVe{`T4*6YdSQSQ3V)|44$rj
+JF6*2UngG$hi!=ZL
+
+literal 0
+HcmV?d00001
+
 diff --git a/extension/manifest.json b/extension/manifest.json
 new file mode 100644
-index 0000000..87d34be
+index 0000000..4623d9c
 --- /dev/null
 +++ b/extension/manifest.json
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,51 @@
 +{
 +  "manifest_version": 3,
 +  "name": "Goo Collect",
@@ -673,7 +838,13 @@ index 0000000..87d34be
 +  },
 +  "action": {
 +    "default_title": "Goo Collect",
-+    "default_popup": "popup.html"
++    "default_popup": "popup.html",
++    "default_icon": {
++      "16": "icons/icon-16.png",
++      "32": "icons/icon-32.png",
++      "48": "icons/icon-48.png",
++      "128": "icons/icon-128.png"
++    }
 +  },
 +  "content_scripts": [
 +    {
@@ -688,7 +859,13 @@ index 0000000..87d34be
 +      ],
 +      "run_at": "document_idle"
 +    }
-+  ]
++  ],
++  "icons": {
++    "16": "icons/icon-16.png",
++    "32": "icons/icon-32.png",
++    "48": "icons/icon-48.png",
++    "128": "icons/icon-128.png"
++  }
 +}
 diff --git a/extension/popup.css b/extension/popup.css
 new file mode 100644
