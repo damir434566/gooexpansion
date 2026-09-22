@@ -11,7 +11,15 @@
  */
 import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
 import { harvestGalleryImages } from "./gallery";
-import { canonicalColor, extractCurrencyFromDisplay, pickSizes } from "@/lib/server/product-fields";
+import {
+  canonicalColor,
+  extractCurrencyFromDisplay,
+  pickSizes,
+  specValue,
+  compositionFromText,
+  MATERIAL_KEYS,
+  COLOR_KEYS,
+} from "@/lib/server/product-fields";
 
 // ── HTML entity decoding (the handful that show up in product copy) ───────────
 
@@ -575,6 +583,16 @@ export function extractProduct(
     ? sizeRaw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean)
     : (jsonld.sizes?.length ? jsonld.sizes : pickSizes(evidence?.sizes));
 
+  // Description: the store's own structured copy, then what the page renders —
+  // which on a store that hides its description in an accordion is the only
+  // full version there is, `og:description` being a truncated marketing line.
+  const description = pick(
+    ruleVal("description"),
+    jsonld.description,
+    evidence?.descriptionText,
+    meta.description,
+  );
+
   const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
 
   // Structured data routinely advertises a single photo for a page that shows
@@ -617,20 +635,38 @@ export function extractProduct(
     // Colour is worth chasing through every layer: it is what the swatch, the
     // colour filter and half the stylist's vocabulary are built from, and a
     // page that says "Black" anywhere means it.
-    // Colour, in order of how directly the page said it. The rendered swatch
-    // comes before the markup scan because it is what the shopper is looking
-    // at: `colorFromHtml` mines attributes and inline JSON, which on a page
-    // with several colourways can name any of them.
+    // Colour, in order of how directly the page said it. The rendered swatch and
+    // the spec row come before the markup scan because they are what the shopper
+    // is looking at: `colorFromHtml` mines attributes and inline JSON, which on
+    // a page with several colourways can name any of them.
     color: pick(
       ruleVal("color"),
       jsonld.color,
       meta.color,
       micro.color,
       evidence?.colorText,
+      specValue(evidence?.specs, COLOR_KEYS),
       colorFromHtml(html),
     ),
-    material: pick(ruleVal("material"), jsonld.material, micro.material),
-    description: pick(ruleVal("description"), jsonld.description, meta.description),
+    // Material, which until now came from JSON-LD `material` and nowhere else —
+    // a field few stores fill, while the page prints "80% wool, 20% polyamide"
+    // two lines under the price. Now: the spec table the extension read, then
+    // the composition out of the description's own text.
+    material: pick(
+      ruleVal("material"),
+      jsonld.material,
+      micro.material,
+      // A composition read out of the spec row beats the row itself. The row is
+      // whatever the page printed on that line, and a store that renders its
+      // whole spec block as one run of text hands over "95% cotton, 5% elastane
+      // Care: machine wash" — the blend is the field, the care instruction is
+      // the next row that never got its own line.
+      compositionFromText(specValue(evidence?.specs, MATERIAL_KEYS)),
+      specValue(evidence?.specs, MATERIAL_KEYS),
+      compositionFromText(evidence?.descriptionText ?? ""),
+      compositionFromText(description ?? ""),
+    ),
+    description,
     variantUrls: evidence?.variantUrls ?? [],
     strategies,
   };

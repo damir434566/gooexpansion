@@ -215,6 +215,8 @@ const server = http.createServer(async (req, res) => {
             sizes: Array.isArray(body.sizes) ? body.sizes : [],
             colorText: typeof body.colorText === "string" ? body.colorText : "",
             variantUrls: Array.isArray(body.variantUrls) ? body.variantUrls : [],
+            descriptionText: typeof body.descriptionText === "string" ? body.descriptionText : "",
+            specs: Array.isArray(body.specs) ? body.specs : [],
           },
         });
         const product = parsed.products[0];
@@ -242,6 +244,9 @@ const server = http.createServer(async (req, res) => {
           sizes: product.sizes,
           colors: product.colors,
           variantUrls: product.variantUrls,
+          material: product.material,
+          description: product.description,
+          specCount: Array.isArray(body.specs) ? body.specs.length : 0,
           candidates: Array.isArray(body.images) ? body.images.length : 0,
           sizeCandidates: Array.isArray(body.sizes) ? body.sizes.length : 0,
           priceText: typeof body.priceText === "string" ? body.priceText : "",

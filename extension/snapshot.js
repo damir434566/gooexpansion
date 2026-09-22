@@ -72,6 +72,15 @@
   /** Most sibling colourway addresses one page can contribute. */
   const MAX_VARIANTS = 20;
 
+  /** Most spec rows one page can contribute. */
+  const MAX_SPECS = 40;
+
+  /** Longest description kept. The importer stores five thousand characters. */
+  const MAX_DESCRIPTION = 5000;
+
+  /** Shortest run of text that could be a product description rather than a label. */
+  const MIN_DESCRIPTION = 80;
+
   /**
    * Image URLs as they appear in a JSON payload, escaped slashes and all.
    *
@@ -384,6 +393,141 @@
   }
 
   /**
+   * An element's text, whether or not it is on screen.
+   *
+   * `innerText` is what a reader sees, which is the right answer for a price and
+   * the wrong one for a collapsed accordion: a store that hides its description
+   * behind "Details ⌄" has the text in the DOM and `innerText` returns nothing
+   * for it. `textContent` does not care about rendering, so it is the fallback —
+   * and only the fallback, because it also returns the text of things a reader
+   * would never see.
+   */
+  function textOf(el) {
+    if (!el) return "";
+    const rendered = (el.innerText || "").trim();
+    return rendered || (el.textContent || "").trim();
+  }
+
+  const squash = (value) => String(value || "").replace(/\s+/g, " ").trim();
+
+  /**
+   * The product's description, as the page renders it.
+   *
+   * Two rules, both learned from the shape of a retail page. `itemprop` wins
+   * outright — a store that marks its description has told us which block it is.
+   * Otherwise the SHORTEST candidate over the length of a label wins, not the
+   * longest: these containers nest, and the outer one holds the description plus
+   * delivery, returns and the reviews teaser. The innermost block that is long
+   * enough to be prose is the description itself.
+   */
+  function collectDescription() {
+    const marked = document.querySelector('[itemprop="description"]');
+    const markedText = squash(textOf(marked));
+    if (markedText.length >= MIN_DESCRIPTION) return markedText.slice(0, MAX_DESCRIPTION);
+
+    const candidates = document.querySelectorAll(
+      '[class*="descri" i],[id*="descri" i],[data-testid*="descri" i],[class*="product-details" i],[class*="product-info" i],[class*="опис" i]',
+    );
+    let best = "";
+    for (const el of candidates) {
+      const text = squash(textOf(el));
+      if (text.length < MIN_DESCRIPTION) continue;
+      if (!best || text.length < best.length) best = text;
+    }
+    if (best) return best.slice(0, MAX_DESCRIPTION);
+
+    // Nothing prose-length: take the longest short thing rather than nothing, so
+    // a one-line product blurb still arrives.
+    for (const el of candidates) {
+      const text = squash(textOf(el));
+      if (text.length > best.length) best = text;
+    }
+    return best.slice(0, MAX_DESCRIPTION);
+  }
+
+  /**
+   * A value that has swallowed the next row, cut back to itself.
+   *
+   * A spec block whose rows are bare text nodes renders as ONE line — innerText
+   * collapses the newlines — so "Composition: 80% wool Care: dry clean" arrives
+   * as a single pair whose value runs into the next label. The cut is made at
+   * the LAST word before that label's colon, and one word is deliberate: a label
+   * can be two words ("Made in:"), and there is no way to tell "Made" from a
+   * fibre without knowing every label in every language. One word always cuts in
+   * the right place or one word late, where two words can cut a fibre off a
+   * composition — which is the failure that matters, since the composition is
+   * what the material field is read from.
+   *
+   * Rows that come from a definition list or a table need none of this; this is
+   * the fallback for stores that use neither.
+   */
+  function cutAtNextLabel(value) {
+    const colon = value.search(/[:：]/);
+    if (colon < 0) return value;
+    const before = value.slice(0, colon);
+    const label = before.match(/[\p{L}][\p{L}-]*$/u);
+    if (!label) return value;
+    const cut = before.length - label[0].length;
+    return cut > 0 ? value.slice(0, cut).replace(/[\s,;.]+$/, "") : value;
+  }
+
+  /**
+   * The store's spec table, row by row, in the store's own words.
+   *
+   * Composition, care, country of origin, article number: printed as a
+   * definition list, a two-column table, or plain "Label: value" lines, and
+   * carried by structured data almost never. The rows are sent as they were
+   * printed — the server knows which key means composition in six languages, and
+   * it also needs the ones it does not recognise yet.
+   */
+  function collectSpecs() {
+    const out = [];
+    const seen = new Set();
+    const add = (rawKey, rawValue) => {
+      const key = squash(rawKey).replace(/[:：]\s*$/, "");
+      const value = squash(rawValue);
+      if (!key || !value || key.length > 40 || value.length > 200) return;
+      if (key.toLowerCase() === value.toLowerCase()) return;
+      const dedupe = `${key.toLowerCase()}=${value.toLowerCase()}`;
+      if (seen.has(dedupe) || out.length >= MAX_SPECS) return;
+      seen.add(dedupe);
+      out.push({ key, value });
+    };
+
+    for (const dl of document.querySelectorAll("dl")) {
+      const kids = [...dl.children];
+      for (let i = 0; i < kids.length - 1; i++) {
+        if (kids[i].tagName === "DT" && kids[i + 1].tagName === "DD") {
+          add(textOf(kids[i]), textOf(kids[i + 1]));
+        }
+      }
+    }
+
+    for (const tr of document.querySelectorAll("tr")) {
+      const cells = tr.querySelectorAll("th,td");
+      if (cells.length === 2) add(textOf(cells[0]), textOf(cells[1]));
+    }
+
+    // "Composition: 80% wool" as a line of text, which is how a store that uses
+    // neither a list nor a table writes it.
+    const blocks = document.querySelectorAll(
+      '[class*="spec" i],[class*="detail" i],[class*="composition" i],[class*="material" i],[class*="attribute" i],[class*="характеристик" i],[class*="склад" i]',
+    );
+    for (const block of blocks) {
+      if (out.length >= MAX_SPECS) break;
+      const text = textOf(block);
+      if (!text || text.length > 2000) continue;
+      for (const line of text.split(/\n+/)) {
+        const match = line.match(/^\s*([^:：]{2,40})[:：]\s*(.{1,200})$/);
+        if (!match) continue;
+        add(match[1], cutAtNextLabel(match[2]));
+      }
+    }
+
+    return out;
+  }
+
+  /**
    * The price as the page states it, symbol included.
    *
    * The symbol is the point. A store that writes `<span>4 000 ₴</span>` and a
@@ -433,6 +577,8 @@
     const sizes = collectSizes();
     const colorText = collectColorText();
     const variantUrls = collectVariantUrls();
+    const descriptionText = collectDescription();
+    const specs = collectSpecs();
 
     const root = document.documentElement.cloneNode(true);
     root.querySelectorAll(DROP).forEach((n) => n.remove());
@@ -450,6 +596,8 @@
       sizes,
       colorText,
       variantUrls,
+      descriptionText,
+      specs,
     };
   } catch (err) {
     return { ok: false, error: err && err.message ? err.message : String(err) };

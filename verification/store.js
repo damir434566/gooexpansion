@@ -115,6 +115,21 @@ function spaProductPage() {
   <a class="size-guide-link" href="/size-guide">Size guide</a>
 </div>
 <div class="quantity"><button>-</button><button>1</button><button>+</button></div>
+<div class="accordion">
+  <button class="accordion-head">Details</button>
+  <div class="product-description" style="display:none">
+    Cut from a wool blend with a boxy shoulder and a cropped hem, this bomber is
+    finished with ribbed trims and a two-way zip. The model is 178cm and wears a
+    size S.
+  </div>
+</div>
+<div class="product-specs">
+  <dl>
+    <dt>Composition</dt><dd>80% wool, 20% polyamide</dd>
+    <dt>Care</dt><dd>Dry clean only</dd>
+    <dt>Made in</dt><dd>Italy</dd>
+  </dl>
+</div>
 <div class="recommendations">
   <h2>You may also like</h2>
   <img src="${ORIGIN}/cdn/${SPA_OTHER[0]}" alt="">
@@ -150,6 +165,10 @@ function uahProductPage() {
 <div class="product-price"><span class="price">4 000 ₴</span></div>
 <img src="${ORIGIN}/cdn/bomber-ua-1.jpg" alt="">
 <img src="${ORIGIN}/cdn/bomber-ua-2.jpg" alt="">
+<div class="specs">
+  Склад: 95% бавовна, 5% еластан
+  Догляд: машинне прання 30°
+</div>
 </body></html>`;
 }
 

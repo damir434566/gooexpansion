@@ -8,6 +8,7 @@
  *
  *   Part 1 — sizes
  *   Part 2 — colour, the colour filter, and grouping colourways
+ *   Part 3 — description and material
  */
 const path = require("path");
 const Module = require("module");
@@ -22,9 +23,15 @@ Module._resolveFilename = function (request, ...rest) {
 const PARSER = path.join(COMPILED, "lib", "server", "parser");
 const { extractProduct } = require(path.join(PARSER, "extract.js"));
 const { normalizeExtract } = require(path.join(PARSER, "normalize.js"));
-const { looksLikeSize, pickSizes, colorGroupNamesFor } = require(
-  path.join(COMPILED, "lib", "server", "product-fields.js"),
-);
+const {
+  looksLikeSize,
+  pickSizes,
+  colorGroupNamesFor,
+  specValue,
+  compositionFromText,
+  MATERIAL_KEYS,
+  CODE_KEYS,
+} = require(path.join(COMPILED, "lib", "server", "product-fields.js"));
 const { isColorSiblingByName, chooseGroup, variantBaseName } = require(
   path.join(PARSER, "variant-group.js"),
 );
@@ -339,6 +346,152 @@ check(
   "a group whose primary is missing is led by whoever arrives",
   chooseGroup([row("b", "Wool Blend Coat - Sand", ["Sand"], { variantGroupId: "g2" })]),
   { groupId: "g2", hasPrimary: false },
+);
+
+// ── Part 3: description and material ────────────────────────────────────────
+
+console.log("— reading a row out of the store's spec table —");
+
+const specs = [
+  { key: "Composition", value: "80% wool, 20% polyamide" },
+  { key: "Care", value: "Dry clean only" },
+  { key: "Article number", value: "FA-2285-CH" },
+];
+check("the composition row", specValue(specs, MATERIAL_KEYS), "80% wool, 20% polyamide");
+check("the article number row", specValue(specs, CODE_KEYS), "FA-2285-CH");
+check(
+  "the same table in Ukrainian",
+  specValue([{ key: "Склад", value: "95% бавовна, 5% еластан" }], MATERIAL_KEYS),
+  "95% бавовна, 5% еластан",
+);
+check("a table without the row asked for", specValue(specs, /^(?:gender)\b/i), "");
+check("no table at all", specValue(undefined, MATERIAL_KEYS), "");
+
+console.log("— a composition out of running text —");
+
+check(
+  "the whole blend, and nothing from the lining after it adds to 100",
+  compositionFromText("Outer: 80% wool, 20% polyamide. Lining: 100% viscose"),
+  "80% wool, 20% polyamide",
+);
+check(
+  "a two-word fibre survives when the clause ends",
+  compositionFromText("Made of 70% organic cotton, 30% recycled polyester"),
+  "70% organic cotton, 30% recycled polyester",
+);
+check(
+  "a fibre does not swallow the rest of the sentence",
+  compositionFromText("A bomber cut from 80% wool, 20% polyamide with ribbed trims"),
+  "80% wool, 20% polyamide",
+);
+check("a sale banner is not a composition", compositionFromText("Extra 20% off this week"), "");
+check("in Ukrainian", compositionFromText("Склад: 95% бавовна, 5% еластан"), "95% бавовна, 5% еластан");
+check("a single fibre", compositionFromText("100% cotton"), "100% cotton");
+check("a number that is not a composition", compositionFromText("Free shipping over 100"), "");
+check("nothing", compositionFromText(""), "");
+
+console.log("— where the material comes from —");
+
+check(
+  "structured data first",
+  normalizeExtract(
+    extractProduct(page({ ...BASE, material: "Wool" }), null, PAGE, {
+      specs: [{ key: "Composition", value: "80% wool, 20% polyamide" }],
+    }),
+    PAGE,
+    null,
+  ).material,
+  "Wool",
+);
+check(
+  "then the spec table, which is where stores actually print it",
+  normalizeExtract(
+    extractProduct(page(BASE), null, PAGE, {
+      specs: [{ key: "Composition", value: "80% wool, 20% polyamide" }],
+    }),
+    PAGE,
+    null,
+  ).material,
+  "80% wool, 20% polyamide",
+);
+check(
+  "then the description's own text",
+  normalizeExtract(
+    extractProduct(page(BASE), null, PAGE, {
+      descriptionText: "A boxy bomber cut from 80% wool, 20% polyamide with ribbed trims.",
+    }),
+    PAGE,
+    null,
+  ).material,
+  "80% wool, 20% polyamide",
+);
+check(
+  "and a page that never says",
+  normalizeExtract(extractProduct(page(BASE), null, PAGE), PAGE, null).material,
+  "",
+);
+
+console.log("— and the description —");
+
+const prose =
+  "Cut from a wool blend with a boxy shoulder and a cropped hem, finished with ribbed trims.";
+check(
+  "structured data first",
+  normalizeExtract(
+    extractProduct(page({ ...BASE, description: "The store's own copy." }), null, PAGE, {
+      descriptionText: prose,
+    }),
+    PAGE,
+    null,
+  ).description,
+  "The store's own copy.",
+);
+check(
+  "then what the page renders — often the only full version",
+  normalizeExtract(extractProduct(page(BASE), null, PAGE, { descriptionText: prose }), PAGE, null)
+    .description,
+  prose,
+);
+// og:description is a truncated marketing line, so it comes last.
+check(
+  "og:description is the last resort, not the second",
+  normalizeExtract(
+    extractProduct(
+      `<html><head><meta property="og:description" content="Shop the bomber jacket at Fixture." /><script type="application/ld+json">${JSON.stringify(
+        BASE,
+      )}</script></head><body></body></html>`,
+      null,
+      PAGE,
+      { descriptionText: prose },
+    ),
+    PAGE,
+    null,
+  ).description,
+  prose,
+);
+
+console.log("— colour, when the spec table is the only place it is named —");
+
+check(
+  "a colour row",
+  normalizeExtract(
+    extractProduct(page(BASE), null, PAGE, { specs: [{ key: "Colour", value: "Charcoal" }] }),
+    PAGE,
+    null,
+  ).colors,
+  ["Charcoal"],
+);
+check(
+  "the selected swatch still wins over the table",
+  normalizeExtract(
+    extractProduct(page(BASE), null, PAGE, {
+      colorText: "Sand",
+      specs: [{ key: "Colour", value: "Charcoal" }],
+    }),
+    PAGE,
+    null,
+  ).colors,
+  ["Sand"],
 );
 
 console.log("");

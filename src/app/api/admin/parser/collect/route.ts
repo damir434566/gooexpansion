@@ -102,6 +102,14 @@ const MAX_COLOR_TEXT = 80;
  */
 const MAX_VARIANT_URLS = 20;
 
+/** Longest rendered description accepted; the importer stores 5,000 characters. */
+const MAX_DESCRIPTION = 5_000;
+
+/** Spec rows accepted, and the size of one row's halves. */
+const MAX_SPECS = 40;
+const MAX_SPEC_KEY = 40;
+const MAX_SPEC_VALUE = 200;
+
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
@@ -192,6 +200,14 @@ export async function POST(req: Request) {
         typeof u === "string" && u.length <= MAX_IMAGE_URL && /^https?:\/\//.test(u),
     )
     .slice(0, MAX_VARIANT_URLS);
+  const descriptionText = str(body?.descriptionText).slice(0, MAX_DESCRIPTION);
+  const specs = (Array.isArray(body?.specs) ? body.specs : [])
+    .map((row: unknown) => ({
+      key: str((row as { key?: unknown })?.key).slice(0, MAX_SPEC_KEY),
+      value: str((row as { value?: unknown })?.value).slice(0, MAX_SPEC_VALUE),
+    }))
+    .filter((row: { key: string; value: string }) => !!row.key && !!row.value)
+    .slice(0, MAX_SPECS);
 
   const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
     getFetchSettings(),
@@ -221,6 +237,8 @@ export async function POST(req: Request) {
         sizes: sizeCandidates,
         colorText,
         variantUrls,
+        descriptionText,
+        specs,
       },
     });
 

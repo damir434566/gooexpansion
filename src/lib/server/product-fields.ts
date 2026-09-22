@@ -135,6 +135,100 @@ export function extractCurrencyFromDisplay(raw: string): string {
   return "";
 }
 
+// ── The store's own spec table ────────────────────────────────────────────────
+// Composition, care, country of origin, article number: a store prints them as
+// a definition list or a two-column table, and structured data almost never
+// carries them. The collect extension sends the rows as they were printed, in
+// the store's own language, and these helpers read a field out of them.
+//
+// This is where "no material" was decided. The parser only ever looked at
+// JSON-LD `material`, which is rare enough that most products arrived with the
+// field empty while the page said "80% wool, 20% polyamide" two lines under the
+// price.
+
+export interface SpecPair {
+  key: string;
+  value: string;
+}
+
+// The trailing guard is a lookahead rather than `\b`, and the flags carry `u`.
+// `\b` is defined on ASCII word characters, so it never fires after a Cyrillic
+// letter: /^склад\b/ does not match "Склад", which is exactly the key a
+// Ukrainian store prints its composition under.
+
+/** Key names that mean composition, in the languages a European store ships. */
+export const MATERIAL_KEYS =
+  /^(?:material|materials|fabric|composition|made\s*of|fabrication|matière|matiere|tissu|zusammensetzung|materialien|materiale|composizione|composición|tejido|склад|состав|матеріал|материал|тканина|ткань)(?![\p{L}\p{N}])/iu;
+
+/** Key names that mean colour. */
+export const COLOR_KEYS =
+  /^(?:colou?r|colourway|colorway|farbe|couleur|colore|kolor|barva|цвет|колір|кольор)(?![\p{L}\p{N}])/iu;
+
+/** Key names that mean the store's own article number. */
+export const CODE_KEYS =
+  /^(?:sku|mpn|style\s*(?:code|no|number|#)?|product\s*(?:code|id|number)|item\s*(?:code|no|number)|article\s*(?:code|no|number)?|ref(?:erence)?|артикул|код\s*товару|код\s*товара)(?![\p{L}\p{N}])/iu;
+
+/**
+ * The value of the first spec row whose key matches, trimmed.
+ *
+ * First rather than best: a spec table lists each field once, and a page that
+ * repeats one (a mobile copy of the same block) repeats the same value.
+ */
+export function specValue(specs: SpecPair[] | undefined, keys: RegExp): string {
+  if (!Array.isArray(specs)) return "";
+  for (const pair of specs) {
+    const key = String(pair?.key ?? "").trim();
+    const value = String(pair?.value ?? "").trim();
+    if (!key || !value) continue;
+    if (keys.test(key)) return value;
+  }
+  return "";
+}
+
+/**
+ * A composition read out of running text: "Outer: 80% wool, 20% polyamide".
+ *
+ * The last resort for material, and a surprisingly good one — a percentage
+ * followed by a fibre is a sentence no marketing copy writes by accident. The
+ * whole run of percentages is returned rather than the first, because a garment
+ * is its blend and "80% wool" alone misstates it.
+ */
+export function compositionFromText(text: string): string {
+  const source = (text ?? "").replace(/\s+/g, " ");
+  if (!source) return "";
+
+  // Read the percentages one at a time and rebuild the blend, rather than
+  // matching the whole run in place. A pattern loose enough to span "80% wool,
+  // 20% polyamide" is also loose enough to keep going into "with ribbed trims",
+  // and a material field that ends mid-sentence reads like a bug because it is
+  // one. A fibre is one word, or two when the second is followed by the end of
+  // the clause — so "organic cotton," survives and "polyamide with" does not.
+  const atom =
+    /(\d{1,3})\s?%\s?([\p{L}][\p{L}-]{1,20}(?:\s[\p{L}][\p{L}-]{1,20}(?=\s*(?:[,;./)]|$)))?)/gu;
+
+  const parts: string[] = [];
+  let total = 0;
+  for (const match of source.matchAll(atom)) {
+    const fibre = match[2].trim();
+    // "20% off" is not a fibre, and a sale banner sits closer to the price than
+    // the composition does.
+    if (NOT_A_FIBRE.test(fibre)) continue;
+
+    const share = Number(match[1]);
+    parts.push(`${share}% ${fibre}`);
+    total += share;
+    // A composition adds up to 100. Once it does, the next percentage on the
+    // page belongs to another part of the garment — "Lining: 100% viscose" —
+    // and appending it would state a blend that adds up to two hundred.
+    if (total >= 100 || parts.length >= 6) break;
+  }
+  return parts.join(", ").slice(0, 200);
+}
+
+/** Words that follow a percentage without being a fibre. */
+const NOT_A_FIBRE =
+  /^(?:off|discount|sale|extra|more|less|code|promo|cashback|bonus|скидк\p{L}*|знижк\p{L}*|вигод\p{L}*)$/iu;
+
 // ── Is this string a size? ────────────────────────────────────────────────────
 // The collect extension reads size labels off the rendered page — buttons, a
 // select, a swatch row — because that is where a store puts them and the

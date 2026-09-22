@@ -543,6 +543,30 @@ async function main() {
     bomber && JSON.stringify(bomber.variantUrls),
   );
 
+  // Description and material. The description is collapsed behind an accordion
+  // — in the DOM, invisible, and empty as far as `innerText` is concerned — and
+  // the composition is a definition list. Neither is in structured data.
+  check(
+    "the description was read out of a collapsed accordion",
+    !!bomber && /Cut from a wool blend/.test(bomber.description || ""),
+    bomber && JSON.stringify((bomber.description || "").slice(0, 80)),
+  );
+  check(
+    "the extension read the spec rows",
+    !!bomber && bomber.specCount >= 3,
+    bomber && `specs: ${bomber.specCount}`,
+  );
+  check(
+    "the material came off the spec table",
+    !!bomber && bomber.material === "80% wool, 20% polyamide",
+    bomber && JSON.stringify(bomber.material),
+  );
+  check(
+    "and off a plain line of Ukrainian text on the other store",
+    !!uah && uah.material === "95% бавовна, 5% еластан",
+    uah && JSON.stringify(uah.material),
+  );
+
   collect.close(); popup.close();
 
   console.log(`\n  ${pass} passed, ${failures.length} failed\n`);

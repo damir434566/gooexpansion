@@ -292,6 +292,8 @@ async function snapshotPage(url) {
       sizes: Array.isArray(result.sizes) ? result.sizes : [],
       colorText: typeof result.colorText === "string" ? result.colorText : "",
       variantUrls: Array.isArray(result.variantUrls) ? result.variantUrls : [],
+      descriptionText: typeof result.descriptionText === "string" ? result.descriptionText : "",
+      specs: Array.isArray(result.specs) ? result.specs : [],
       status,
     };
   } catch (err) {
@@ -438,6 +440,8 @@ async function run({ storeUrl, limit }) {
         sizes: snap.sizes,
         colorText: snap.colorText,
         variantUrls: snap.variantUrls,
+        descriptionText: snap.descriptionText,
+        specs: snap.specs,
       });
       collected++;
       state.done = collected;

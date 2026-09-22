@@ -13,10 +13,10 @@ index 021ad7d..be51000 100644
  
 diff --git a/extension/background.js b/extension/background.js
 new file mode 100644
-index 0000000..a69a244
+index 0000000..5763d44
 --- /dev/null
 +++ b/extension/background.js
-@@ -0,0 +1,529 @@
+@@ -0,0 +1,533 @@
 +/**
 + * The hands of the operation.
 + *
@@ -311,6 +311,8 @@ index 0000000..a69a244
 +      sizes: Array.isArray(result.sizes) ? result.sizes : [],
 +      colorText: typeof result.colorText === "string" ? result.colorText : "",
 +      variantUrls: Array.isArray(result.variantUrls) ? result.variantUrls : [],
++      descriptionText: typeof result.descriptionText === "string" ? result.descriptionText : "",
++      specs: Array.isArray(result.specs) ? result.specs : [],
 +      status,
 +    };
 +  } catch (err) {
@@ -457,6 +459,8 @@ index 0000000..a69a244
 +        sizes: snap.sizes,
 +        colorText: snap.colorText,
 +        variantUrls: snap.variantUrls,
++        descriptionText: snap.descriptionText,
++        specs: snap.specs,
 +      });
 +      collected++;
 +      state.done = collected;
@@ -1178,10 +1182,10 @@ index 0000000..cd405fd
 +init().catch((err) => note(err?.message ?? "Could not read this tab."));
 diff --git a/extension/snapshot.js b/extension/snapshot.js
 new file mode 100644
-index 0000000..a0285a9
+index 0000000..d7b25c1
 --- /dev/null
 +++ b/extension/snapshot.js
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,605 @@
 +/**
 + * Take the rendered page and hand back what the server needs to read it.
 + *
@@ -1255,6 +1259,15 @@ index 0000000..a0285a9
 +
 +  /** Most sibling colourway addresses one page can contribute. */
 +  const MAX_VARIANTS = 20;
++
++  /** Most spec rows one page can contribute. */
++  const MAX_SPECS = 40;
++
++  /** Longest description kept. The importer stores five thousand characters. */
++  const MAX_DESCRIPTION = 5000;
++
++  /** Shortest run of text that could be a product description rather than a label. */
++  const MIN_DESCRIPTION = 80;
 +
 +  /**
 +   * Image URLs as they appear in a JSON payload, escaped slashes and all.
@@ -1568,6 +1581,141 @@ index 0000000..a0285a9
 +  }
 +
 +  /**
++   * An element's text, whether or not it is on screen.
++   *
++   * `innerText` is what a reader sees, which is the right answer for a price and
++   * the wrong one for a collapsed accordion: a store that hides its description
++   * behind "Details ⌄" has the text in the DOM and `innerText` returns nothing
++   * for it. `textContent` does not care about rendering, so it is the fallback —
++   * and only the fallback, because it also returns the text of things a reader
++   * would never see.
++   */
++  function textOf(el) {
++    if (!el) return "";
++    const rendered = (el.innerText || "").trim();
++    return rendered || (el.textContent || "").trim();
++  }
++
++  const squash = (value) => String(value || "").replace(/\s+/g, " ").trim();
++
++  /**
++   * The product's description, as the page renders it.
++   *
++   * Two rules, both learned from the shape of a retail page. `itemprop` wins
++   * outright — a store that marks its description has told us which block it is.
++   * Otherwise the SHORTEST candidate over the length of a label wins, not the
++   * longest: these containers nest, and the outer one holds the description plus
++   * delivery, returns and the reviews teaser. The innermost block that is long
++   * enough to be prose is the description itself.
++   */
++  function collectDescription() {
++    const marked = document.querySelector('[itemprop="description"]');
++    const markedText = squash(textOf(marked));
++    if (markedText.length >= MIN_DESCRIPTION) return markedText.slice(0, MAX_DESCRIPTION);
++
++    const candidates = document.querySelectorAll(
++      '[class*="descri" i],[id*="descri" i],[data-testid*="descri" i],[class*="product-details" i],[class*="product-info" i],[class*="опис" i]',
++    );
++    let best = "";
++    for (const el of candidates) {
++      const text = squash(textOf(el));
++      if (text.length < MIN_DESCRIPTION) continue;
++      if (!best || text.length < best.length) best = text;
++    }
++    if (best) return best.slice(0, MAX_DESCRIPTION);
++
++    // Nothing prose-length: take the longest short thing rather than nothing, so
++    // a one-line product blurb still arrives.
++    for (const el of candidates) {
++      const text = squash(textOf(el));
++      if (text.length > best.length) best = text;
++    }
++    return best.slice(0, MAX_DESCRIPTION);
++  }
++
++  /**
++   * A value that has swallowed the next row, cut back to itself.
++   *
++   * A spec block whose rows are bare text nodes renders as ONE line — innerText
++   * collapses the newlines — so "Composition: 80% wool Care: dry clean" arrives
++   * as a single pair whose value runs into the next label. The cut is made at
++   * the LAST word before that label's colon, and one word is deliberate: a label
++   * can be two words ("Made in:"), and there is no way to tell "Made" from a
++   * fibre without knowing every label in every language. One word always cuts in
++   * the right place or one word late, where two words can cut a fibre off a
++   * composition — which is the failure that matters, since the composition is
++   * what the material field is read from.
++   *
++   * Rows that come from a definition list or a table need none of this; this is
++   * the fallback for stores that use neither.
++   */
++  function cutAtNextLabel(value) {
++    const colon = value.search(/[:：]/);
++    if (colon < 0) return value;
++    const before = value.slice(0, colon);
++    const label = before.match(/[\p{L}][\p{L}-]*$/u);
++    if (!label) return value;
++    const cut = before.length - label[0].length;
++    return cut > 0 ? value.slice(0, cut).replace(/[\s,;.]+$/, "") : value;
++  }
++
++  /**
++   * The store's spec table, row by row, in the store's own words.
++   *
++   * Composition, care, country of origin, article number: printed as a
++   * definition list, a two-column table, or plain "Label: value" lines, and
++   * carried by structured data almost never. The rows are sent as they were
++   * printed — the server knows which key means composition in six languages, and
++   * it also needs the ones it does not recognise yet.
++   */
++  function collectSpecs() {
++    const out = [];
++    const seen = new Set();
++    const add = (rawKey, rawValue) => {
++      const key = squash(rawKey).replace(/[:：]\s*$/, "");
++      const value = squash(rawValue);
++      if (!key || !value || key.length > 40 || value.length > 200) return;
++      if (key.toLowerCase() === value.toLowerCase()) return;
++      const dedupe = `${key.toLowerCase()}=${value.toLowerCase()}`;
++      if (seen.has(dedupe) || out.length >= MAX_SPECS) return;
++      seen.add(dedupe);
++      out.push({ key, value });
++    };
++
++    for (const dl of document.querySelectorAll("dl")) {
++      const kids = [...dl.children];
++      for (let i = 0; i < kids.length - 1; i++) {
++        if (kids[i].tagName === "DT" && kids[i + 1].tagName === "DD") {
++          add(textOf(kids[i]), textOf(kids[i + 1]));
++        }
++      }
++    }
++
++    for (const tr of document.querySelectorAll("tr")) {
++      const cells = tr.querySelectorAll("th,td");
++      if (cells.length === 2) add(textOf(cells[0]), textOf(cells[1]));
++    }
++
++    // "Composition: 80% wool" as a line of text, which is how a store that uses
++    // neither a list nor a table writes it.
++    const blocks = document.querySelectorAll(
++      '[class*="spec" i],[class*="detail" i],[class*="composition" i],[class*="material" i],[class*="attribute" i],[class*="характеристик" i],[class*="склад" i]',
++    );
++    for (const block of blocks) {
++      if (out.length >= MAX_SPECS) break;
++      const text = textOf(block);
++      if (!text || text.length > 2000) continue;
++      for (const line of text.split(/\n+/)) {
++        const match = line.match(/^\s*([^:：]{2,40})[:：]\s*(.{1,200})$/);
++        if (!match) continue;
++        add(match[1], cutAtNextLabel(match[2]));
++      }
++    }
++
++    return out;
++  }
++
++  /**
 +   * The price as the page states it, symbol included.
 +   *
 +   * The symbol is the point. A store that writes `<span>4 000 ₴</span>` and a
@@ -1617,6 +1765,8 @@ index 0000000..a0285a9
 +    const sizes = collectSizes();
 +    const colorText = collectColorText();
 +    const variantUrls = collectVariantUrls();
++    const descriptionText = collectDescription();
++    const specs = collectSpecs();
 +
 +    const root = document.documentElement.cloneNode(true);
 +    root.querySelectorAll(DROP).forEach((n) => n.remove());
@@ -1634,6 +1784,8 @@ index 0000000..a0285a9
 +      sizes,
 +      colorText,
 +      variantUrls,
++      descriptionText,
++      specs,
 +    };
 +  } catch (err) {
 +    return { ok: false, error: err && err.message ? err.message : String(err) };
@@ -1641,10 +1793,10 @@ index 0000000..a0285a9
 +})();
 diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
 new file mode 100644
-index 0000000..ab4c7b1
+index 0000000..114fd24
 --- /dev/null
 +++ b/src/app/api/admin/parser/collect/route.ts
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,307 @@
 +/**
 + * Catalogue collection driven from the admin's own browser.
 + *
@@ -1749,6 +1901,14 @@ index 0000000..ab4c7b1
 + */
 +const MAX_VARIANT_URLS = 20;
 +
++/** Longest rendered description accepted; the importer stores 5,000 characters. */
++const MAX_DESCRIPTION = 5_000;
++
++/** Spec rows accepted, and the size of one row's halves. */
++const MAX_SPECS = 40;
++const MAX_SPEC_KEY = 40;
++const MAX_SPEC_VALUE = 200;
++
 +function str(v: unknown): string {
 +  return typeof v === "string" ? v.trim() : "";
 +}
@@ -1839,6 +1999,14 @@ index 0000000..ab4c7b1
 +        typeof u === "string" && u.length <= MAX_IMAGE_URL && /^https?:\/\//.test(u),
 +    )
 +    .slice(0, MAX_VARIANT_URLS);
++  const descriptionText = str(body?.descriptionText).slice(0, MAX_DESCRIPTION);
++  const specs = (Array.isArray(body?.specs) ? body.specs : [])
++    .map((row: unknown) => ({
++      key: str((row as { key?: unknown })?.key).slice(0, MAX_SPEC_KEY),
++      value: str((row as { value?: unknown })?.value).slice(0, MAX_SPEC_VALUE),
++    }))
++    .filter((row: { key: string; value: string }) => !!row.key && !!row.value)
++    .slice(0, MAX_SPECS);
 +
 +  const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
 +    getFetchSettings(),
@@ -1868,6 +2036,8 @@ index 0000000..ab4c7b1
 +        sizes: sizeCandidates,
 +        colorText,
 +        variantUrls,
++        descriptionText,
++        specs,
 +      },
 +    });
 +
@@ -2647,10 +2817,10 @@ index 0000000..e8c1a26
 +  return Math.round(n * 100) / 100;
 +}
 diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
-index 448a612..86ff4a1 100644
+index 448a612..80af8fe 100644
 --- a/src/lib/server/parser/extract.ts
 +++ b/src/lib/server/parser/extract.ts
-@@ -9,9 +9,9 @@
+@@ -9,9 +9,17 @@
   *
   * No DOM library — pure regex/JSON parsing so it runs in any serverless route.
   */
@@ -2658,11 +2828,19 @@ index 448a612..86ff4a1 100644
 +import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
  import { harvestGalleryImages } from "./gallery";
 -import { canonicalColor } from "@/lib/server/product-fields";
-+import { canonicalColor, extractCurrencyFromDisplay, pickSizes } from "@/lib/server/product-fields";
++import {
++  canonicalColor,
++  extractCurrencyFromDisplay,
++  pickSizes,
++  specValue,
++  compositionFromText,
++  MATERIAL_KEYS,
++  COLOR_KEYS,
++} from "@/lib/server/product-fields";
  
  // ── HTML entity decoding (the handful that show up in product copy) ───────────
  
-@@ -258,6 +258,72 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
+@@ -258,6 +266,72 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
    return result;
  }
  
@@ -2735,7 +2913,7 @@ index 448a612..86ff4a1 100644
  /**
   * The colour a Product node states, wherever it states it.
   *
-@@ -319,7 +385,7 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
+@@ -319,7 +393,7 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
      // descriptions are sometimes HTML — strip tags so the catalog stays clean
      description: description ? stripTags(description) : undefined,
      url: url && /^https?:\/\//.test(url) ? url : undefined,
@@ -2744,7 +2922,7 @@ index 448a612..86ff4a1 100644
    };
  }
  
-@@ -334,7 +400,7 @@ function nodeToRaw(node: JsonObject): RawExtract {
+@@ -334,7 +408,7 @@ function nodeToRaw(node: JsonObject): RawExtract {
      currency: r.currency,
      image: r.image,
      images: r.images ?? [],
@@ -2753,7 +2931,7 @@ index 448a612..86ff4a1 100644
      color: r.color,
      material: r.material,
      description: r.description,
-@@ -473,6 +539,7 @@ export function extractProduct(
+@@ -473,6 +547,7 @@ export function extractProduct(
    html: string,
    config?: ParserSiteConfig | null,
    baseUrl?: string,
@@ -2761,7 +2939,7 @@ index 448a612..86ff4a1 100644
  ): RawExtract {
    const strategies: string[] = [];
    const jsonld = fromJsonLd(html);
-@@ -492,11 +559,21 @@ export function extractProduct(
+@@ -492,11 +567,31 @@ export function extractProduct(
  
    const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
  
@@ -2782,10 +2960,20 @@ index 448a612..86ff4a1 100644
      ? sizeRaw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean)
 -    : [];
 +    : (jsonld.sizes?.length ? jsonld.sizes : pickSizes(evidence?.sizes));
++
++  // Description: the store's own structured copy, then what the page renders —
++  // which on a store that hides its description in an accordion is the only
++  // full version there is, `og:description` being a truncated marketing line.
++  const description = pick(
++    ruleVal("description"),
++    jsonld.description,
++    evidence?.descriptionText,
++    meta.description,
++  );
  
    const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
  
-@@ -509,16 +586,28 @@ export function extractProduct(
+@@ -509,16 +604,28 @@ export function extractProduct(
    if (baseUrl) {
      const anchor = image ? [image, ...images] : images;
      const productName = pick(ruleVal("name"), jsonld.name, meta.name, micro.name) ?? "";
@@ -2817,25 +3005,45 @@ index 448a612..86ff4a1 100644
      image,
      images: [
        ...(image && !images.includes(image) ? [image, ...images] : images),
-@@ -528,9 +617,21 @@ export function extractProduct(
+@@ -528,9 +635,39 @@ export function extractProduct(
      // Colour is worth chasing through every layer: it is what the swatch, the
      // colour filter and half the stylist's vocabulary are built from, and a
      // page that says "Black" anywhere means it.
 -    color: pick(ruleVal("color"), jsonld.color, meta.color, micro.color, colorFromHtml(html)),
-+    // Colour, in order of how directly the page said it. The rendered swatch
-+    // comes before the markup scan because it is what the shopper is looking
-+    // at: `colorFromHtml` mines attributes and inline JSON, which on a page
-+    // with several colourways can name any of them.
+-    material: pick(ruleVal("material"), jsonld.material, micro.material),
+-    description: pick(ruleVal("description"), jsonld.description, meta.description),
++    // Colour, in order of how directly the page said it. The rendered swatch and
++    // the spec row come before the markup scan because they are what the shopper
++    // is looking at: `colorFromHtml` mines attributes and inline JSON, which on
++    // a page with several colourways can name any of them.
 +    color: pick(
 +      ruleVal("color"),
 +      jsonld.color,
 +      meta.color,
 +      micro.color,
 +      evidence?.colorText,
++      specValue(evidence?.specs, COLOR_KEYS),
 +      colorFromHtml(html),
 +    ),
-     material: pick(ruleVal("material"), jsonld.material, micro.material),
-     description: pick(ruleVal("description"), jsonld.description, meta.description),
++    // Material, which until now came from JSON-LD `material` and nowhere else —
++    // a field few stores fill, while the page prints "80% wool, 20% polyamide"
++    // two lines under the price. Now: the spec table the extension read, then
++    // the composition out of the description's own text.
++    material: pick(
++      ruleVal("material"),
++      jsonld.material,
++      micro.material,
++      // A composition read out of the spec row beats the row itself. The row is
++      // whatever the page printed on that line, and a store that renders its
++      // whole spec block as one run of text hands over "95% cotton, 5% elastane
++      // Care: machine wash" — the blend is the field, the care instruction is
++      // the next row that never got its own line.
++      compositionFromText(specValue(evidence?.specs, MATERIAL_KEYS)),
++      specValue(evidence?.specs, MATERIAL_KEYS),
++      compositionFromText(evidence?.descriptionText ?? ""),
++      compositionFromText(description ?? ""),
++    ),
++    description,
 +    variantUrls: evidence?.variantUrls ?? [],
      strategies,
    };
@@ -3859,10 +4067,23 @@ index 61b81ca..c236f7e 100644
  
  export interface SitemapOptions {
 diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
-index b2f84ec..1509fcd 100644
+index b2f84ec..41b075b 100644
 --- a/src/lib/server/parser/types.ts
 +++ b/src/lib/server/parser/types.ts
-@@ -78,6 +78,58 @@ export interface ParserSiteConfig {
+@@ -6,6 +6,12 @@
+  * intentionally site-agnostic: the generic extractor reads JSON-LD / OpenGraph /
+  * microdata, and per-site "recipes" only add overrides where a site is unusual.
+  */
++// A spec row is defined where the helpers that read one live, so the parser
++// and the CSV importer cannot end up with two shapes for the same thing.
++import type { SpecPair } from "@/lib/server/product-fields";
++
++export type { SpecPair };
++
+ import type { Category, Gender } from "@/lib/types";
+ 
+ /**
+@@ -78,6 +84,75 @@ export interface ParserSiteConfig {
    notes?: string;
  }
  
@@ -3916,12 +4137,29 @@ index b2f84ec..1509fcd 100644
 +   * uses to recognise a product address.
 +   */
 +  variantUrls?: string[];
++  /**
++   * The description as the page renders it.
++   *
++   * Stores put the real copy in an accordion and `og:description` gets a
++   * truncated marketing line, so this is often the only full version. Hidden
++   * panels count: a collapsed accordion is in the DOM, and `textContent` reads
++   * it even when `innerText` will not.
++   */
++  descriptionText?: string;
++  /**
++   * The store's own spec table, row by row, in its own language.
++   *
++   * Composition, care, country, article number — printed as a definition list
++   * or a two-column table, and carried by structured data almost never. This is
++   * where the material comes from.
++   */
++  specs?: SpecPair[];
 +}
 +
  /** Raw string fields pulled out of a page before normalisation. */
  export interface RawExtract {
    name?: string;
-@@ -93,6 +145,8 @@ export interface RawExtract {
+@@ -93,6 +168,8 @@ export interface RawExtract {
    description?: string;
    /** Per-product URL (set when extracting from a listing/ItemList). */
    url?: string;
@@ -3930,7 +4168,7 @@ index b2f84ec..1509fcd 100644
    /** Which strategies contributed at least one field (diagnostics). */
    strategies: string[];
  }
-@@ -113,6 +167,8 @@ export interface ParsedProduct {
+@@ -113,6 +190,8 @@ export interface ParsedProduct {
    priceOriginal: number;
    currency: string;
    sourceUrl: string;
@@ -3939,7 +4177,7 @@ index b2f84ec..1509fcd 100644
    /** Diagnostics for the admin UI. */
    strategies: string[];
    issues: string[];
-@@ -149,6 +205,12 @@ export interface CrawlItemResult {
+@@ -149,6 +228,12 @@ export interface CrawlItemResult {
    reason?: string;
    usedAi?: boolean;
    imagesMirrored?: number;
@@ -4051,10 +4289,10 @@ index 0000000..3f3d93c
 +  return { groupId: groupId ?? undefined, hasPrimary };
 +}
 diff --git a/src/lib/server/product-fields.ts b/src/lib/server/product-fields.ts
-index 2981d38..4847022 100644
+index 2981d38..1649353 100644
 --- a/src/lib/server/product-fields.ts
 +++ b/src/lib/server/product-fields.ts
-@@ -48,28 +48,176 @@ export function parsePrice(raw: string): number {
+@@ -48,28 +48,270 @@ export function parsePrice(raw: string): number {
  }
  
  // ── Extract ISO currency code from a display price string ─────────────────────
@@ -4156,6 +4394,100 @@ index 2981d38..4847022 100644
    return "";
  }
  
++// ── The store's own spec table ────────────────────────────────────────────────
++// Composition, care, country of origin, article number: a store prints them as
++// a definition list or a two-column table, and structured data almost never
++// carries them. The collect extension sends the rows as they were printed, in
++// the store's own language, and these helpers read a field out of them.
++//
++// This is where "no material" was decided. The parser only ever looked at
++// JSON-LD `material`, which is rare enough that most products arrived with the
++// field empty while the page said "80% wool, 20% polyamide" two lines under the
++// price.
++
++export interface SpecPair {
++  key: string;
++  value: string;
++}
++
++// The trailing guard is a lookahead rather than `\b`, and the flags carry `u`.
++// `\b` is defined on ASCII word characters, so it never fires after a Cyrillic
++// letter: /^склад\b/ does not match "Склад", which is exactly the key a
++// Ukrainian store prints its composition under.
++
++/** Key names that mean composition, in the languages a European store ships. */
++export const MATERIAL_KEYS =
++  /^(?:material|materials|fabric|composition|made\s*of|fabrication|matière|matiere|tissu|zusammensetzung|materialien|materiale|composizione|composición|tejido|склад|состав|матеріал|материал|тканина|ткань)(?![\p{L}\p{N}])/iu;
++
++/** Key names that mean colour. */
++export const COLOR_KEYS =
++  /^(?:colou?r|colourway|colorway|farbe|couleur|colore|kolor|barva|цвет|колір|кольор)(?![\p{L}\p{N}])/iu;
++
++/** Key names that mean the store's own article number. */
++export const CODE_KEYS =
++  /^(?:sku|mpn|style\s*(?:code|no|number|#)?|product\s*(?:code|id|number)|item\s*(?:code|no|number)|article\s*(?:code|no|number)?|ref(?:erence)?|артикул|код\s*товару|код\s*товара)(?![\p{L}\p{N}])/iu;
++
++/**
++ * The value of the first spec row whose key matches, trimmed.
++ *
++ * First rather than best: a spec table lists each field once, and a page that
++ * repeats one (a mobile copy of the same block) repeats the same value.
++ */
++export function specValue(specs: SpecPair[] | undefined, keys: RegExp): string {
++  if (!Array.isArray(specs)) return "";
++  for (const pair of specs) {
++    const key = String(pair?.key ?? "").trim();
++    const value = String(pair?.value ?? "").trim();
++    if (!key || !value) continue;
++    if (keys.test(key)) return value;
++  }
++  return "";
++}
++
++/**
++ * A composition read out of running text: "Outer: 80% wool, 20% polyamide".
++ *
++ * The last resort for material, and a surprisingly good one — a percentage
++ * followed by a fibre is a sentence no marketing copy writes by accident. The
++ * whole run of percentages is returned rather than the first, because a garment
++ * is its blend and "80% wool" alone misstates it.
++ */
++export function compositionFromText(text: string): string {
++  const source = (text ?? "").replace(/\s+/g, " ");
++  if (!source) return "";
++
++  // Read the percentages one at a time and rebuild the blend, rather than
++  // matching the whole run in place. A pattern loose enough to span "80% wool,
++  // 20% polyamide" is also loose enough to keep going into "with ribbed trims",
++  // and a material field that ends mid-sentence reads like a bug because it is
++  // one. A fibre is one word, or two when the second is followed by the end of
++  // the clause — so "organic cotton," survives and "polyamide with" does not.
++  const atom =
++    /(\d{1,3})\s?%\s?([\p{L}][\p{L}-]{1,20}(?:\s[\p{L}][\p{L}-]{1,20}(?=\s*(?:[,;./)]|$)))?)/gu;
++
++  const parts: string[] = [];
++  let total = 0;
++  for (const match of source.matchAll(atom)) {
++    const fibre = match[2].trim();
++    // "20% off" is not a fibre, and a sale banner sits closer to the price than
++    // the composition does.
++    if (NOT_A_FIBRE.test(fibre)) continue;
++
++    const share = Number(match[1]);
++    parts.push(`${share}% ${fibre}`);
++    total += share;
++    // A composition adds up to 100. Once it does, the next percentage on the
++    // page belongs to another part of the garment — "Lining: 100% viscose" —
++    // and appending it would state a blend that adds up to two hundred.
++    if (total >= 100 || parts.length >= 6) break;
++  }
++  return parts.join(", ").slice(0, 200);
++}
++
++/** Words that follow a percentage without being a fibre. */
++const NOT_A_FIBRE =
++  /^(?:off|discount|sale|extra|more|less|code|promo|cashback|bonus|скидк\p{L}*|знижк\p{L}*|вигод\p{L}*)$/iu;
++
 +// ── Is this string a size? ────────────────────────────────────────────────────
 +// The collect extension reads size labels off the rendered page — buttons, a
 +// select, a swatch row — because that is where a store puts them and the

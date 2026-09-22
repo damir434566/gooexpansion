@@ -6,6 +6,12 @@
  * intentionally site-agnostic: the generic extractor reads JSON-LD / OpenGraph /
  * microdata, and per-site "recipes" only add overrides where a site is unusual.
  */
+// A spec row is defined where the helpers that read one live, so the parser
+// and the CSV importer cannot end up with two shapes for the same thing.
+import type { SpecPair } from "@/lib/server/product-fields";
+
+export type { SpecPair };
+
 import type { Category, Gender } from "@/lib/types";
 
 /**
@@ -128,6 +134,23 @@ export interface PageEvidence {
    * uses to recognise a product address.
    */
   variantUrls?: string[];
+  /**
+   * The description as the page renders it.
+   *
+   * Stores put the real copy in an accordion and `og:description` gets a
+   * truncated marketing line, so this is often the only full version. Hidden
+   * panels count: a collapsed accordion is in the DOM, and `textContent` reads
+   * it even when `innerText` will not.
+   */
+  descriptionText?: string;
+  /**
+   * The store's own spec table, row by row, in its own language.
+   *
+   * Composition, care, country, article number — printed as a definition list
+   * or a two-column table, and carried by structured data almost never. This is
+   * where the material comes from.
+   */
+  specs?: SpecPair[];
 }
 
 /** Raw string fields pulled out of a page before normalisation. */
