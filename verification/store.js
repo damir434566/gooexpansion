@@ -99,6 +99,16 @@ function spaProductPage() {
   <img src="${ORIGIN}/cdn/${SPA_GALLERY[0]}" alt="">
 </div>
 <div class="price-area"><span class="price">€1,290</span></div>
+<div class="size-selector" data-testid="size-picker">
+  <label class="size-label">Select size</label>
+  <button data-size="XS">XS</button>
+  <button data-size="S">S</button>
+  <button data-size="M">M</button>
+  <button class="sold-out" data-size="L" disabled>L</button>
+  <button data-size="XL">XL</button>
+  <a class="size-guide-link" href="/size-guide">Size guide</a>
+</div>
+<div class="quantity"><button>-</button><button>1</button><button>+</button></div>
 <div class="recommendations">
   <h2>You may also like</h2>
   <img src="${ORIGIN}/cdn/${SPA_OTHER[0]}" alt="">
@@ -121,6 +131,10 @@ function uahProductPage() {
     brand: { "@type": "Brand", name: "Fixture UA" },
     image: `${ORIGIN}/cdn/bomber-ua-1.jpg`,
     offers: { "@type": "Offer", price: "4000" },
+    hasVariant: [
+      { "@type": "Product", size: "44" },
+      { "@type": "Product", size: "46" },
+    ],
   });
   return `<!doctype html><html><head>
 <title>Куртка бомбер</title>

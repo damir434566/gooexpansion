@@ -135,6 +135,79 @@ export function extractCurrencyFromDisplay(raw: string): string {
   return "";
 }
 
+// ── Is this string a size? ────────────────────────────────────────────────────
+// The collect extension reads size labels off the rendered page — buttons, a
+// select, a swatch row — because that is where a store puts them and the
+// stripped markup keeps none of it. It reads them loosely on purpose: a
+// container that mentions "size" also holds "Select size", a size-guide link,
+// the quantity stepper and sometimes the word "Sold out". Deciding what is
+// actually a size belongs here, next to the other field vocabularies, so the
+// extension stays a pair of eyes and the judgement has one home.
+//
+// What counts, in the spellings a European storefront ships:
+//   XS · S · M · XXL · 3XL          letter sizes, and their pairs (S/M, M-L)
+//   38 · 40.5 · 9.5                 clothing and shoe numbers
+//   EU 38 · UK 10 · US 6 · IT 42    the same with the system named
+//   32x34 · W32 L34                 waist and length
+//   One size · OS · Единый размер   the size that is not a size
+//
+// Anything else — a sentence, a price, a colour name, "Add to bag" — is not a
+// size, and a wrong size on a product is worse than a missing one: a shopper
+// picks it, and nobody finds out until the order.
+
+const LETTER_SIZE = "(?:xx?xs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl)";
+const SIZE_SYSTEM = "(?:eu|uk|us|fr|it|de|jp|cn|ru|ua|int)";
+
+const SIZE_PATTERNS: RegExp[] = [
+  // Letter sizes, alone or paired: "S", "M/L", "XS-S".
+  new RegExp(`^${LETTER_SIZE}(?:\\s?[/–—-]\\s?${LETTER_SIZE})*$`, "i"),
+  // A plain number, whole or half: "38", "40,5", "9.5". Bounded below 100 so a
+  // price or a product code cannot pass as a size.
+  /^\d{1,2}(?:[.,]5)?$/,
+  // A number with its system, either order: "EU 38", "38 EU", "UK10".
+  new RegExp(`^${SIZE_SYSTEM}\\s?\\d{1,2}(?:[.,]5)?$`, "i"),
+  new RegExp(`^\\d{1,2}(?:[.,]5)?\\s?${SIZE_SYSTEM}$`, "i"),
+  // Waist and length: "32x34", "32/34", "W32 L34".
+  /^\d{2}\s?[x×х/]\s?\d{2}$/i,
+  /^w\s?\d{2}\s?l\s?\d{2}$/i,
+  // One size, in the words stores write it in.
+  /^(?:one[\s-]?size|onesize|os|free[\s-]?size|taille unique|unica|единый размер|один размер|універсальний|безрозмірний)$/i,
+];
+
+/** True when `raw` reads as a size a shopper could pick. */
+export function looksLikeSize(raw: string): boolean {
+  const value = (raw ?? "").trim().replace(/\s+/g, " ");
+  // Twenty, not twelve: "Единый размер" and "Taille unique" are sizes and are
+  // thirteen characters long. Long enough for the longest real label, short
+  // enough that the fit advice under the size row cannot pass.
+  if (!value || value.length > 20) return false;
+  return SIZE_PATTERNS.some((p) => p.test(value));
+}
+
+/**
+ * Size labels out of a loose list of candidates: the ones that are sizes, tidied,
+ * de-duplicated, in the order the page offered them.
+ *
+ * Page order is kept rather than sorted because it is the store's own order —
+ * XS before XXL, 36 before 46 — and any sort this function invented would have
+ * to re-derive it from the labels it just accepted.
+ */
+export function pickSizes(candidates: unknown, max = 40): string[] {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of list) {
+    const value = String(raw ?? "").trim().replace(/\s+/g, " ");
+    if (!looksLikeSize(value)) continue;
+    const key = value.toLowerCase().replace(/[\s.,]/g, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 // ── How many photos one product keeps ─────────────────────────────────────────
 // A fashion product page carries four to a dozen shots — front, back, detail,
 // on-model, flat-lay — and the catalogue wants the set, not a sample of it.

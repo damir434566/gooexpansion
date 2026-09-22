@@ -212,6 +212,7 @@ const server = http.createServer(async (req, res) => {
           evidence: {
             images: Array.isArray(body.images) ? body.images : [],
             priceText: typeof body.priceText === "string" ? body.priceText : "",
+            sizes: Array.isArray(body.sizes) ? body.sizes : [],
           },
         });
         const product = parsed.products[0];
@@ -236,7 +237,9 @@ const server = http.createServer(async (req, res) => {
           issues: product.issues,
           images: product.images.length,
           imageList: product.images,
+          sizes: product.sizes,
           candidates: Array.isArray(body.images) ? body.images.length : 0,
+          sizeCandidates: Array.isArray(body.sizes) ? body.sizes.length : 0,
           priceText: typeof body.priceText === "string" ? body.priceText : "",
         });
         return json(200, { ok: true, result: { url: body.url, status: "imported", name: product.name } });

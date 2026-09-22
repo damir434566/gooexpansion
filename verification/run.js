@@ -503,6 +503,25 @@ async function main() {
     uah && JSON.stringify(uah.issues),
   );
 
+  // Sizes. On the single-page product they exist only as buttons — the field
+  // the parser had no source for at all. On the hryvnia page they are in the
+  // store's own structured data, which used to be read and thrown away.
+  check(
+    "the extension read the size buttons",
+    !!bomber && bomber.sizeCandidates >= 5,
+    bomber && `candidates: ${bomber.sizeCandidates}`,
+  );
+  check(
+    "sizes off the control, with the placeholder and the size-guide link left out",
+    !!bomber && JSON.stringify(bomber.sizes) === JSON.stringify(["XS", "S", "M", "L", "XL"]),
+    bomber && JSON.stringify(bomber.sizes),
+  );
+  check(
+    "sizes out of structured data, where the page has no control to read",
+    !!uah && JSON.stringify(uah.sizes) === JSON.stringify(["44", "46"]),
+    uah && JSON.stringify(uah.sizes),
+  );
+
   collect.close(); popup.close();
 
   console.log(`\n  ${pass} passed, ${failures.length} failed\n`);

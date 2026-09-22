@@ -289,6 +289,7 @@ async function snapshotPage(url) {
       html: result.html,
       images: Array.isArray(result.images) ? result.images : [],
       priceText: typeof result.priceText === "string" ? result.priceText : "",
+      sizes: Array.isArray(result.sizes) ? result.sizes : [],
       status,
     };
   } catch (err) {
@@ -432,6 +433,7 @@ async function run({ storeUrl, limit }) {
         html: snap.html,
         images: snap.images,
         priceText: snap.priceText,
+        sizes: snap.sizes,
       });
       collected++;
       state.done = collected;

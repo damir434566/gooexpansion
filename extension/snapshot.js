@@ -1,8 +1,8 @@
 /**
  * Take the rendered page and hand back what the server needs to read it.
  *
- * Three things come out of here: the stripped markup, the photos the page
- * actually shows, and the price as a shopper reads it.
+ * Four things come out of here: the stripped markup, the photos the page
+ * actually shows, the price as a shopper reads it, and the sizes it offers.
  *
  * ── The markup ───────────────────────────────────────────────────────────────
  * This is the bookmarklet in `src/lib/parser-bookmarklet.ts`, with the clicking
@@ -57,6 +57,12 @@
 
   /** Script text scanned for image URLs, in total. A ceiling, not a target. */
   const MAX_SCRIPT_SCAN = 8_000_000;
+
+  /** Most size labels one page can contribute. */
+  const MAX_SIZES = 80;
+
+  /** Attribute text that marks a corner of the page as being about size. */
+  const SIZE_HINT = /size|talla|taille|gr[oö]sse|größe|taglia|розмір|размер/i;
 
   /**
    * Image URLs as they appear in a JSON payload, escaped slashes and all.
@@ -156,6 +162,91 @@
   }
 
   /**
+   * The sizes the page offers, as a shopper sees them.
+   *
+   * This is the field the parser had no source for at all: its JSON-LD reader
+   * returned an empty list by design, so unless an admin had written a per-site
+   * recipe rule, a product arrived with no sizes. And sizes are a control, not
+   * text — buttons, a select, a swatch row — so the strip removes every trace
+   * of them along with the styles that made them look like buttons.
+   *
+   * Read loosely on purpose. The corner of a page that mentions "size" also
+   * holds "Select size", a size-guide link and sometimes a quantity stepper;
+   * `pickSizes` on the server decides which of these strings is a size, so the
+   * vocabulary lives in one place instead of being spelled out here too.
+   *
+   * Sold-out sizes are collected like the rest. The catalogue records the sizes
+   * a piece comes in, not today's stock in one store, and it has nowhere to put
+   * the difference — a size dropped here would read as a size that does not
+   * exist.
+   */
+  function collectSizes() {
+    const found = [];
+    const seen = new Set();
+    const add = (raw) => {
+      const value = String(raw || "").trim().replace(/\s+/g, " ");
+      if (!value || value.length > 24) return;
+      const key = value.toLowerCase();
+      if (seen.has(key) || found.length >= MAX_SIZES) return;
+      seen.add(key);
+      found.push(value);
+    };
+
+    /** Does this element say, in any of its attributes, that it is about size? */
+    const hinted = (el) => {
+      const attrs = [
+        typeof el.className === "string" ? el.className : "",
+        el.id || "",
+        el.getAttribute("name") || "",
+        el.getAttribute("aria-label") || "",
+        el.getAttribute("data-testid") || "",
+        el.getAttribute("data-option") || "",
+      ].join(" ");
+      return SIZE_HINT.test(attrs);
+    };
+
+    // A select is the least ambiguous of the three: its options are the sizes,
+    // in the store's own order, minus the placeholder that carries no value.
+    for (const select of document.querySelectorAll("select")) {
+      if (!hinted(select)) continue;
+      for (const option of select.options) {
+        if (!option.value && option.disabled) continue;
+        add(option.getAttribute("data-value") || option.textContent);
+      }
+    }
+
+    // A store that labels its swatches states the size in the attribute, which
+    // beats reading the button's text — the text is sometimes just a number in
+    // a sprite.
+    for (const el of document.querySelectorAll("[data-size],[data-option-size],[data-value-size]")) {
+      add(
+        el.getAttribute("data-size") ||
+          el.getAttribute("data-option-size") ||
+          el.getAttribute("data-value-size"),
+      );
+    }
+
+    // And the common case: clickable things inside a container that says size.
+    const containers = document.querySelectorAll(
+      '[class*="size" i],[id*="size" i],[data-testid*="size" i],[aria-label*="size" i],fieldset,[role="radiogroup"]',
+    );
+    for (const container of containers) {
+      if (found.length >= MAX_SIZES) break;
+      if (!hinted(container)) continue;
+      const items = container.querySelectorAll(
+        'button,label,li,a,span[role="button"],input[type="radio"]',
+      );
+      for (const item of items) {
+        if (found.length >= MAX_SIZES) break;
+        if (item.tagName === "INPUT") add(item.value || item.getAttribute("aria-label"));
+        else add(item.innerText || item.textContent);
+      }
+    }
+
+    return found;
+  }
+
+  /**
    * The price as the page states it, symbol included.
    *
    * The symbol is the point. A store that writes `<span>4 000 ₴</span>` and a
@@ -199,9 +290,10 @@
       await sleep(150);
     }
 
-    // Read before stripping: both of these live in what the strip removes.
+    // Read before stripping: all of these live in what the strip removes.
     const images = collectImages();
     const priceText = collectPriceText();
+    const sizes = collectSizes();
 
     const root = document.documentElement.cloneNode(true);
     root.querySelectorAll(DROP).forEach((n) => n.remove());
@@ -210,7 +302,14 @@
     // and the element stays.
     root.querySelectorAll('[src^="data:"]').forEach((n) => n.removeAttribute("src"));
 
-    return { ok: true, url: location.href, html: `<html>${root.innerHTML}</html>`, images, priceText };
+    return {
+      ok: true,
+      url: location.href,
+      html: `<html>${root.innerHTML}</html>`,
+      images,
+      priceText,
+      sizes,
+    };
   } catch (err) {
     return { ok: false, error: err && err.message ? err.message : String(err) };
   }

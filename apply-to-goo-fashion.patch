@@ -13,10 +13,10 @@ index 021ad7d..be51000 100644
  
 diff --git a/extension/background.js b/extension/background.js
 new file mode 100644
-index 0000000..85751a7
+index 0000000..2cb85a8
 --- /dev/null
 +++ b/extension/background.js
-@@ -0,0 +1,523 @@
+@@ -0,0 +1,525 @@
 +/**
 + * The hands of the operation.
 + *
@@ -308,6 +308,7 @@ index 0000000..85751a7
 +      html: result.html,
 +      images: Array.isArray(result.images) ? result.images : [],
 +      priceText: typeof result.priceText === "string" ? result.priceText : "",
++      sizes: Array.isArray(result.sizes) ? result.sizes : [],
 +      status,
 +    };
 +  } catch (err) {
@@ -451,6 +452,7 @@ index 0000000..85751a7
 +        html: snap.html,
 +        images: snap.images,
 +        priceText: snap.priceText,
++        sizes: snap.sizes,
 +      });
 +      collected++;
 +      state.done = collected;
@@ -1172,15 +1174,15 @@ index 0000000..cd405fd
 +init().catch((err) => note(err?.message ?? "Could not read this tab."));
 diff --git a/extension/snapshot.js b/extension/snapshot.js
 new file mode 100644
-index 0000000..21d2052
+index 0000000..2c44794
 --- /dev/null
 +++ b/extension/snapshot.js
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,316 @@
 +/**
 + * Take the rendered page and hand back what the server needs to read it.
 + *
-+ * Three things come out of here: the stripped markup, the photos the page
-+ * actually shows, and the price as a shopper reads it.
++ * Four things come out of here: the stripped markup, the photos the page
++ * actually shows, the price as a shopper reads it, and the sizes it offers.
 + *
 + * ── The markup ───────────────────────────────────────────────────────────────
 + * This is the bookmarklet in `src/lib/parser-bookmarklet.ts`, with the clicking
@@ -1235,6 +1237,12 @@ index 0000000..21d2052
 +
 +  /** Script text scanned for image URLs, in total. A ceiling, not a target. */
 +  const MAX_SCRIPT_SCAN = 8_000_000;
++
++  /** Most size labels one page can contribute. */
++  const MAX_SIZES = 80;
++
++  /** Attribute text that marks a corner of the page as being about size. */
++  const SIZE_HINT = /size|talla|taille|gr[oö]sse|größe|taglia|розмір|размер/i;
 +
 +  /**
 +   * Image URLs as they appear in a JSON payload, escaped slashes and all.
@@ -1334,6 +1342,91 @@ index 0000000..21d2052
 +  }
 +
 +  /**
++   * The sizes the page offers, as a shopper sees them.
++   *
++   * This is the field the parser had no source for at all: its JSON-LD reader
++   * returned an empty list by design, so unless an admin had written a per-site
++   * recipe rule, a product arrived with no sizes. And sizes are a control, not
++   * text — buttons, a select, a swatch row — so the strip removes every trace
++   * of them along with the styles that made them look like buttons.
++   *
++   * Read loosely on purpose. The corner of a page that mentions "size" also
++   * holds "Select size", a size-guide link and sometimes a quantity stepper;
++   * `pickSizes` on the server decides which of these strings is a size, so the
++   * vocabulary lives in one place instead of being spelled out here too.
++   *
++   * Sold-out sizes are collected like the rest. The catalogue records the sizes
++   * a piece comes in, not today's stock in one store, and it has nowhere to put
++   * the difference — a size dropped here would read as a size that does not
++   * exist.
++   */
++  function collectSizes() {
++    const found = [];
++    const seen = new Set();
++    const add = (raw) => {
++      const value = String(raw || "").trim().replace(/\s+/g, " ");
++      if (!value || value.length > 24) return;
++      const key = value.toLowerCase();
++      if (seen.has(key) || found.length >= MAX_SIZES) return;
++      seen.add(key);
++      found.push(value);
++    };
++
++    /** Does this element say, in any of its attributes, that it is about size? */
++    const hinted = (el) => {
++      const attrs = [
++        typeof el.className === "string" ? el.className : "",
++        el.id || "",
++        el.getAttribute("name") || "",
++        el.getAttribute("aria-label") || "",
++        el.getAttribute("data-testid") || "",
++        el.getAttribute("data-option") || "",
++      ].join(" ");
++      return SIZE_HINT.test(attrs);
++    };
++
++    // A select is the least ambiguous of the three: its options are the sizes,
++    // in the store's own order, minus the placeholder that carries no value.
++    for (const select of document.querySelectorAll("select")) {
++      if (!hinted(select)) continue;
++      for (const option of select.options) {
++        if (!option.value && option.disabled) continue;
++        add(option.getAttribute("data-value") || option.textContent);
++      }
++    }
++
++    // A store that labels its swatches states the size in the attribute, which
++    // beats reading the button's text — the text is sometimes just a number in
++    // a sprite.
++    for (const el of document.querySelectorAll("[data-size],[data-option-size],[data-value-size]")) {
++      add(
++        el.getAttribute("data-size") ||
++          el.getAttribute("data-option-size") ||
++          el.getAttribute("data-value-size"),
++      );
++    }
++
++    // And the common case: clickable things inside a container that says size.
++    const containers = document.querySelectorAll(
++      '[class*="size" i],[id*="size" i],[data-testid*="size" i],[aria-label*="size" i],fieldset,[role="radiogroup"]',
++    );
++    for (const container of containers) {
++      if (found.length >= MAX_SIZES) break;
++      if (!hinted(container)) continue;
++      const items = container.querySelectorAll(
++        'button,label,li,a,span[role="button"],input[type="radio"]',
++      );
++      for (const item of items) {
++        if (found.length >= MAX_SIZES) break;
++        if (item.tagName === "INPUT") add(item.value || item.getAttribute("aria-label"));
++        else add(item.innerText || item.textContent);
++      }
++    }
++
++    return found;
++  }
++
++  /**
 +   * The price as the page states it, symbol included.
 +   *
 +   * The symbol is the point. A store that writes `<span>4 000 ₴</span>` and a
@@ -1377,9 +1470,10 @@ index 0000000..21d2052
 +      await sleep(150);
 +    }
 +
-+    // Read before stripping: both of these live in what the strip removes.
++    // Read before stripping: all of these live in what the strip removes.
 +    const images = collectImages();
 +    const priceText = collectPriceText();
++    const sizes = collectSizes();
 +
 +    const root = document.documentElement.cloneNode(true);
 +    root.querySelectorAll(DROP).forEach((n) => n.remove());
@@ -1388,17 +1482,24 @@ index 0000000..21d2052
 +    // and the element stays.
 +    root.querySelectorAll('[src^="data:"]').forEach((n) => n.removeAttribute("src"));
 +
-+    return { ok: true, url: location.href, html: `<html>${root.innerHTML}</html>`, images, priceText };
++    return {
++      ok: true,
++      url: location.href,
++      html: `<html>${root.innerHTML}</html>`,
++      images,
++      priceText,
++      sizes,
++    };
 +  } catch (err) {
 +    return { ok: false, error: err && err.message ? err.message : String(err) };
 +  }
 +})();
 diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
 new file mode 100644
-index 0000000..ba93202
+index 0000000..d2a51b1
 --- /dev/null
 +++ b/src/app/api/admin/parser/collect/route.ts
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,264 @@
 +/**
 + * Catalogue collection driven from the admin's own browser.
 + *
@@ -1478,6 +1579,19 @@ index 0000000..ba93202
 +
 +/** Longest rendered price string accepted, e.g. "4 000 ₴". */
 +const MAX_PRICE_TEXT = 120;
++
++/**
++ * Size labels one page may offer.
++ *
++ * Sixty is past any real size run — a shoe store ships twenty, a jeans store
++ * with waist-by-length pairs maybe forty — and the list is filtered by
++ * `pickSizes` before anything is stored, so a generous ceiling costs nothing
++ * but a few strings.
++ */
++const MAX_SIZE_CANDIDATES = 60;
++
++/** Longest size label accepted. "One size" is nine characters. */
++const MAX_SIZE_LABEL = 24;
 +
 +function str(v: unknown): string {
 +  return typeof v === "string" ? v.trim() : "";
@@ -1559,6 +1673,9 @@ index 0000000..ba93202
 +    )
 +    .slice(0, MAX_IMAGE_CANDIDATES);
 +  const priceText = str(body?.priceText).slice(0, MAX_PRICE_TEXT);
++  const sizeCandidates = (Array.isArray(body?.sizes) ? body.sizes : [])
++    .filter((v: unknown): v is string => typeof v === "string" && v.length <= MAX_SIZE_LABEL)
++    .slice(0, MAX_SIZE_CANDIDATES);
 +
 +  const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
 +    getFetchSettings(),
@@ -1582,7 +1699,7 @@ index 0000000..ba93202
 +      aiSettings,
 +      useAi,
 +      html,
-+      evidence: { images: imageCandidates, priceText },
++      evidence: { images: imageCandidates, priceText, sizes: sizeCandidates },
 +    });
 +
 +    const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
@@ -2357,7 +2474,7 @@ index 0000000..e8c1a26
 +  return Math.round(n * 100) / 100;
 +}
 diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
-index 448a612..bd9d6d7 100644
+index 448a612..0fe7ee4 100644
 --- a/src/lib/server/parser/extract.ts
 +++ b/src/lib/server/parser/extract.ts
 @@ -9,9 +9,9 @@
@@ -2368,11 +2485,102 @@ index 448a612..bd9d6d7 100644
 +import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
  import { harvestGalleryImages } from "./gallery";
 -import { canonicalColor } from "@/lib/server/product-fields";
-+import { canonicalColor, extractCurrencyFromDisplay } from "@/lib/server/product-fields";
++import { canonicalColor, extractCurrencyFromDisplay, pickSizes } from "@/lib/server/product-fields";
  
  // ── HTML entity decoding (the handful that show up in product copy) ───────────
  
-@@ -473,6 +473,7 @@ export function extractProduct(
+@@ -258,6 +258,72 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
+   return result;
+ }
+ 
++/**
++ * The sizes a Product node states, wherever it states them.
++ *
++ * Until now this returned nothing at all: `sizes: []` was hard-coded in both
++ * JSON-LD paths, and the only source of sizes in the whole parser was a per-site
++ * recipe rule an admin had written by hand. A store that publishes its sizes as
++ * structured data — which is most of them, since Google Shopping asks for it —
++ * had them read and thrown away.
++ *
++ * Four places carry them, and a page uses whichever its platform generates:
++ *
++ *   size: "M"                        the product is one size
++ *   size: ["S","M","L"]              or several
++ *   hasVariant: [{ size: "M" }, …]   the schema.org way since 2022
++ *   offers: [{ size: "M" }, …]       the older way, still everywhere
++ *   additionalProperty: [{ name: "Size", value: "M" }]
++ *
++ * `size` itself may be a string, a `SizeSpecification` with a name, or a
++ * `QuantitativeValue` with a value — all three appear in the wild.
++ */
++function sizeValues(v: JsonValue | undefined, out: string[]): void {
++  if (v === undefined || v === null) return;
++  if (Array.isArray(v)) {
++    for (const item of v) sizeValues(item as JsonValue, out);
++    return;
++  }
++  if (isObj(v)) {
++    const named = asString(v.name) ?? asString(v.value) ?? asString(v.sizeLabel);
++    if (named) out.push(named);
++    return;
++  }
++  const str = asString(v);
++  if (str) out.push(str);
++}
++
++function sizesFromNode(node: JsonObject): string[] {
++  const out: string[] = [];
++
++  sizeValues(node.size as JsonValue, out);
++
++  for (const key of ["hasVariant", "offers", "model"] as const) {
++    const value = node[key];
++    const nodes: JsonObject[] = [];
++    if (Array.isArray(value)) value.forEach((x) => isObj(x) && nodes.push(x));
++    else if (isObj(value)) nodes.push(value);
++    for (const child of nodes) {
++      sizeValues(child.size as JsonValue, out);
++      // An offer can hang the size off what it offers rather than off itself.
++      if (isObj(child.itemOffered)) sizeValues(child.itemOffered.size as JsonValue, out);
++    }
++  }
++
++  const props = node.additionalProperty;
++  const propList: JsonObject[] = [];
++  if (Array.isArray(props)) props.forEach((x) => isObj(x) && propList.push(x));
++  else if (isObj(props)) propList.push(props);
++  for (const prop of propList) {
++    const name = (asString(prop.name) ?? "").toLowerCase();
++    if (/^(?:size|sizes|talla|taille|größe|grosse|taglia|розмір|размер)$/.test(name)) {
++      sizeValues(prop.value as JsonValue, out);
++    }
++  }
++
++  return [...new Set(out.map((x) => x.trim()).filter(Boolean))];
++}
++
+ /**
+  * The colour a Product node states, wherever it states it.
+  *
+@@ -319,7 +385,7 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
+     // descriptions are sometimes HTML — strip tags so the catalog stays clean
+     description: description ? stripTags(description) : undefined,
+     url: url && /^https?:\/\//.test(url) ? url : undefined,
+-    sizes: [],
++    sizes: sizesFromNode(node),
+   };
+ }
+ 
+@@ -334,7 +400,7 @@ function nodeToRaw(node: JsonObject): RawExtract {
+     currency: r.currency,
+     image: r.image,
+     images: r.images ?? [],
+-    sizes: [],
++    sizes: r.sizes ?? [],
+     color: r.color,
+     material: r.material,
+     description: r.description,
+@@ -473,6 +539,7 @@ export function extractProduct(
    html: string,
    config?: ParserSiteConfig | null,
    baseUrl?: string,
@@ -2380,7 +2588,31 @@ index 448a612..bd9d6d7 100644
  ): RawExtract {
    const strategies: string[] = [];
    const jsonld = fromJsonLd(html);
-@@ -509,16 +510,28 @@ export function extractProduct(
+@@ -492,11 +559,21 @@ export function extractProduct(
+ 
+   const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
+ 
+-  // sizes only come from recipe rules today (split on comma / pipe / semicolon)
++  // Sizes, in order of how directly the page said it: a recipe rule an admin
++  // wrote, then the store's own structured data, then the size control a
++  // shopper clicks.
++  //
++  // First non-empty wins rather than a merge, because the three spell the same
++  // size differently — "40", "EU 40" and "IT 40" are one size in three
++  // vocabularies, and merged they become three sizes the product does not have.
++  //
++  // Only the rendered candidates are filtered. Structured data is the store
++  // stating its own sizes and is taken verbatim; the DOM list arrives with the
++  // size-guide link and the "Select size" placeholder still in it.
+   const sizeRaw = ruleVal("sizes");
+   const sizes = sizeRaw
+     ? sizeRaw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean)
+-    : [];
++    : (jsonld.sizes?.length ? jsonld.sizes : pickSizes(evidence?.sizes));
+ 
+   const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
+ 
+@@ -509,16 +586,28 @@ export function extractProduct(
    if (baseUrl) {
      const anchor = image ? [image, ...images] : images;
      const productName = pick(ruleVal("name"), jsonld.name, meta.name, micro.name) ?? "";
@@ -3229,10 +3461,10 @@ index 61b81ca..c236f7e 100644
  
  export interface SitemapOptions {
 diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
-index b2f84ec..c8afedd 100644
+index b2f84ec..1161a9b 100644
 --- a/src/lib/server/parser/types.ts
 +++ b/src/lib/server/parser/types.ts
-@@ -78,6 +78,28 @@ export interface ParserSiteConfig {
+@@ -78,6 +78,38 @@ export interface ParserSiteConfig {
    notes?: string;
  }
  
@@ -3256,12 +3488,22 @@ index b2f84ec..c8afedd 100644
 +   * the markup carries a bare number and the symbol lives in the rendered text.
 +   */
 +  priceText?: string;
++  /**
++   * Size labels off the size control, loose and unfiltered.
++   *
++   * A store renders its sizes as buttons, a select or a swatch row, and none of
++   * that survives the strip — which is why the parser's only source of sizes
++   * used to be a recipe rule written by hand. The list arrives with whatever
++   * else lives in that corner of the page ("Select size", the size-guide link)
++   * and is filtered by `pickSizes` on the way in.
++   */
++  sizes?: string[];
 +}
 +
  /** Raw string fields pulled out of a page before normalisation. */
  export interface RawExtract {
    name?: string;
-@@ -149,6 +171,10 @@ export interface CrawlItemResult {
+@@ -149,6 +181,10 @@ export interface CrawlItemResult {
    reason?: string;
    usedAi?: boolean;
    imagesMirrored?: number;
@@ -3273,10 +3515,10 @@ index b2f84ec..c8afedd 100644
  
  export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {
 diff --git a/src/lib/server/product-fields.ts b/src/lib/server/product-fields.ts
-index 2981d38..60d6a93 100644
+index 2981d38..4847022 100644
 --- a/src/lib/server/product-fields.ts
 +++ b/src/lib/server/product-fields.ts
-@@ -48,28 +48,103 @@ export function parsePrice(raw: string): number {
+@@ -48,28 +48,176 @@ export function parsePrice(raw: string): number {
  }
  
  // ── Extract ISO currency code from a display price string ─────────────────────
@@ -3378,6 +3620,79 @@ index 2981d38..60d6a93 100644
    return "";
  }
  
++// ── Is this string a size? ────────────────────────────────────────────────────
++// The collect extension reads size labels off the rendered page — buttons, a
++// select, a swatch row — because that is where a store puts them and the
++// stripped markup keeps none of it. It reads them loosely on purpose: a
++// container that mentions "size" also holds "Select size", a size-guide link,
++// the quantity stepper and sometimes the word "Sold out". Deciding what is
++// actually a size belongs here, next to the other field vocabularies, so the
++// extension stays a pair of eyes and the judgement has one home.
++//
++// What counts, in the spellings a European storefront ships:
++//   XS · S · M · XXL · 3XL          letter sizes, and their pairs (S/M, M-L)
++//   38 · 40.5 · 9.5                 clothing and shoe numbers
++//   EU 38 · UK 10 · US 6 · IT 42    the same with the system named
++//   32x34 · W32 L34                 waist and length
++//   One size · OS · Единый размер   the size that is not a size
++//
++// Anything else — a sentence, a price, a colour name, "Add to bag" — is not a
++// size, and a wrong size on a product is worse than a missing one: a shopper
++// picks it, and nobody finds out until the order.
++
++const LETTER_SIZE = "(?:xx?xs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl)";
++const SIZE_SYSTEM = "(?:eu|uk|us|fr|it|de|jp|cn|ru|ua|int)";
++
++const SIZE_PATTERNS: RegExp[] = [
++  // Letter sizes, alone or paired: "S", "M/L", "XS-S".
++  new RegExp(`^${LETTER_SIZE}(?:\\s?[/–—-]\\s?${LETTER_SIZE})*$`, "i"),
++  // A plain number, whole or half: "38", "40,5", "9.5". Bounded below 100 so a
++  // price or a product code cannot pass as a size.
++  /^\d{1,2}(?:[.,]5)?$/,
++  // A number with its system, either order: "EU 38", "38 EU", "UK10".
++  new RegExp(`^${SIZE_SYSTEM}\\s?\\d{1,2}(?:[.,]5)?$`, "i"),
++  new RegExp(`^\\d{1,2}(?:[.,]5)?\\s?${SIZE_SYSTEM}$`, "i"),
++  // Waist and length: "32x34", "32/34", "W32 L34".
++  /^\d{2}\s?[x×х/]\s?\d{2}$/i,
++  /^w\s?\d{2}\s?l\s?\d{2}$/i,
++  // One size, in the words stores write it in.
++  /^(?:one[\s-]?size|onesize|os|free[\s-]?size|taille unique|unica|единый размер|один размер|універсальний|безрозмірний)$/i,
++];
++
++/** True when `raw` reads as a size a shopper could pick. */
++export function looksLikeSize(raw: string): boolean {
++  const value = (raw ?? "").trim().replace(/\s+/g, " ");
++  // Twenty, not twelve: "Единый размер" and "Taille unique" are sizes and are
++  // thirteen characters long. Long enough for the longest real label, short
++  // enough that the fit advice under the size row cannot pass.
++  if (!value || value.length > 20) return false;
++  return SIZE_PATTERNS.some((p) => p.test(value));
++}
++
++/**
++ * Size labels out of a loose list of candidates: the ones that are sizes, tidied,
++ * de-duplicated, in the order the page offered them.
++ *
++ * Page order is kept rather than sorted because it is the store's own order —
++ * XS before XXL, 36 before 46 — and any sort this function invented would have
++ * to re-derive it from the labels it just accepted.
++ */
++export function pickSizes(candidates: unknown, max = 40): string[] {
++  const list = Array.isArray(candidates) ? candidates : [];
++  const seen = new Set<string>();
++  const out: string[] = [];
++  for (const raw of list) {
++    const value = String(raw ?? "").trim().replace(/\s+/g, " ");
++    if (!looksLikeSize(value)) continue;
++    const key = value.toLowerCase().replace(/[\s.,]/g, "");
++    if (seen.has(key)) continue;
++    seen.add(key);
++    out.push(value);
++    if (out.length >= max) break;
++  }
++  return out;
++}
++
 +// ── How many photos one product keeps ─────────────────────────────────────────
 +// A fashion product page carries four to a dozen shots — front, back, detail,
 +// on-model, flat-lay — and the catalogue wants the set, not a sample of it.

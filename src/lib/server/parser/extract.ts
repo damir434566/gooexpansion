@@ -11,7 +11,7 @@
  */
 import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
 import { harvestGalleryImages } from "./gallery";
-import { canonicalColor, extractCurrencyFromDisplay } from "@/lib/server/product-fields";
+import { canonicalColor, extractCurrencyFromDisplay, pickSizes } from "@/lib/server/product-fields";
 
 // ── HTML entity decoding (the handful that show up in product copy) ───────────
 
@@ -259,6 +259,72 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
 }
 
 /**
+ * The sizes a Product node states, wherever it states them.
+ *
+ * Until now this returned nothing at all: `sizes: []` was hard-coded in both
+ * JSON-LD paths, and the only source of sizes in the whole parser was a per-site
+ * recipe rule an admin had written by hand. A store that publishes its sizes as
+ * structured data — which is most of them, since Google Shopping asks for it —
+ * had them read and thrown away.
+ *
+ * Four places carry them, and a page uses whichever its platform generates:
+ *
+ *   size: "M"                        the product is one size
+ *   size: ["S","M","L"]              or several
+ *   hasVariant: [{ size: "M" }, …]   the schema.org way since 2022
+ *   offers: [{ size: "M" }, …]       the older way, still everywhere
+ *   additionalProperty: [{ name: "Size", value: "M" }]
+ *
+ * `size` itself may be a string, a `SizeSpecification` with a name, or a
+ * `QuantitativeValue` with a value — all three appear in the wild.
+ */
+function sizeValues(v: JsonValue | undefined, out: string[]): void {
+  if (v === undefined || v === null) return;
+  if (Array.isArray(v)) {
+    for (const item of v) sizeValues(item as JsonValue, out);
+    return;
+  }
+  if (isObj(v)) {
+    const named = asString(v.name) ?? asString(v.value) ?? asString(v.sizeLabel);
+    if (named) out.push(named);
+    return;
+  }
+  const str = asString(v);
+  if (str) out.push(str);
+}
+
+function sizesFromNode(node: JsonObject): string[] {
+  const out: string[] = [];
+
+  sizeValues(node.size as JsonValue, out);
+
+  for (const key of ["hasVariant", "offers", "model"] as const) {
+    const value = node[key];
+    const nodes: JsonObject[] = [];
+    if (Array.isArray(value)) value.forEach((x) => isObj(x) && nodes.push(x));
+    else if (isObj(value)) nodes.push(value);
+    for (const child of nodes) {
+      sizeValues(child.size as JsonValue, out);
+      // An offer can hang the size off what it offers rather than off itself.
+      if (isObj(child.itemOffered)) sizeValues(child.itemOffered.size as JsonValue, out);
+    }
+  }
+
+  const props = node.additionalProperty;
+  const propList: JsonObject[] = [];
+  if (Array.isArray(props)) props.forEach((x) => isObj(x) && propList.push(x));
+  else if (isObj(props)) propList.push(props);
+  for (const prop of propList) {
+    const name = (asString(prop.name) ?? "").toLowerCase();
+    if (/^(?:size|sizes|talla|taille|größe|grosse|taglia|розмір|размер)$/.test(name)) {
+      sizeValues(prop.value as JsonValue, out);
+    }
+  }
+
+  return [...new Set(out.map((x) => x.trim()).filter(Boolean))];
+}
+
+/**
  * The colour a Product node states, wherever it states it.
  *
  * `color` is the documented field, but plenty of feeds put the colourway in an
@@ -319,7 +385,7 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
     // descriptions are sometimes HTML — strip tags so the catalog stays clean
     description: description ? stripTags(description) : undefined,
     url: url && /^https?:\/\//.test(url) ? url : undefined,
-    sizes: [],
+    sizes: sizesFromNode(node),
   };
 }
 
@@ -334,7 +400,7 @@ function nodeToRaw(node: JsonObject): RawExtract {
     currency: r.currency,
     image: r.image,
     images: r.images ?? [],
-    sizes: [],
+    sizes: r.sizes ?? [],
     color: r.color,
     material: r.material,
     description: r.description,
@@ -493,11 +559,21 @@ export function extractProduct(
 
   const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
 
-  // sizes only come from recipe rules today (split on comma / pipe / semicolon)
+  // Sizes, in order of how directly the page said it: a recipe rule an admin
+  // wrote, then the store's own structured data, then the size control a
+  // shopper clicks.
+  //
+  // First non-empty wins rather than a merge, because the three spell the same
+  // size differently — "40", "EU 40" and "IT 40" are one size in three
+  // vocabularies, and merged they become three sizes the product does not have.
+  //
+  // Only the rendered candidates are filtered. Structured data is the store
+  // stating its own sizes and is taken verbatim; the DOM list arrives with the
+  // size-guide link and the "Select size" placeholder still in it.
   const sizeRaw = ruleVal("sizes");
   const sizes = sizeRaw
     ? sizeRaw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean)
-    : [];
+    : (jsonld.sizes?.length ? jsonld.sizes : pickSizes(evidence?.sizes));
 
   const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
 

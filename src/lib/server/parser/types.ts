@@ -98,6 +98,16 @@ export interface PageEvidence {
    * the markup carries a bare number and the symbol lives in the rendered text.
    */
   priceText?: string;
+  /**
+   * Size labels off the size control, loose and unfiltered.
+   *
+   * A store renders its sizes as buttons, a select or a swatch row, and none of
+   * that survives the strip — which is why the parser's only source of sizes
+   * used to be a recipe rule written by hand. The list arrives with whatever
+   * else lives in that corner of the page ("Select size", the size-guide link)
+   * and is filtered by `pickSizes` on the way in.
+   */
+  sizes?: string[];
 }
 
 /** Raw string fields pulled out of a page before normalisation. */

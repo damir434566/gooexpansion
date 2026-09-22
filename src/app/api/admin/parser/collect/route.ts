@@ -78,6 +78,19 @@ const MAX_IMAGE_URL = 1_500;
 /** Longest rendered price string accepted, e.g. "4 000 ₴". */
 const MAX_PRICE_TEXT = 120;
 
+/**
+ * Size labels one page may offer.
+ *
+ * Sixty is past any real size run — a shoe store ships twenty, a jeans store
+ * with waist-by-length pairs maybe forty — and the list is filtered by
+ * `pickSizes` before anything is stored, so a generous ceiling costs nothing
+ * but a few strings.
+ */
+const MAX_SIZE_CANDIDATES = 60;
+
+/** Longest size label accepted. "One size" is nine characters. */
+const MAX_SIZE_LABEL = 24;
+
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
@@ -158,6 +171,9 @@ export async function POST(req: Request) {
     )
     .slice(0, MAX_IMAGE_CANDIDATES);
   const priceText = str(body?.priceText).slice(0, MAX_PRICE_TEXT);
+  const sizeCandidates = (Array.isArray(body?.sizes) ? body.sizes : [])
+    .filter((v: unknown): v is string => typeof v === "string" && v.length <= MAX_SIZE_LABEL)
+    .slice(0, MAX_SIZE_CANDIDATES);
 
   const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
     getFetchSettings(),
@@ -181,7 +197,7 @@ export async function POST(req: Request) {
       aiSettings,
       useAi,
       html,
-      evidence: { images: imageCandidates, priceText },
+      evidence: { images: imageCandidates, priceText, sizes: sizeCandidates },
     });
 
     const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
