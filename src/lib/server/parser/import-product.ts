@@ -20,6 +20,12 @@ import {
   MIN_BASE_NAME,
   type VariantCandidate,
 } from "./variant-group";
+import {
+  isSameItem,
+  mergePatch,
+  type ExistingItem,
+  type IncomingItem,
+} from "./same-item";
 import { loadRetailerRules, resolveRetailer } from "@/lib/server/retailer-domains";
 import { mirrorProductImages } from "@/lib/server/storage/product-images";
 import { storeBackgroundColor } from "@/lib/server/bg-color";
@@ -187,6 +193,92 @@ async function linkColorVariants(input: {
   }
 }
 
+// ── The same item, sold somewhere else ────────────────────────────────────────
+
+const MERGE_COLUMNS =
+  "id, brand, gtin, mpn, sku, source_url, price_min, price_max, retailers, material, description, subcategory, sizes, colors, images";
+
+interface MergeRow {
+  id: string;
+  brand: string | null;
+  gtin: string | null;
+  mpn: string | null;
+  sku: string | null;
+  source_url: string | null;
+  price_min: number | null;
+  price_max: number | null;
+  retailers: Product["retailers"] | null;
+  material: string | null;
+  description: string | null;
+  subcategory: string | null;
+  sizes: string[] | null;
+  colors: string[] | null;
+  images: string[] | null;
+}
+
+function toExisting(row: MergeRow): ExistingItem {
+  return {
+    id: row.id,
+    brand: row.brand,
+    gtin: row.gtin,
+    mpn: row.mpn,
+    sku: row.sku,
+    sourceUrl: row.source_url,
+    priceMin: row.price_min,
+    priceMax: row.price_max,
+    retailers: row.retailers ?? null,
+    material: row.material,
+    description: row.description,
+    subcategory: row.subcategory,
+    sizes: row.sizes,
+    colors: row.colors,
+    images: row.images,
+  };
+}
+
+/**
+ * The product this page is a second listing of, if we already have it.
+ *
+ * Asked by code only — GTIN, or the maker's part number together with the brand.
+ * Returns null on any database complaint, including the one a database without
+ * migration 020 makes, so a catalogue that has not run it keeps importing
+ * exactly as it did before: a second row rather than a second link.
+ */
+async function findSameItem(incoming: IncomingItem, sourceUrl: string | null): Promise<ExistingItem | null> {
+  try {
+    const queries: PromiseLike<{ data: unknown; error: unknown }>[] = [];
+    if (incoming.gtin) {
+      queries.push(supabase!.from("products").select(MERGE_COLUMNS).eq("gtin", incoming.gtin).limit(5));
+    }
+    if (incoming.mpn && incoming.brand) {
+      queries.push(
+        supabase!
+          .from("products")
+          .select(MERGE_COLUMNS)
+          .eq("mpn", incoming.mpn)
+          .eq("brand", incoming.brand)
+          .limit(5),
+      );
+    }
+    if (!queries.length) return null;
+
+    for (const query of queries) {
+      const { data, error } = await query;
+      if (error || !Array.isArray(data)) continue;
+      for (const row of data as MergeRow[]) {
+        // A row we are re-importing is an update, not a merge; that path has
+        // already run by the time this is asked.
+        if (sourceUrl && row.source_url === sourceUrl) continue;
+        const existing = toExisting(row);
+        if (isSameItem(incoming, existing)) return existing;
+      }
+    }
+  } catch {
+    /* no columns, no connection — fall through to an ordinary insert */
+  }
+  return null;
+}
+
 export interface ImportOptions {
   /** Download photos into Supabase Storage and store our URLs instead. */
   mirrorImages?: boolean;
@@ -207,6 +299,10 @@ export interface ImportResult {
   priceNote?: string;
   /** How many colour siblings this row was grouped with, if any. */
   variantsLinked?: number;
+  /** Set when this page joined an existing product instead of creating one. */
+  mergedInto?: string;
+  /** What the merge filled in on that product. */
+  mergedFields?: string[];
 }
 
 export async function importParsedProduct(
@@ -235,6 +331,13 @@ export async function importParsedProduct(
   // is written only when there is one, because an empty string means "cleared"
   // to `productToDb` and would erase a label an admin had set by hand.
   const subcategory = String(p.subcategory ?? "").trim().slice(0, 60);
+
+  // Codes arrive validated from the parser (a GTIN has had its check digit
+  // verified); trimmed again here because this function is also called with
+  // hand-assembled records from the admin's own import screens.
+  const gtin = String(p.gtin ?? "").replace(/\D/g, "").slice(0, 14);
+  const mpn = String(p.mpn ?? "").trim().slice(0, 60);
+  const sku = String(p.sku ?? "").trim().slice(0, 60);
 
   // ── Price, in one currency ──────────────────────────────────────────────────
   // The catalogue is read as dollars by everything downstream: the browse
@@ -358,6 +461,11 @@ export async function importParsedProduct(
     retailers,
     ...(colors[0] ? { colorHex: colorToHex(colors[0]) } : {}),
     ...(colorGroupIds ? { colorGroupIds } : {}),
+    // The codes that identify the item away from this listing. Written on the
+    // row so the NEXT store's page can find it.
+    ...(gtin ? { gtin } : {}),
+    ...(mpn ? { mpn } : {}),
+    ...(sku ? { sku } : {}),
   };
 
   const dbRow = { ...productToDb(product), source_url: sourceUrl };
@@ -390,6 +498,47 @@ export async function importParsedProduct(
       productId = data?.id ?? id;
       updated = true;
     } else {
+      // Before writing a new row: is this the same item, sold by someone else?
+      //
+      // Asked here rather than at the top of the function so the ordinary paths
+      // stay untouched. The cost is that photos were mirrored a moment ago and
+      // may go unused — bounded, and not always wasted, since a merge fills the
+      // existing row's photos when it has none.
+      const incoming: IncomingItem = {
+        brand,
+        gtin: product.gtin,
+        mpn: product.mpn,
+        sku: product.sku,
+        price,
+        retailer: retailers[0],
+        material: product.material,
+        description: product.description,
+        subcategory: product.subcategory,
+        sizes,
+        colors,
+        images: product.images,
+      };
+      const twin = await findSameItem(incoming, sourceUrl);
+
+      if (twin) {
+        const { patch, filled } = mergePatch(twin, incoming);
+        const { error } = await writeProductRow<{ id: string }>(patch, (row) =>
+          supabase!.from("products").update(row).eq("id", twin.id).select("id").maybeSingle(),
+        );
+        if (error) throw new Error(error.message);
+        return {
+          ok: true,
+          productId: twin.id,
+          updated: true,
+          imagesMirrored,
+          imagesFailed,
+          images: images.length,
+          priceNote,
+          mergedInto: twin.id,
+          mergedFields: filled,
+        };
+      }
+
       const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);
       if (error) throw new Error(error.message);
       productId = data?.id ?? null;

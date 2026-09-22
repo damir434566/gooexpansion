@@ -449,29 +449,68 @@
   }
 
   /**
-   * A value that has swallowed the next row, cut back to itself.
+   * Every "Label: value" pair in one line of text.
    *
    * A spec block whose rows are bare text nodes renders as ONE line — innerText
-   * collapses the newlines — so "Composition: 80% wool Care: dry clean" arrives
-   * as a single pair whose value runs into the next label. The cut is made at
-   * the LAST word before that label's colon, and one word is deliberate: a label
-   * can be two words ("Made in:"), and there is no way to tell "Made" from a
-   * fibre without knowing every label in every language. One word always cuts in
-   * the right place or one word late, where two words can cut a fibre off a
-   * composition — which is the failure that matters, since the composition is
-   * what the material field is read from.
+   * collapses the newlines — so "Composition: 80% wool Care: dry clean Article:
+   * FA-1" arrives as a single string carrying three rows. Reading only the first
+   * pair loses the rest; reading them naively makes the first value swallow the
+   * second label.
    *
-   * Rows that come from a definition list or a table need none of this; this is
-   * the fallback for stores that use neither.
+   * So each value ends where the NEXT label begins, and a label is taken as the
+   * single word before its colon. One word is deliberate: a label can be two
+   * ("Article number"), and there is no way to tell "number" from the tail of the
+   * previous value without knowing every label in every language. Cutting one
+   * word early would eat a fibre off a composition, which is the failure that
+   * matters.
+   *
+   * The key is then emitted in three forms — the last word, the last two, the
+   * last three — because the server matches keys against a vocabulary and
+   * "Article number" is in it while "number" is not. Identical values, so a
+   * reader takes whichever form it recognises; this is the price of keeping that
+   * vocabulary on one side of the wire.
    */
-  function cutAtNextLabel(value) {
-    const colon = value.search(/[:：]/);
-    if (colon < 0) return value;
-    const before = value.slice(0, colon);
-    const label = before.match(/[\p{L}][\p{L}-]*$/u);
-    if (!label) return value;
-    const cut = before.length - label[0].length;
-    return cut > 0 ? value.slice(0, cut).replace(/[\s,;.]+$/, "") : value;
+  function pairsFromLine(line) {
+    const colons = [];
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === ":" || line[i] === "：") colons.push(i);
+    }
+    if (!colons.length) return [];
+
+    /** The word immediately before `index`, or "" when there is none. */
+    const labelBefore = (index) => {
+      const match = line.slice(0, index).match(/[\p{L}][\p{L}-]*$/u);
+      return match ? match[0] : "";
+    };
+
+    const pairs = [];
+    for (let i = 0; i < colons.length; i++) {
+      const colon = colons[i];
+      const label = labelBefore(colon);
+      if (!label) continue;
+
+      let end = line.length;
+      if (i + 1 < colons.length) {
+        const nextLabel = labelBefore(colons[i + 1]);
+        if (nextLabel) end = colons[i + 1] - nextLabel.length;
+      }
+
+      const value = line.slice(colon + 1, end).trim().replace(/[\s,;.]+$/, "");
+      if (!value) continue;
+
+      // Longer key forms, for the vocabularies that spell a label in two words.
+      const words = line
+        .slice(0, colon)
+        .trim()
+        .split(/\s+/)
+        .filter((w) => /^[\p{L}][\p{L}-]*$/u.test(w));
+      const keys = new Set([label]);
+      if (words.length >= 2) keys.add(words.slice(-2).join(" "));
+      if (words.length >= 3) keys.add(words.slice(-3).join(" "));
+
+      for (const key of keys) pairs.push({ key, value });
+    }
+    return pairs;
   }
 
   /**
@@ -521,9 +560,7 @@
       const text = textOf(block);
       if (!text || text.length > 2000) continue;
       for (const line of text.split(/\n+/)) {
-        const match = line.match(/^\s*([^:：]{2,40})[:：]\s*(.{1,200})$/);
-        if (!match) continue;
-        add(match[1], cutAtNextLabel(match[2]));
+        for (const pair of pairsFromLine(line)) add(pair.key, pair.value);
       }
     }
 

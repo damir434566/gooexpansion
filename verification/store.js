@@ -66,7 +66,16 @@ function spaProductPage() {
     name: "Wool-blend bomber jacket",
     brand: { "@type": "Brand", name: "Fixture Atelier" },
     image: hero,
-    offers: { "@type": "Offer", price: "1290", priceCurrency: "EUR" },
+    // A real EAN-13, and a part number: the codes that let a second retailer's
+    // page join this product instead of becoming a second copy of it.
+    offers: {
+      "@type": "Offer",
+      price: "1290",
+      priceCurrency: "EUR",
+      gtin13: "4006381333931",
+      sku: "FF-28530033",
+    },
+    mpn: "FA-2285",
   });
 
   // Written by hand rather than with JSON.stringify, because the escaping is
@@ -132,6 +141,7 @@ function spaProductPage() {
 <div class="product-specs">
   <dl>
     <dt>Composition</dt><dd>80% wool, 20% polyamide</dd>
+    <dt>Article number</dt><dd>FA-2285-CH</dd>
     <dt>Care</dt><dd>Dry clean only</dd>
     <dt>Made in</dt><dd>Italy</dd>
   </dl>
@@ -174,6 +184,7 @@ function uahProductPage() {
 <div class="specs">
   Склад: 95% бавовна, 5% еластан
   Догляд: машинне прання 30°
+  Артикул: UA-88213
 </div>
 </body></html>`;
 }

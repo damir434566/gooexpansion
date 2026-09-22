@@ -20,6 +20,9 @@ import {
   MATERIAL_KEYS,
   COLOR_KEYS,
   BRAND_KEYS,
+  CODE_KEYS,
+  normalizeGtin,
+  normalizeCode,
 } from "@/lib/server/product-fields";
 
 // ── HTML entity decoding (the handful that show up in product copy) ───────────
@@ -268,6 +271,43 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
 }
 
 /**
+ * The codes a Product node carries: the item's own number, the maker's, the
+ * store's.
+ *
+ * Read from the node and from its offers, because a store that lists one offer
+ * per size hangs the GTIN off the offer rather than off the product.
+ */
+function codesFromNode(node: JsonObject): { gtin: string; mpn: string; sku: string } {
+  const gtins: string[] = [];
+  const mpns: string[] = [];
+  const skus: string[] = [];
+
+  const read = (obj: JsonObject) => {
+    for (const key of ["gtin", "gtin8", "gtin12", "gtin13", "gtin14", "ean", "upc"] as const) {
+      const value = asString(obj[key]);
+      if (value) gtins.push(value);
+    }
+    const mpn = asString(obj.mpn);
+    if (mpn) mpns.push(mpn);
+    const sku = asString(obj.sku) ?? asString(obj.productID);
+    if (sku) skus.push(sku);
+  };
+
+  read(node);
+  for (const key of ["offers", "hasVariant"] as const) {
+    const value = node[key];
+    if (Array.isArray(value)) value.forEach((x) => isObj(x) && read(x));
+    else if (isObj(value)) read(value);
+  }
+
+  return {
+    gtin: gtins.map(normalizeGtin).find(Boolean) ?? "",
+    mpn: normalizeCode(mpns[0]),
+    sku: normalizeCode(skus[0]),
+  };
+}
+
+/**
  * The breadcrumb trail out of a `BreadcrumbList`, outermost first.
  *
  * Worth reading from the markup even though the extension also sends the
@@ -445,6 +485,7 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
     description: description ? stripTags(description) : undefined,
     url: url && /^https?:\/\//.test(url) ? url : undefined,
     sizes: sizesFromNode(node),
+    ...codesFromNode(node),
   };
 }
 
@@ -460,6 +501,9 @@ function nodeToRaw(node: JsonObject): RawExtract {
     image: r.image,
     images: r.images ?? [],
     sizes: r.sizes ?? [],
+    gtin: r.gtin,
+    mpn: r.mpn,
+    sku: r.sku,
     color: r.color,
     material: r.material,
     description: r.description,
@@ -533,6 +577,9 @@ function fromMicrodata(html: string): Partial<RawExtract> {
     return undefined;
   };
   return {
+    gtin: normalizeGtin(prop("gtin13") ?? prop("gtin") ?? prop("gtin12") ?? prop("gtin8")),
+    mpn: normalizeCode(prop("mpn")),
+    sku: normalizeCode(prop("sku") ?? prop("productID")),
     name: prop("name"),
     brand: prop("brand"),
     price: prop("price"),
@@ -735,6 +782,12 @@ export function extractProduct(
     ),
     description,
     variantUrls: evidence?.variantUrls ?? [],
+    // Codes, for recognising this item on another store's page. The spec table
+    // is the fallback: an article number printed in a table is what a store
+    // shows when it declares nothing.
+    gtin: pick(jsonld.gtin, micro.gtin, normalizeGtin(specValue(evidence?.specs, CODE_KEYS))),
+    mpn: pick(jsonld.mpn, micro.mpn),
+    sku: pick(jsonld.sku, micro.sku, normalizeCode(specValue(evidence?.specs, CODE_KEYS))),
     strategies,
   };
 }

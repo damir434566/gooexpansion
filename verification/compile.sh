@@ -51,6 +51,7 @@ cat > "$CONFIG" <<JSON
     "src/lib/server/parser/plan-collection.ts",
     "src/lib/server/parser/parse-page.ts",
     "src/lib/server/parser/variant-group.ts",
+    "src/lib/server/parser/same-item.ts",
     "src/lib/data/db.ts"
   ]
 }

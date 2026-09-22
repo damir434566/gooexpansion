@@ -147,4 +147,8 @@ export type DbProduct = {
   source_currency?: string | null;
   fx_rate?: number | null;
   fx_date?: string | null;
+  // Codes that identify the item rather than the listing (migration 020)
+  gtin?: string | null;
+  mpn?: string | null;
+  sku?: string | null;
 };

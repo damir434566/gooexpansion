@@ -191,6 +191,12 @@ export interface RawExtract {
   variantUrls?: string[];
   /** The breadcrumb trail, outermost first, from the markup or the rendered page. */
   breadcrumbs?: string[];
+  /** The item's own number (EAN/UPC), verified — the only code safe across stores. */
+  gtin?: string;
+  /** The maker's part number, unique within a brand. */
+  mpn?: string;
+  /** The store's own shelf label. Kept for reference, never matched across hosts. */
+  sku?: string;
   /** Which strategies contributed at least one field (diagnostics). */
   strategies: string[];
 }
@@ -221,6 +227,12 @@ export interface ParsedProduct {
   sourceUrl: string;
   /** Same piece, other colours, for the importer to group this row with. */
   variantUrls: string[];
+  /** The item's own number, verified. Matching it across stores is exact. */
+  gtin?: string;
+  /** The maker's part number; with a brand, good enough to match across stores. */
+  mpn?: string;
+  /** The store's shelf label, for reference. */
+  sku?: string;
   /** Diagnostics for the admin UI. */
   strategies: string[];
   issues: string[];
@@ -263,6 +275,10 @@ export interface CrawlItemResult {
   priceNote?: string;
   /** Colour siblings this row was grouped with, if any. */
   variantsLinked?: number;
+  /** Set when the page joined an existing product instead of creating one. */
+  merged?: boolean;
+  /** What that merge filled in. */
+  mergedFields?: string[];
 }
 
 export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {

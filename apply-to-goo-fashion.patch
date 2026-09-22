@@ -1186,10 +1186,10 @@ index 0000000..cd405fd
 +init().catch((err) => note(err?.message ?? "Could not read this tab."));
 diff --git a/extension/snapshot.js b/extension/snapshot.js
 new file mode 100644
-index 0000000..896887b
+index 0000000..7257d1d
 --- /dev/null
 +++ b/extension/snapshot.js
-@@ -0,0 +1,681 @@
+@@ -0,0 +1,718 @@
 +/**
 + * Take the rendered page and hand back what the server needs to read it.
 + *
@@ -1641,29 +1641,68 @@ index 0000000..896887b
 +  }
 +
 +  /**
-+   * A value that has swallowed the next row, cut back to itself.
++   * Every "Label: value" pair in one line of text.
 +   *
 +   * A spec block whose rows are bare text nodes renders as ONE line — innerText
-+   * collapses the newlines — so "Composition: 80% wool Care: dry clean" arrives
-+   * as a single pair whose value runs into the next label. The cut is made at
-+   * the LAST word before that label's colon, and one word is deliberate: a label
-+   * can be two words ("Made in:"), and there is no way to tell "Made" from a
-+   * fibre without knowing every label in every language. One word always cuts in
-+   * the right place or one word late, where two words can cut a fibre off a
-+   * composition — which is the failure that matters, since the composition is
-+   * what the material field is read from.
++   * collapses the newlines — so "Composition: 80% wool Care: dry clean Article:
++   * FA-1" arrives as a single string carrying three rows. Reading only the first
++   * pair loses the rest; reading them naively makes the first value swallow the
++   * second label.
 +   *
-+   * Rows that come from a definition list or a table need none of this; this is
-+   * the fallback for stores that use neither.
++   * So each value ends where the NEXT label begins, and a label is taken as the
++   * single word before its colon. One word is deliberate: a label can be two
++   * ("Article number"), and there is no way to tell "number" from the tail of the
++   * previous value without knowing every label in every language. Cutting one
++   * word early would eat a fibre off a composition, which is the failure that
++   * matters.
++   *
++   * The key is then emitted in three forms — the last word, the last two, the
++   * last three — because the server matches keys against a vocabulary and
++   * "Article number" is in it while "number" is not. Identical values, so a
++   * reader takes whichever form it recognises; this is the price of keeping that
++   * vocabulary on one side of the wire.
 +   */
-+  function cutAtNextLabel(value) {
-+    const colon = value.search(/[:：]/);
-+    if (colon < 0) return value;
-+    const before = value.slice(0, colon);
-+    const label = before.match(/[\p{L}][\p{L}-]*$/u);
-+    if (!label) return value;
-+    const cut = before.length - label[0].length;
-+    return cut > 0 ? value.slice(0, cut).replace(/[\s,;.]+$/, "") : value;
++  function pairsFromLine(line) {
++    const colons = [];
++    for (let i = 0; i < line.length; i++) {
++      if (line[i] === ":" || line[i] === "：") colons.push(i);
++    }
++    if (!colons.length) return [];
++
++    /** The word immediately before `index`, or "" when there is none. */
++    const labelBefore = (index) => {
++      const match = line.slice(0, index).match(/[\p{L}][\p{L}-]*$/u);
++      return match ? match[0] : "";
++    };
++
++    const pairs = [];
++    for (let i = 0; i < colons.length; i++) {
++      const colon = colons[i];
++      const label = labelBefore(colon);
++      if (!label) continue;
++
++      let end = line.length;
++      if (i + 1 < colons.length) {
++        const nextLabel = labelBefore(colons[i + 1]);
++        if (nextLabel) end = colons[i + 1] - nextLabel.length;
++      }
++
++      const value = line.slice(colon + 1, end).trim().replace(/[\s,;.]+$/, "");
++      if (!value) continue;
++
++      // Longer key forms, for the vocabularies that spell a label in two words.
++      const words = line
++        .slice(0, colon)
++        .trim()
++        .split(/\s+/)
++        .filter((w) => /^[\p{L}][\p{L}-]*$/u.test(w));
++      const keys = new Set([label]);
++      if (words.length >= 2) keys.add(words.slice(-2).join(" "));
++      if (words.length >= 3) keys.add(words.slice(-3).join(" "));
++
++      for (const key of keys) pairs.push({ key, value });
++    }
++    return pairs;
 +  }
 +
 +  /**
@@ -1713,9 +1752,7 @@ index 0000000..896887b
 +      const text = textOf(block);
 +      if (!text || text.length > 2000) continue;
 +      for (const line of text.split(/\n+/)) {
-+        const match = line.match(/^\s*([^:：]{2,40})[:：]\s*(.{1,200})$/);
-+        if (!match) continue;
-+        add(match[1], cutAtNextLabel(match[2]));
++        for (const pair of pairsFromLine(line)) add(pair.key, pair.value);
 +      }
 +    }
 +
@@ -1873,10 +1910,10 @@ index 0000000..896887b
 +})();
 diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
 new file mode 100644
-index 0000000..eebd7d7
+index 0000000..ec0ab46
 --- /dev/null
 +++ b/src/app/api/admin/parser/collect/route.ts
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,323 @@
 +/**
 + * Catalogue collection driven from the admin's own browser.
 + *
@@ -2166,6 +2203,8 @@ index 0000000..eebd7d7
 +            images: imported.images ?? 0,
 +            priceNote: imported.priceNote,
 +            variantsLinked: imported.variantsLinked ?? 0,
++            merged: !!imported.mergedInto,
++            mergedFields: imported.mergedFields,
 +          }
 +        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
 +    }
@@ -2258,10 +2297,10 @@ index c329278..1af1e83 100644
  }
 diff --git a/src/app/goo-studio/parser/collect/page.tsx b/src/app/goo-studio/parser/collect/page.tsx
 new file mode 100644
-index 0000000..ff2b2a2
+index 0000000..1088fd3
 --- /dev/null
 +++ b/src/app/goo-studio/parser/collect/page.tsx
-@@ -0,0 +1,446 @@
+@@ -0,0 +1,456 @@
 +"use client";
 +
 +/**
@@ -2689,6 +2728,16 @@ index 0000000..ff2b2a2
 +  if (r.variantsLinked) {
 +    parts.push(`grouped with ${r.variantsLinked} colour${r.variantsLinked === 1 ? "" : "s"}`);
 +  }
++  // A merge is the interesting outcome on this row: the page did not create a
++  // product, it added a place to buy one we already had.
++  if (r.merged) {
++    const filled = (r.mergedFields ?? []).filter((f) => f !== "retailer");
++    parts.push(
++      filled.length
++        ? `linked to an existing product, filling ${filled.join(", ")}`
++        : "linked to an existing product",
++    );
++  }
 +  return parts.join(" · ");
 +}
 +
@@ -2804,10 +2853,10 @@ index 20adf85..9029a0c 100644
  export function subcategoryToValue(
    tree: CategoryGroup[] = DEFAULT_CATEGORY_GROUPS,
 diff --git a/src/lib/data/db.ts b/src/lib/data/db.ts
-index 35bcec8..98e4f4f 100644
+index 35bcec8..93123cd 100644
 --- a/src/lib/data/db.ts
 +++ b/src/lib/data/db.ts
-@@ -95,6 +95,10 @@ export function dbToProduct(row: DbProduct): Product {
+@@ -95,6 +95,13 @@ export function dbToProduct(row: DbProduct): Product {
      colorGroupIds: row.color_group_ids?.length ? row.color_group_ids : undefined,
      createdAt: row.created_at,
      bgColor: row.bg_color ?? undefined,
@@ -2815,10 +2864,13 @@ index 35bcec8..98e4f4f 100644
 +    sourceCurrency: row.source_currency ?? undefined,
 +    fxRate: row.fx_rate ?? undefined,
 +    fxDate: row.fx_date ?? undefined,
++    gtin: row.gtin ?? undefined,
++    mpn: row.mpn ?? undefined,
++    sku: row.sku ?? undefined,
    };
  }
  
-@@ -132,6 +136,11 @@ export function productToDb(p: Partial<Product>) {
+@@ -132,6 +139,15 @@ export function productToDb(p: Partial<Product>) {
    if (p.cropData !== undefined)       extras.crop_data = p.cropData ?? null;
    if (p.colorGroupIds !== undefined)  extras.color_group_ids = p.colorGroupIds ?? [];
    if (p.bgColor !== undefined)        extras.bg_color = p.bgColor ?? null;
@@ -2827,10 +2879,14 @@ index 35bcec8..98e4f4f 100644
 +  if (p.sourceCurrency !== undefined) extras.source_currency = p.sourceCurrency || null;
 +  if (p.fxRate !== undefined)         extras.fx_rate = p.fxRate ?? null;
 +  if (p.fxDate !== undefined)         extras.fx_date = p.fxDate || null;
++  // Codes that identify the item, not the listing.
++  if (p.gtin !== undefined)           extras.gtin = p.gtin || null;
++  if (p.mpn !== undefined)            extras.mpn = p.mpn || null;
++  if (p.sku !== undefined)            extras.sku = p.sku || null;
    return { ...base, ...extras };
  }
  
-@@ -148,6 +157,10 @@ const OPTIONAL_COLUMNS = [
+@@ -148,6 +164,13 @@ const OPTIONAL_COLUMNS = [
    "color_hex",
    "is_group_primary",
    "bg_color",
@@ -2838,6 +2894,9 @@ index 35bcec8..98e4f4f 100644
 +  "source_currency",
 +  "fx_rate",
 +  "fx_date",
++  "gtin",
++  "mpn",
++  "sku",
  ];
  
  /**
@@ -3006,10 +3065,10 @@ index 0000000..e8c1a26
 +  return Math.round(n * 100) / 100;
 +}
 diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
-index 448a612..00bb8f4 100644
+index 448a612..3d7167c 100644
 --- a/src/lib/server/parser/extract.ts
 +++ b/src/lib/server/parser/extract.ts
-@@ -9,9 +9,18 @@
+@@ -9,9 +9,21 @@
   *
   * No DOM library — pure regex/JSON parsing so it runs in any serverless route.
   */
@@ -3026,14 +3085,54 @@ index 448a612..00bb8f4 100644
 +  MATERIAL_KEYS,
 +  COLOR_KEYS,
 +  BRAND_KEYS,
++  CODE_KEYS,
++  normalizeGtin,
++  normalizeCode,
 +} from "@/lib/server/product-fields";
  
  // ── HTML entity decoding (the handful that show up in product copy) ───────────
  
-@@ -258,6 +267,122 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
+@@ -258,6 +270,159 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
    return result;
  }
  
++/**
++ * The codes a Product node carries: the item's own number, the maker's, the
++ * store's.
++ *
++ * Read from the node and from its offers, because a store that lists one offer
++ * per size hangs the GTIN off the offer rather than off the product.
++ */
++function codesFromNode(node: JsonObject): { gtin: string; mpn: string; sku: string } {
++  const gtins: string[] = [];
++  const mpns: string[] = [];
++  const skus: string[] = [];
++
++  const read = (obj: JsonObject) => {
++    for (const key of ["gtin", "gtin8", "gtin12", "gtin13", "gtin14", "ean", "upc"] as const) {
++      const value = asString(obj[key]);
++      if (value) gtins.push(value);
++    }
++    const mpn = asString(obj.mpn);
++    if (mpn) mpns.push(mpn);
++    const sku = asString(obj.sku) ?? asString(obj.productID);
++    if (sku) skus.push(sku);
++  };
++
++  read(node);
++  for (const key of ["offers", "hasVariant"] as const) {
++    const value = node[key];
++    if (Array.isArray(value)) value.forEach((x) => isObj(x) && read(x));
++    else if (isObj(value)) read(value);
++  }
++
++  return {
++    gtin: gtins.map(normalizeGtin).find(Boolean) ?? "",
++    mpn: normalizeCode(mpns[0]),
++    sku: normalizeCode(skus[0]),
++  };
++}
++
 +/**
 + * The breadcrumb trail out of a `BreadcrumbList`, outermost first.
 + *
@@ -3153,25 +3252,39 @@ index 448a612..00bb8f4 100644
  /**
   * The colour a Product node states, wherever it states it.
   *
-@@ -319,7 +444,7 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
+@@ -319,7 +484,8 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
      // descriptions are sometimes HTML — strip tags so the catalog stays clean
      description: description ? stripTags(description) : undefined,
      url: url && /^https?:\/\//.test(url) ? url : undefined,
 -    sizes: [],
 +    sizes: sizesFromNode(node),
++    ...codesFromNode(node),
    };
  }
  
-@@ -334,7 +459,7 @@ function nodeToRaw(node: JsonObject): RawExtract {
+@@ -334,7 +500,10 @@ function nodeToRaw(node: JsonObject): RawExtract {
      currency: r.currency,
      image: r.image,
      images: r.images ?? [],
 -    sizes: [],
 +    sizes: r.sizes ?? [],
++    gtin: r.gtin,
++    mpn: r.mpn,
++    sku: r.sku,
      color: r.color,
      material: r.material,
      description: r.description,
-@@ -473,6 +598,7 @@ export function extractProduct(
+@@ -408,6 +577,9 @@ function fromMicrodata(html: string): Partial<RawExtract> {
+     return undefined;
+   };
+   return {
++    gtin: normalizeGtin(prop("gtin13") ?? prop("gtin") ?? prop("gtin12") ?? prop("gtin8")),
++    mpn: normalizeCode(prop("mpn")),
++    sku: normalizeCode(prop("sku") ?? prop("productID")),
+     name: prop("name"),
+     brand: prop("brand"),
+     price: prop("price"),
+@@ -473,6 +645,7 @@ export function extractProduct(
    html: string,
    config?: ParserSiteConfig | null,
    baseUrl?: string,
@@ -3179,7 +3292,7 @@ index 448a612..00bb8f4 100644
  ): RawExtract {
    const strategies: string[] = [];
    const jsonld = fromJsonLd(html);
-@@ -492,11 +618,31 @@ export function extractProduct(
+@@ -492,11 +665,31 @@ export function extractProduct(
  
    const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
  
@@ -3213,7 +3326,7 @@ index 448a612..00bb8f4 100644
  
    const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
  
-@@ -509,16 +655,44 @@ export function extractProduct(
+@@ -509,16 +702,44 @@ export function extractProduct(
    if (baseUrl) {
      const anchor = image ? [image, ...images] : images;
      const productName = pick(ruleVal("name"), jsonld.name, meta.name, micro.name) ?? "";
@@ -3262,7 +3375,7 @@ index 448a612..00bb8f4 100644
      image,
      images: [
        ...(image && !images.includes(image) ? [image, ...images] : images),
-@@ -528,9 +702,39 @@ export function extractProduct(
+@@ -528,9 +749,45 @@ export function extractProduct(
      // Colour is worth chasing through every layer: it is what the swatch, the
      // colour filter and half the stylist's vocabulary are built from, and a
      // page that says "Black" anywhere means it.
@@ -3302,6 +3415,12 @@ index 448a612..00bb8f4 100644
 +    ),
 +    description,
 +    variantUrls: evidence?.variantUrls ?? [],
++    // Codes, for recognising this item on another store's page. The spec table
++    // is the fallback: an article number printed in a table is what a store
++    // shows when it declares nothing.
++    gtin: pick(jsonld.gtin, micro.gtin, normalizeGtin(specValue(evidence?.specs, CODE_KEYS))),
++    mpn: pick(jsonld.mpn, micro.mpn),
++    sku: pick(jsonld.sku, micro.sku, normalizeCode(specValue(evidence?.specs, CODE_KEYS))),
      strategies,
    };
  }
@@ -3358,10 +3477,10 @@ index 89e9657..afdb8b5 100644
      .filter((u): u is string => !!u);
  
 diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
-index 70f8911..565dfec 100644
+index 70f8911..516b07b 100644
 --- a/src/lib/server/parser/import-product.ts
 +++ b/src/lib/server/parser/import-product.ts
-@@ -11,7 +11,15 @@
+@@ -11,7 +11,21 @@
   */
  import { supabase, isSupabaseConfigured } from "@/lib/supabase";
  import { productToDb, writeProductRow } from "@/lib/data/db";
@@ -3375,10 +3494,16 @@ index 70f8911..565dfec 100644
 +  MIN_BASE_NAME,
 +  type VariantCandidate,
 +} from "./variant-group";
++import {
++  isSameItem,
++  mergePatch,
++  type ExistingItem,
++  type IncomingItem,
++} from "./same-item";
  import { loadRetailerRules, resolveRetailer } from "@/lib/server/retailer-domains";
  import { mirrorProductImages } from "@/lib/server/storage/product-images";
  import { storeBackgroundColor } from "@/lib/server/bg-color";
-@@ -67,6 +75,118 @@ async function colorGroupIdsFor(colors: string[]): Promise<number[] | undefined>
+@@ -67,6 +81,204 @@ async function colorGroupIdsFor(colors: string[]): Promise<number[] | undefined>
    return ids.length ? [...new Set(ids)] : undefined;
  }
  
@@ -3494,10 +3619,96 @@ index 70f8911..565dfec 100644
 +  }
 +}
 +
++// ── The same item, sold somewhere else ────────────────────────────────────────
++
++const MERGE_COLUMNS =
++  "id, brand, gtin, mpn, sku, source_url, price_min, price_max, retailers, material, description, subcategory, sizes, colors, images";
++
++interface MergeRow {
++  id: string;
++  brand: string | null;
++  gtin: string | null;
++  mpn: string | null;
++  sku: string | null;
++  source_url: string | null;
++  price_min: number | null;
++  price_max: number | null;
++  retailers: Product["retailers"] | null;
++  material: string | null;
++  description: string | null;
++  subcategory: string | null;
++  sizes: string[] | null;
++  colors: string[] | null;
++  images: string[] | null;
++}
++
++function toExisting(row: MergeRow): ExistingItem {
++  return {
++    id: row.id,
++    brand: row.brand,
++    gtin: row.gtin,
++    mpn: row.mpn,
++    sku: row.sku,
++    sourceUrl: row.source_url,
++    priceMin: row.price_min,
++    priceMax: row.price_max,
++    retailers: row.retailers ?? null,
++    material: row.material,
++    description: row.description,
++    subcategory: row.subcategory,
++    sizes: row.sizes,
++    colors: row.colors,
++    images: row.images,
++  };
++}
++
++/**
++ * The product this page is a second listing of, if we already have it.
++ *
++ * Asked by code only — GTIN, or the maker's part number together with the brand.
++ * Returns null on any database complaint, including the one a database without
++ * migration 020 makes, so a catalogue that has not run it keeps importing
++ * exactly as it did before: a second row rather than a second link.
++ */
++async function findSameItem(incoming: IncomingItem, sourceUrl: string | null): Promise<ExistingItem | null> {
++  try {
++    const queries: PromiseLike<{ data: unknown; error: unknown }>[] = [];
++    if (incoming.gtin) {
++      queries.push(supabase!.from("products").select(MERGE_COLUMNS).eq("gtin", incoming.gtin).limit(5));
++    }
++    if (incoming.mpn && incoming.brand) {
++      queries.push(
++        supabase!
++          .from("products")
++          .select(MERGE_COLUMNS)
++          .eq("mpn", incoming.mpn)
++          .eq("brand", incoming.brand)
++          .limit(5),
++      );
++    }
++    if (!queries.length) return null;
++
++    for (const query of queries) {
++      const { data, error } = await query;
++      if (error || !Array.isArray(data)) continue;
++      for (const row of data as MergeRow[]) {
++        // A row we are re-importing is an update, not a merge; that path has
++        // already run by the time this is asked.
++        if (sourceUrl && row.source_url === sourceUrl) continue;
++        const existing = toExisting(row);
++        if (isSameItem(incoming, existing)) return existing;
++      }
++    }
++  } catch {
++    /* no columns, no connection — fall through to an ordinary insert */
++  }
++  return null;
++}
++
  export interface ImportOptions {
    /** Download photos into Supabase Storage and store our URLs instead. */
    mirrorImages?: boolean;
-@@ -81,6 +201,12 @@ export interface ImportResult {
+@@ -81,6 +293,16 @@ export interface ImportResult {
    imagesMirrored?: number;
    /** Photos we failed to mirror (kept as original URLs). */
    imagesFailed?: number;
@@ -3507,10 +3718,14 @@ index 70f8911..565dfec 100644
 +  priceNote?: string;
 +  /** How many colour siblings this row was grouped with, if any. */
 +  variantsLinked?: number;
++  /** Set when this page joined an existing product instead of creating one. */
++  mergedInto?: string;
++  /** What the merge filled in on that product. */
++  mergedFields?: string[];
  }
  
  export async function importParsedProduct(
-@@ -104,11 +230,56 @@ export async function importParsedProduct(
+@@ -104,11 +326,63 @@ export async function importParsedProduct(
      ? (p.gender as Gender)
      : undefined;
  
@@ -3522,6 +3737,14 @@ index 70f8911..565dfec 100644
 +  // is written only when there is one, because an empty string means "cleared"
 +  // to `productToDb` and would erase a label an admin had set by hand.
 +  const subcategory = String(p.subcategory ?? "").trim().slice(0, 60);
+ 
+-  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, 12);
++  // Codes arrive validated from the parser (a GTIN has had its check digit
++  // verified); trimmed again here because this function is also called with
++  // hand-assembled records from the admin's own import screens.
++  const gtin = String(p.gtin ?? "").replace(/\D/g, "").slice(0, 14);
++  const mpn = String(p.mpn ?? "").trim().slice(0, 60);
++  const sku = String(p.sku ?? "").trim().slice(0, 60);
 +
 +  // ── Price, in one currency ──────────────────────────────────────────────────
 +  // The catalogue is read as dollars by everything downstream: the browse
@@ -3534,8 +3757,7 @@ index 70f8911..565dfec 100644
 +  const sourcePrice = Math.max(0, Number(p.price) || 0);
 +  const sourcePriceOriginal = Math.max(0, Number(p.priceOriginal) || 0);
 +  const sourceCurrency = String(p.currency ?? "").trim().toUpperCase().slice(0, 3);
- 
--  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, 12);
++
 +  let price = sourcePrice;
 +  let priceOriginal = sourcePriceOriginal;
 +  let currency = sourceCurrency || "USD";
@@ -3571,7 +3793,7 @@ index 70f8911..565dfec 100644
    let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
  
    // Mirror photos to our storage before writing the row, so the catalog only
-@@ -147,8 +318,10 @@ export async function importParsedProduct(
+@@ -147,8 +421,10 @@ export async function importParsedProduct(
      ? [{
          name: resolved.name,
          url: sourceUrl,
@@ -3584,7 +3806,7 @@ index 70f8911..565dfec 100644
          availability: "in stock",
          isOfficial: resolved.isOfficial,
        }]
-@@ -160,6 +333,7 @@ export async function importParsedProduct(
+@@ -160,6 +436,7 @@ export async function importParsedProduct(
      name,
      brand: brand as Product["brand"],
      category,
@@ -3592,7 +3814,7 @@ index 70f8911..565dfec 100644
      description: String(p.description ?? "").slice(0, 5000),
      imageUrl,
      images: images.length ? images : (imageUrl ? [imageUrl] : []),
-@@ -169,6 +343,14 @@ export async function importParsedProduct(
+@@ -169,6 +446,14 @@ export async function importParsedProduct(
      priceMin: price,
      priceMax: priceOriginal > price ? priceOriginal : price,
      currency,
@@ -3607,7 +3829,67 @@ index 70f8911..565dfec 100644
      isNew: true,
      isSaved: false,
      gender,
-@@ -232,6 +414,21 @@ export async function importParsedProduct(
+@@ -176,6 +461,11 @@ export async function importParsedProduct(
+     retailers,
+     ...(colors[0] ? { colorHex: colorToHex(colors[0]) } : {}),
+     ...(colorGroupIds ? { colorGroupIds } : {}),
++    // The codes that identify the item away from this listing. Written on the
++    // row so the NEXT store's page can find it.
++    ...(gtin ? { gtin } : {}),
++    ...(mpn ? { mpn } : {}),
++    ...(sku ? { sku } : {}),
+   };
+ 
+   const dbRow = { ...productToDb(product), source_url: sourceUrl };
+@@ -208,6 +498,47 @@ export async function importParsedProduct(
+       productId = data?.id ?? id;
+       updated = true;
+     } else {
++      // Before writing a new row: is this the same item, sold by someone else?
++      //
++      // Asked here rather than at the top of the function so the ordinary paths
++      // stay untouched. The cost is that photos were mirrored a moment ago and
++      // may go unused — bounded, and not always wasted, since a merge fills the
++      // existing row's photos when it has none.
++      const incoming: IncomingItem = {
++        brand,
++        gtin: product.gtin,
++        mpn: product.mpn,
++        sku: product.sku,
++        price,
++        retailer: retailers[0],
++        material: product.material,
++        description: product.description,
++        subcategory: product.subcategory,
++        sizes,
++        colors,
++        images: product.images,
++      };
++      const twin = await findSameItem(incoming, sourceUrl);
++
++      if (twin) {
++        const { patch, filled } = mergePatch(twin, incoming);
++        const { error } = await writeProductRow<{ id: string }>(patch, (row) =>
++          supabase!.from("products").update(row).eq("id", twin.id).select("id").maybeSingle(),
++        );
++        if (error) throw new Error(error.message);
++        return {
++          ok: true,
++          productId: twin.id,
++          updated: true,
++          imagesMirrored,
++          imagesFailed,
++          images: images.length,
++          priceNote,
++          mergedInto: twin.id,
++          mergedFields: filled,
++        };
++      }
++
+       const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);
+       if (error) throw new Error(error.message);
+       productId = data?.id ?? null;
+@@ -232,6 +563,21 @@ export async function importParsedProduct(
      await storeBackgroundColor(productId, imageUrl);
    }
  
@@ -3629,7 +3911,7 @@ index 70f8911..565dfec 100644
    // Record an import job (best-effort — table is optional, ignore if absent).
    if (sourceUrl) {
      try {
-@@ -243,5 +440,14 @@ export async function importParsedProduct(
+@@ -243,5 +589,14 @@ export async function importParsedProduct(
      } catch { /* import_jobs not migrated — non-critical */ }
    }
  
@@ -3646,13 +3928,15 @@ index 70f8911..565dfec 100644
 +  };
  }
 diff --git a/src/lib/server/parser/normalize.ts b/src/lib/server/parser/normalize.ts
-index 5e23814..0d6becf 100644
+index 5e23814..5567ffe 100644
 --- a/src/lib/server/parser/normalize.ts
 +++ b/src/lib/server/parser/normalize.ts
-@@ -7,12 +7,20 @@ import {
+@@ -7,12 +7,22 @@ import {
    cleanName,
    parsePrice,
    extractCurrencyFromDisplay,
++  normalizeGtin,
++  normalizeCode,
 +  MAX_PRODUCT_IMAGES,
    matchCategory,
    inferGenderFromText,
@@ -3670,7 +3954,7 @@ index 5e23814..0d6becf 100644
  
  /** Resolve a possibly-relative image URL against the page URL. */
  function absoluteUrl(src: string, base: string): string | null {
-@@ -25,10 +33,20 @@ function absoluteUrl(src: string, base: string): string | null {
+@@ -25,10 +35,20 @@ function absoluteUrl(src: string, base: string): string | null {
    }
  }
  
@@ -3692,7 +3976,7 @@ index 5e23814..0d6becf 100644
  }
  
  export function normalizeExtract(
-@@ -48,6 +66,27 @@ export function normalizeExtract(
+@@ -48,6 +68,27 @@ export function normalizeExtract(
    const priceOriginal = parsePrice(raw.priceOriginal ?? "");
  
    const currency = normalizeCurrency(raw.currency, raw.price);
@@ -3720,7 +4004,7 @@ index 5e23814..0d6becf 100644
  
    // Category: explicit override → product name/description → URL path hint.
    // Prefer the name-based guess; only fall back to the URL path when the name
-@@ -58,9 +97,23 @@ export function normalizeExtract(
+@@ -58,9 +99,23 @@ export function normalizeExtract(
      // 92% against 88% when the description is included: descriptions name-drop
      // other garments, and "pairs well with shorts" reads as "is shorts".
      matchCategory(name) ??
@@ -3744,7 +4028,7 @@ index 5e23814..0d6becf 100644
    // Gender: explicit override → URL → name/description
    const gender =
      config?.genderOverride ??
-@@ -84,7 +137,7 @@ export function normalizeExtract(
+@@ -84,7 +139,7 @@ export function normalizeExtract(
      const key = imageKey(full);
      if (!byPhoto.has(key)) byPhoto.set(key, full);
    }
@@ -3753,7 +4037,7 @@ index 5e23814..0d6becf 100644
  
    const rawAbs = raw.image && absoluteUrl(raw.image, sourceUrl);
    const rawPrimary = rawAbs ? (upgradeImageUrl(rawAbs, sourceUrl) ?? rawAbs) : null;
-@@ -102,6 +155,35 @@ export function normalizeExtract(
+@@ -102,6 +157,35 @@ export function normalizeExtract(
    const colors = [colorFrom(raw.color, name, sourceUrl)].filter(Boolean) as string[];
    const sizes = raw.sizes ?? [];
  
@@ -3789,12 +4073,18 @@ index 5e23814..0d6becf 100644
    return {
      name,
      brand,
-@@ -112,6 +194,8 @@ export function normalizeExtract(
+@@ -112,6 +196,14 @@ export function normalizeExtract(
      images: images.length ? images : (imageUrl ? [imageUrl] : []),
      colors,
      sizes,
 +    variantUrls,
 +    ...(subcategory ? { subcategory } : {}),
++    // Validated here rather than trusted: a GTIN that fails its check digit is
++    // a digit string the page happened to carry, and matching products on one
++    // would link a coat to a phone number's worth of coincidence.
++    ...(normalizeGtin(raw.gtin) ? { gtin: normalizeGtin(raw.gtin) } : {}),
++    ...(normalizeCode(raw.mpn) ? { mpn: normalizeCode(raw.mpn) } : {}),
++    ...(normalizeCode(raw.sku) ? { sku: normalizeCode(raw.sku) } : {}),
      material: raw.material ?? "",
      price,
      priceOriginal,
@@ -4317,6 +4607,169 @@ index 0000000..7ce95f3
 +    return false;
 +  }
 +}
+diff --git a/src/lib/server/parser/same-item.ts b/src/lib/server/parser/same-item.ts
+new file mode 100644
+index 0000000..22ee6ca
+--- /dev/null
++++ b/src/lib/server/parser/same-item.ts
+@@ -0,0 +1,157 @@
++/**
++ * Recognising the same item on a second store's page.
++ *
++ * A collect run walks one store at a time, so the same coat collected from two
++ * retailers used to become two products, each showing one place to buy it. What
++ * the catalogue wanted was one product with two links — which is only safe when
++ * the two pages can be shown to be the same ITEM, not merely similar ones.
++ *
++ * Codes decide it, and only two of the three are usable:
++ *
++ *   gtin       the item's own number. Same GTIN, same thing, whoever sells it.
++ *   brand+mpn  the maker's part number within its brand.
++ *   sku        the store's shelf label — two retailers use the same string for
++ *              different things, so it is never matched across hosts.
++ *
++ * Names are not used at all. "Wool Blend Bomber Jacket" is what four brands call
++ * four different jackets, and a wrong merge is worse than two rows: it puts a
++ * link on a product that sends a shopper to something else, and it reads as
++ * correct while doing it.
++ *
++ * The merge itself only ever FILLS: a field the existing row has is left alone.
++ * Two stores describe the same coat differently, and the row that arrived first
++ * is the one an admin may already have edited.
++ */
++import type { Retailer } from "@/lib/types";
++
++/** The columns the importer needs to decide and to merge. */
++export interface ExistingItem {
++  id: string;
++  brand?: string | null;
++  gtin?: string | null;
++  mpn?: string | null;
++  sourceUrl?: string | null;
++  priceMin?: number | null;
++  priceMax?: number | null;
++  retailers?: Retailer[] | null;
++  material?: string | null;
++  description?: string | null;
++  subcategory?: string | null;
++  sizes?: string[] | null;
++  colors?: string[] | null;
++  images?: string[] | null;
++  sku?: string | null;
++}
++
++export interface IncomingItem {
++  brand: string;
++  gtin?: string;
++  mpn?: string;
++  sku?: string;
++  /** Price in the catalogue's currency, i.e. already converted to dollars. */
++  price: number;
++  retailer?: Retailer;
++  material?: string;
++  description?: string;
++  subcategory?: string;
++  sizes?: string[];
++  colors?: string[];
++  images?: string[];
++}
++
++/** True when `row` is the same item as `incoming`, by code. */
++export function isSameItem(incoming: IncomingItem, row: ExistingItem): boolean {
++  const gtin = (incoming.gtin ?? "").trim();
++  if (gtin && (row.gtin ?? "").trim() === gtin) return true;
++
++  const mpn = (incoming.mpn ?? "").trim().toLowerCase();
++  if (mpn && (row.mpn ?? "").trim().toLowerCase() === mpn) {
++    const ours = incoming.brand.trim().toLowerCase();
++    const theirs = (row.brand ?? "").trim().toLowerCase();
++    return !!ours && ours === theirs;
++  }
++
++  return false;
++}
++
++/**
++ * The retailer list with this store's entry in it.
++ *
++ * Replaced rather than appended when the store is already there, by URL first
++ * and by name second: re-collecting a product must update its price, not give it
++ * the same shop twice.
++ */
++export function withRetailer(existing: Retailer[] | null | undefined, entry: Retailer): Retailer[] {
++  const list = Array.isArray(existing) ? [...existing] : [];
++  const index = list.findIndex(
++    (r) =>
++      (r.url && entry.url && r.url === entry.url) ||
++      (r.name && entry.name && r.name.toLowerCase() === entry.name.toLowerCase()),
++  );
++  if (index >= 0) list[index] = entry;
++  else list.push(entry);
++  return list.slice(0, 20);
++}
++
++export interface MergeResult {
++  /** Database columns to write on the existing row. */
++  patch: Record<string, unknown>;
++  /** Field names this merge filled in, for the admin's row in the run. */
++  filled: string[];
++}
++
++/**
++ * What to write on the existing row so it carries this store too.
++ *
++ * The price range widens to include the new store's price: a product sold at two
++ * prices has both, and the lower one is what a shopper is shown. Everything else
++ * is filled only where the existing row is empty.
++ */
++export function mergePatch(row: ExistingItem, incoming: IncomingItem): MergeResult {
++  const patch: Record<string, unknown> = {};
++  const filled: string[] = [];
++
++  if (incoming.retailer) {
++    patch.retailers = withRetailer(row.retailers, incoming.retailer);
++    filled.push("retailer");
++  }
++
++  if (incoming.price > 0) {
++    const currentMin = typeof row.priceMin === "number" && row.priceMin > 0 ? row.priceMin : Infinity;
++    const currentMax = typeof row.priceMax === "number" ? row.priceMax : 0;
++    const nextMin = Math.min(currentMin, incoming.price);
++    const nextMax = Math.max(currentMax, incoming.price);
++    if (nextMin !== currentMin) {
++      patch.price_min = nextMin;
++      filled.push("price");
++    }
++    if (nextMax !== currentMax) patch.price_max = nextMax;
++  }
++
++  const fillText = (column: string, current: unknown, value: string | undefined) => {
++    if (!value) return;
++    if (typeof current === "string" && current.trim()) return;
++    patch[column] = value;
++    filled.push(column);
++  };
++
++  fillText("material", row.material, incoming.material);
++  fillText("description", row.description, incoming.description);
++  fillText("subcategory", row.subcategory, incoming.subcategory);
++  fillText("gtin", row.gtin, incoming.gtin);
++  fillText("mpn", row.mpn, incoming.mpn);
++  fillText("sku", row.sku, incoming.sku);
++
++  const fillList = (column: string, current: unknown, value: string[] | undefined) => {
++    if (!value?.length) return;
++    if (Array.isArray(current) && current.length) return;
++    patch[column] = value;
++    filled.push(column);
++  };
++
++  fillList("sizes", row.sizes, incoming.sizes);
++  fillList("colors", row.colors, incoming.colors);
++  fillList("images", row.images, incoming.images);
++
++  return { patch, filled };
++}
 diff --git a/src/lib/server/parser/sitemap.ts b/src/lib/server/parser/sitemap.ts
 index 61b81ca..c236f7e 100644
 --- a/src/lib/server/parser/sitemap.ts
@@ -4389,7 +4842,7 @@ index 61b81ca..c236f7e 100644
  
  export interface SitemapOptions {
 diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
-index b2f84ec..937ff5c 100644
+index b2f84ec..0ef373e 100644
 --- a/src/lib/server/parser/types.ts
 +++ b/src/lib/server/parser/types.ts
 @@ -6,6 +6,12 @@
@@ -4500,7 +4953,7 @@ index b2f84ec..937ff5c 100644
  /** Raw string fields pulled out of a page before normalisation. */
  export interface RawExtract {
    name?: string;
-@@ -93,6 +187,10 @@ export interface RawExtract {
+@@ -93,6 +187,16 @@ export interface RawExtract {
    description?: string;
    /** Per-product URL (set when extracting from a listing/ItemList). */
    url?: string;
@@ -4508,10 +4961,16 @@ index b2f84ec..937ff5c 100644
 +  variantUrls?: string[];
 +  /** The breadcrumb trail, outermost first, from the markup or the rendered page. */
 +  breadcrumbs?: string[];
++  /** The item's own number (EAN/UPC), verified — the only code safe across stores. */
++  gtin?: string;
++  /** The maker's part number, unique within a brand. */
++  mpn?: string;
++  /** The store's own shelf label. Kept for reference, never matched across hosts. */
++  sku?: string;
    /** Which strategies contributed at least one field (diagnostics). */
    strategies: string[];
  }
-@@ -102,6 +200,14 @@ export interface ParsedProduct {
+@@ -102,6 +206,14 @@ export interface ParsedProduct {
    name: string;
    brand: string;
    category: Category;
@@ -4526,16 +4985,22 @@ index b2f84ec..937ff5c 100644
    gender?: Gender;
    description: string;
    imageUrl: string;
-@@ -113,6 +219,8 @@ export interface ParsedProduct {
+@@ -113,6 +225,14 @@ export interface ParsedProduct {
    priceOriginal: number;
    currency: string;
    sourceUrl: string;
 +  /** Same piece, other colours, for the importer to group this row with. */
 +  variantUrls: string[];
++  /** The item's own number, verified. Matching it across stores is exact. */
++  gtin?: string;
++  /** The maker's part number; with a brand, good enough to match across stores. */
++  mpn?: string;
++  /** The store's shelf label, for reference. */
++  sku?: string;
    /** Diagnostics for the admin UI. */
    strategies: string[];
    issues: string[];
-@@ -149,6 +257,12 @@ export interface CrawlItemResult {
+@@ -149,6 +269,16 @@ export interface CrawlItemResult {
    reason?: string;
    usedAi?: boolean;
    imagesMirrored?: number;
@@ -4545,6 +5010,10 @@ index b2f84ec..937ff5c 100644
 +  priceNote?: string;
 +  /** Colour siblings this row was grouped with, if any. */
 +  variantsLinked?: number;
++  /** Set when the page joined an existing product instead of creating one. */
++  merged?: boolean;
++  /** What that merge filled in. */
++  mergedFields?: string[];
  }
  
  export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {
@@ -4647,10 +5116,10 @@ index 0000000..3f3d93c
 +  return { groupId: groupId ?? undefined, hasPrimary };
 +}
 diff --git a/src/lib/server/product-fields.ts b/src/lib/server/product-fields.ts
-index 2981d38..b44dd4a 100644
+index 2981d38..a59ef1c 100644
 --- a/src/lib/server/product-fields.ts
 +++ b/src/lib/server/product-fields.ts
-@@ -48,28 +48,274 @@ export function parsePrice(raw: string): number {
+@@ -48,28 +48,324 @@ export function parsePrice(raw: string): number {
  }
  
  // ── Extract ISO currency code from a display price string ─────────────────────
@@ -4752,6 +5221,56 @@ index 2981d38..b44dd4a 100644
    return "";
  }
  
++// ── Product codes ─────────────────────────────────────────────────────────────
++// Three kinds of code appear on a product page, and the difference between them
++// decides what they may be used for:
++//
++//   GTIN (EAN/UPC)  the item's own number, issued once for the whole world. Two
++//                   pages carrying the same GTIN are the same thing, whoever is
++//                   selling it. This is the only code safe to match ACROSS
++//                   stores.
++//   MPN             the maker's part number. Unique within a brand, so it works
++//                   across stores when the brand matches too.
++//   SKU             the store's shelf label. Two retailers can and do use the
++//                   same SKU string for different things, so it is kept for
++//                   reference and never matched on across hosts.
++//
++// Getting that wrong does not produce a missing link — it produces a coat with
++// a "also at" link to a totally different coat, which reads as correct.
++
++/**
++ * A GTIN reduced to its digits, or "" when it is not one.
++ *
++ * The check digit is verified rather than assumed. A page carries plenty of
++ * digit strings — a style code, a phone number, a timestamp — and a GTIN field
++ * filled with one of those would match another product filled with the same
++ * junk. GS1's mod-10 is three lines and turns "is this thirteen digits" into "is
++ * this a number the world issued".
++ */
++export function normalizeGtin(raw: unknown): string {
++  const digits = String(raw ?? "").replace(/\D/g, "");
++  if (![8, 12, 13, 14].includes(digits.length)) return "";
++  if (/^0+$/.test(digits)) return "";
++
++  // Weights alternate 3 and 1 from the right, excluding the check digit itself.
++  const body = digits.slice(0, -1);
++  const check = Number(digits.slice(-1));
++  let sum = 0;
++  for (let i = 0; i < body.length; i++) {
++    const digit = Number(body[body.length - 1 - i]);
++    sum += i % 2 === 0 ? digit * 3 : digit;
++  }
++  return (10 - (sum % 10)) % 10 === check ? digits : "";
++}
++
++/** A code kept for reference: trimmed, bounded, and stripped of decoration. */
++export function normalizeCode(raw: unknown, max = 60): string {
++  return String(raw ?? "")
++    .trim()
++    .replace(/^(?:ref\.?|sku|art\.?|артикул)\s*[:#]?\s*/i, "")
++    .slice(0, max);
++}
++
 +// ── The store's own spec table ────────────────────────────────────────────────
 +// Composition, care, country of origin, article number: a store prints them as
 +// a definition list or a two-column table, and structured data almost never
@@ -4962,10 +5481,10 @@ index 79fb337..8fbeba4 100644
    if (!isSupabaseConfigured || !supabase) {
      return { imageUrl, images: gallery, mirrored: 0, failed: 0, attempted: false };
 diff --git a/src/lib/supabase.ts b/src/lib/supabase.ts
-index 67d73f5..3b80900 100644
+index 67d73f5..b7af566 100644
 --- a/src/lib/supabase.ts
 +++ b/src/lib/supabase.ts
-@@ -142,4 +142,9 @@ export type DbProduct = {
+@@ -142,4 +142,13 @@ export type DbProduct = {
    color_group_ids?: number[] | null;
    // Backdrop colour sampled from the photo's corners (migration 015)
    bg_color?: string | null;
@@ -4974,12 +5493,16 @@ index 67d73f5..3b80900 100644
 +  source_currency?: string | null;
 +  fx_rate?: number | null;
 +  fx_date?: string | null;
++  // Codes that identify the item rather than the listing (migration 020)
++  gtin?: string | null;
++  mpn?: string | null;
++  sku?: string | null;
  };
 diff --git a/src/lib/types.ts b/src/lib/types.ts
-index c671fc0..0652a7d 100644
+index c671fc0..3343d7f 100644
 --- a/src/lib/types.ts
 +++ b/src/lib/types.ts
-@@ -162,6 +162,19 @@ export interface Product {
+@@ -162,6 +162,31 @@ export interface Product {
    priceMin: number;
    priceMax: number;
    currency: string;
@@ -4996,6 +5519,18 @@ index c671fc0..0652a7d 100644
 +  sourceCurrency?: string;
 +  fxRate?: number;
 +  fxDate?: string;
++  /**
++   * The codes that identify this item away from any one store.
++   *
++   * `gtin` is the item's own number and is verified before it is stored, so two
++   * rows carrying the same one are the same thing — which is how a second
++   * retailer's page joins this product instead of becoming a second copy of it.
++   * `mpn` does the same within a brand. `sku` is one store's shelf label and is
++   * kept for reference only.
++   */
++  gtin?: string;
++  mpn?: string;
++  sku?: string;
    isNew: boolean;
    isSaved: boolean;
    styleKeywords: StyleKeyword[];
@@ -5078,4 +5613,74 @@ index 0000000..f7ee10b
 +-- Without this PostgREST keeps serving from a schema cache that has never heard
 +-- of the columns, and the API answers "column products.source_price does not
 +-- exist" while the columns plainly exist.
++notify pgrst, 'reload schema';
+diff --git a/supabase/migrations/020_product_codes.sql b/supabase/migrations/020_product_codes.sql
+new file mode 100644
+index 0000000..86d2dfc
+--- /dev/null
++++ b/supabase/migrations/020_product_codes.sql
+@@ -0,0 +1,64 @@
++-- Migration 020: The codes that identify an item rather than a listing.
++--
++-- A collect run imports pages, and a page belongs to one store. So the same coat
++-- collected from two retailers became two products, each with one "where to buy"
++-- link, and nothing in the catalogue knew they were the same coat.
++--
++-- What tells them apart from two similar coats is a code:
++--
++--   gtin  the item's own number (EAN/UPC), issued once for the whole world.
++--         Two rows carrying the same GTIN are the same thing, whoever sells it.
++--         Stored only after its check digit verifies, so a style code or a
++--         timestamp that happened to sit in the field cannot match anything.
++--   mpn   the maker's part number. Unique within a brand, so it identifies an
++--         item when the brand matches too.
++--   sku   the store's own shelf label. Kept for reference and deliberately NOT
++--         matched on across stores: two retailers use the same SKU string for
++--         different things often enough that a match would link a coat to a
++--         stranger, and a wrong "also available at" link reads as correct.
++--
++-- The importer uses gtin, then brand+mpn, to add a second store to an existing
++-- product instead of writing a second product.
++
++alter table public.products
++  add column if not exists gtin text;
++
++alter table public.products
++  add column if not exists mpn text;
++
++alter table public.products
++  add column if not exists sku text;
++
++-- Digits only, and only the lengths GS1 issues. The check digit is verified in
++-- the importer; this is the shape guard, so a hand edit cannot put a sentence
++-- where a number belongs.
++alter table public.products
++  drop constraint if exists products_gtin_shape;
++
++alter table public.products
++  add constraint products_gtin_shape
++  check (gtin is null or gtin ~ '^[0-9]{8}$' or gtin ~ '^[0-9]{12,14}$');
++
++-- The lookups the importer makes per product: one by gtin, one by brand and mpn.
++-- Partial, because most rows will carry neither and an index over those nulls
++-- would be dead weight.
++create index if not exists products_gtin_idx
++  on public.products (gtin)
++  where gtin is not null;
++
++create index if not exists products_brand_mpn_idx
++  on public.products (brand, mpn)
++  where mpn is not null;
++
++comment on column public.products.gtin is
++  'EAN/UPC of the item, digits only, check digit verified before storing. Two rows with the same value are the same item sold by different stores.';
++
++comment on column public.products.mpn is
++  'Manufacturer part number. Identifies the item within its brand, so it is matched together with brand.';
++
++comment on column public.products.sku is
++  'The source stores own article number. Reference only: SKU strings are not unique between retailers and are never matched across them.';
++
++-- Without this PostgREST keeps serving from a schema cache that has never heard
++-- of the columns.
 +notify pgrst, 'reload schema';

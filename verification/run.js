@@ -586,6 +586,20 @@ async function main() {
     uah && JSON.stringify(uah.brand),
   );
 
+  // The codes that let a second retailer's page join this product rather than
+  // duplicate it. The joining itself needs a database and is unit-tested; what
+  // runs here is the reading.
+  check(
+    "the item's own number came off the offer, check digit and all",
+    !!bomber && bomber.gtin === "4006381333931" && bomber.mpn === "FA-2285",
+    bomber && JSON.stringify({ gtin: bomber.gtin, mpn: bomber.mpn, sku: bomber.sku }),
+  );
+  check(
+    "and an article number off a plain Ukrainian line, where nothing is declared",
+    !!uah && uah.sku === "UA-88213" && !uah.gtin,
+    uah && JSON.stringify({ gtin: uah.gtin, sku: uah.sku }),
+  );
+
   collect.close(); popup.close();
 
   console.log(`\n  ${pass} passed, ${failures.length} failed\n`);

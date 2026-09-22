@@ -99,6 +99,9 @@ export function dbToProduct(row: DbProduct): Product {
     sourceCurrency: row.source_currency ?? undefined,
     fxRate: row.fx_rate ?? undefined,
     fxDate: row.fx_date ?? undefined,
+    gtin: row.gtin ?? undefined,
+    mpn: row.mpn ?? undefined,
+    sku: row.sku ?? undefined,
   };
 }
 
@@ -141,6 +144,10 @@ export function productToDb(p: Partial<Product>) {
   if (p.sourceCurrency !== undefined) extras.source_currency = p.sourceCurrency || null;
   if (p.fxRate !== undefined)         extras.fx_rate = p.fxRate ?? null;
   if (p.fxDate !== undefined)         extras.fx_date = p.fxDate || null;
+  // Codes that identify the item, not the listing.
+  if (p.gtin !== undefined)           extras.gtin = p.gtin || null;
+  if (p.mpn !== undefined)            extras.mpn = p.mpn || null;
+  if (p.sku !== undefined)            extras.sku = p.sku || null;
   return { ...base, ...extras };
 }
 
@@ -161,6 +168,9 @@ const OPTIONAL_COLUMNS = [
   "source_currency",
   "fx_rate",
   "fx_date",
+  "gtin",
+  "mpn",
+  "sku",
 ];
 
 /**

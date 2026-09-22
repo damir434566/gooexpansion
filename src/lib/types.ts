@@ -175,6 +175,18 @@ export interface Product {
   sourceCurrency?: string;
   fxRate?: number;
   fxDate?: string;
+  /**
+   * The codes that identify this item away from any one store.
+   *
+   * `gtin` is the item's own number and is verified before it is stored, so two
+   * rows carrying the same one are the same thing — which is how a second
+   * retailer's page joins this product instead of becoming a second copy of it.
+   * `mpn` does the same within a brand. `sku` is one store's shelf label and is
+   * kept for reference only.
+   */
+  gtin?: string;
+  mpn?: string;
+  sku?: string;
   isNew: boolean;
   isSaved: boolean;
   styleKeywords: StyleKeyword[];

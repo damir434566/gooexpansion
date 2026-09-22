@@ -135,6 +135,56 @@ export function extractCurrencyFromDisplay(raw: string): string {
   return "";
 }
 
+// ── Product codes ─────────────────────────────────────────────────────────────
+// Three kinds of code appear on a product page, and the difference between them
+// decides what they may be used for:
+//
+//   GTIN (EAN/UPC)  the item's own number, issued once for the whole world. Two
+//                   pages carrying the same GTIN are the same thing, whoever is
+//                   selling it. This is the only code safe to match ACROSS
+//                   stores.
+//   MPN             the maker's part number. Unique within a brand, so it works
+//                   across stores when the brand matches too.
+//   SKU             the store's shelf label. Two retailers can and do use the
+//                   same SKU string for different things, so it is kept for
+//                   reference and never matched on across hosts.
+//
+// Getting that wrong does not produce a missing link — it produces a coat with
+// a "also at" link to a totally different coat, which reads as correct.
+
+/**
+ * A GTIN reduced to its digits, or "" when it is not one.
+ *
+ * The check digit is verified rather than assumed. A page carries plenty of
+ * digit strings — a style code, a phone number, a timestamp — and a GTIN field
+ * filled with one of those would match another product filled with the same
+ * junk. GS1's mod-10 is three lines and turns "is this thirteen digits" into "is
+ * this a number the world issued".
+ */
+export function normalizeGtin(raw: unknown): string {
+  const digits = String(raw ?? "").replace(/\D/g, "");
+  if (![8, 12, 13, 14].includes(digits.length)) return "";
+  if (/^0+$/.test(digits)) return "";
+
+  // Weights alternate 3 and 1 from the right, excluding the check digit itself.
+  const body = digits.slice(0, -1);
+  const check = Number(digits.slice(-1));
+  let sum = 0;
+  for (let i = 0; i < body.length; i++) {
+    const digit = Number(body[body.length - 1 - i]);
+    sum += i % 2 === 0 ? digit * 3 : digit;
+  }
+  return (10 - (sum % 10)) % 10 === check ? digits : "";
+}
+
+/** A code kept for reference: trimmed, bounded, and stripped of decoration. */
+export function normalizeCode(raw: unknown, max = 60): string {
+  return String(raw ?? "")
+    .trim()
+    .replace(/^(?:ref\.?|sku|art\.?|артикул)\s*[:#]?\s*/i, "")
+    .slice(0, max);
+}
+
 // ── The store's own spec table ────────────────────────────────────────────────
 // Composition, care, country of origin, article number: a store prints them as
 // a definition list or a two-column table, and structured data almost never

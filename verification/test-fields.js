@@ -10,6 +10,7 @@
  *   Part 2 — colour, the colour filter, and grouping colourways
  *   Part 3 — description and material
  *   Part 4 — brand, category, subcategory
+ *   Part 5 — the codes that find the same item on another store
  */
 const path = require("path");
 const Module = require("module");
@@ -33,7 +34,10 @@ const {
   MATERIAL_KEYS,
   CODE_KEYS,
   BRAND_KEYS,
+  normalizeGtin,
+  normalizeCode,
 } = require(path.join(COMPILED, "lib", "server", "product-fields.js"));
+const { isSameItem, withRetailer, mergePatch } = require(path.join(PARSER, "same-item.js"));
 const { matchSubcategoryLabel } = require(path.join(COMPILED, "lib", "categories.js"));
 const { isColorSiblingByName, chooseGroup, variantBaseName } = require(
   path.join(PARSER, "variant-group.js"),
@@ -615,6 +619,146 @@ check(
   normalizeExtract(extractProduct(page(BASE), null, PAGE, { brandText: "Acne Studios" }), PAGE, null)
     .brand,
   "Acne Studios",
+);
+
+// ── Part 5: the same item on another store ──────────────────────────────────
+
+console.log("— a GTIN is a number the world issued, or it is nothing —");
+
+check("a real EAN-13", normalizeGtin("4006381333931"), "4006381333931");
+check("a real UPC-A", normalizeGtin("036000291452"), "036000291452");
+check("spaces and dashes are not part of it", normalizeGtin("4006-3813 33931"), "4006381333931");
+// The check digit is the whole point: any thirteen digits would otherwise match
+// any other thirteen digits a page happened to carry.
+check("a failed check digit", normalizeGtin("1234567890123"), "");
+check("the wrong length", normalizeGtin("400638133393"), "");
+check("all zeroes", normalizeGtin("0000000000000"), "");
+check("not a number", normalizeGtin("FA-2285-CH"), "");
+check("a style code survives as a code", normalizeCode("Ref. FA-2285-CH"), "FA-2285-CH");
+check("артикул too", normalizeCode("Артикул: 88213"), "88213");
+
+console.log("— codes out of a page —");
+
+const GTIN = "4006381333931";
+check(
+  "off the product node",
+  normalizeExtract(extractProduct(page({ ...BASE, gtin13: GTIN, mpn: "FA-2285", sku: "SHOP-1" }), null, PAGE), PAGE, null)
+    .gtin,
+  GTIN,
+);
+check(
+  "off an offer, where a store with one offer per size puts it",
+  normalizeExtract(
+    extractProduct(
+      page({
+        ...BASE,
+        offers: [
+          { "@type": "Offer", price: "249", priceCurrency: "EUR", gtin13: GTIN, sku: "SHOP-1" },
+        ],
+      }),
+      null,
+      PAGE,
+    ),
+    PAGE,
+    null,
+  ).gtin,
+  GTIN,
+);
+check(
+  "and out of the spec table when nothing is declared",
+  normalizeExtract(
+    extractProduct(page(BASE), null, PAGE, { specs: [{ key: "Article number", value: "FA-2285-CH" }] }),
+    PAGE,
+    null,
+  ).sku,
+  "FA-2285-CH",
+);
+check(
+  "a junk number in the gtin field is not stored",
+  normalizeExtract(extractProduct(page({ ...BASE, gtin13: "1234567890123" }), null, PAGE), PAGE, null)
+    .gtin,
+  undefined,
+);
+
+console.log("— deciding that two listings are one item —");
+
+const incoming = { brand: "Acne Studios", gtin: GTIN, mpn: "FA-2285", sku: "SHOP-1", price: 1200 };
+
+ok("same GTIN, same item", isSameItem(incoming, { id: "a", gtin: GTIN }));
+ok(
+  "same part number and brand",
+  isSameItem({ ...incoming, gtin: "" }, { id: "a", mpn: "fa-2285", brand: "acne studios" }),
+);
+ok(
+  "the same part number under another brand is another item",
+  !isSameItem({ ...incoming, gtin: "" }, { id: "a", mpn: "FA-2285", brand: "Other Label" }),
+);
+ok(
+  "a part number with no brand to anchor it decides nothing",
+  !isSameItem({ ...incoming, gtin: "", brand: "" }, { id: "a", mpn: "FA-2285", brand: "" }),
+);
+// A SKU is one store's shelf label; two retailers reuse the same string.
+ok("a matching SKU is not a match", !isSameItem({ ...incoming, gtin: "", mpn: "" }, { id: "a", sku: "SHOP-1" }));
+ok("no codes at all, no match", !isSameItem({ brand: "Acne Studios", price: 10 }, { id: "a", gtin: GTIN }));
+
+console.log("— adding a store to a product we already have —");
+
+const farfetch = { name: "Farfetch", url: "https://farfetch.com/p/1", price: 1290, currency: "EUR", availability: "in stock", isOfficial: false };
+const ssense = { name: "SSENSE", url: "https://ssense.com/p/2", price: 1200, currency: "EUR", availability: "in stock", isOfficial: false };
+
+check(
+  "a new store is appended",
+  withRetailer([farfetch], ssense).map((r) => r.name),
+  ["Farfetch", "SSENSE"],
+);
+check(
+  "the same store is replaced, not doubled",
+  withRetailer([farfetch], { ...farfetch, price: 999 }).map((r) => r.price),
+  [999],
+);
+
+const existing = {
+  id: "p1",
+  brand: "Acne Studios",
+  gtin: GTIN,
+  priceMin: 1290,
+  priceMax: 1290,
+  retailers: [farfetch],
+  material: "80% wool, 20% polyamide",
+  description: "The first store's copy.",
+  sizes: ["S", "M"],
+  colors: [],
+  images: ["https://cdn/one.jpg"],
+};
+const merged = mergePatch(existing, {
+  brand: "Acne Studios",
+  gtin: GTIN,
+  price: 1200,
+  retailer: ssense,
+  material: "Wool blend",
+  description: "The second store's copy.",
+  subcategory: "Bomber Jackets",
+  sizes: ["S", "M", "L"],
+  colors: ["Charcoal"],
+  images: ["https://cdn/two.jpg"],
+});
+
+check("the second store is on the product", merged.patch.retailers.map((r) => r.name), [
+  "Farfetch",
+  "SSENSE",
+]);
+check("the price range takes in the cheaper store", merged.patch.price_min, 1200);
+// Fill, never overwrite: the row that arrived first may already have been edited
+// by an admin, and two stores describe the same coat differently.
+ok("a material that is already there is left alone", !("material" in merged.patch), JSON.stringify(merged.patch.material));
+ok("so is a description", !("description" in merged.patch));
+ok("and a size list", !("sizes" in merged.patch));
+check("an empty colour list is filled", merged.patch.colors, ["Charcoal"]);
+check("and a missing subcategory", merged.patch.subcategory, "Bomber Jackets");
+ok(
+  "the run's row can say what it filled",
+  merged.filled.includes("retailer") && merged.filled.includes("colors"),
+  JSON.stringify(merged.filled),
 );
 
 console.log("");

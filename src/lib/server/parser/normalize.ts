@@ -7,6 +7,8 @@ import {
   cleanName,
   parsePrice,
   extractCurrencyFromDisplay,
+  normalizeGtin,
+  normalizeCode,
   MAX_PRODUCT_IMAGES,
   matchCategory,
   inferGenderFromText,
@@ -196,6 +198,12 @@ export function normalizeExtract(
     sizes,
     variantUrls,
     ...(subcategory ? { subcategory } : {}),
+    // Validated here rather than trusted: a GTIN that fails its check digit is
+    // a digit string the page happened to carry, and matching products on one
+    // would link a coat to a phone number's worth of coincidence.
+    ...(normalizeGtin(raw.gtin) ? { gtin: normalizeGtin(raw.gtin) } : {}),
+    ...(normalizeCode(raw.mpn) ? { mpn: normalizeCode(raw.mpn) } : {}),
+    ...(normalizeCode(raw.sku) ? { sku: normalizeCode(raw.sku) } : {}),
     material: raw.material ?? "",
     price,
     priceOriginal,

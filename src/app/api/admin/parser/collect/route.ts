@@ -287,6 +287,8 @@ export async function POST(req: Request) {
             images: imported.images ?? 0,
             priceNote: imported.priceNote,
             variantsLinked: imported.variantsLinked ?? 0,
+            merged: !!imported.mergedInto,
+            mergedFields: imported.mergedFields,
           }
         : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
     }

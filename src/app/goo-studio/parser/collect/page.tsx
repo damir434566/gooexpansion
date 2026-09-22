@@ -425,6 +425,16 @@ function detailLine(r: CrawlItemResult): string {
   if (r.variantsLinked) {
     parts.push(`grouped with ${r.variantsLinked} colour${r.variantsLinked === 1 ? "" : "s"}`);
   }
+  // A merge is the interesting outcome on this row: the page did not create a
+  // product, it added a place to buy one we already had.
+  if (r.merged) {
+    const filled = (r.mergedFields ?? []).filter((f) => f !== "retailer");
+    parts.push(
+      filled.length
+        ? `linked to an existing product, filling ${filled.join(", ")}`
+        : "linked to an existing product",
+    );
+  }
   return parts.join(" · ");
 }
 
