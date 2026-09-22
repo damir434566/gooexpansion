@@ -18,7 +18,7 @@ const http = require("http");
 const path = require("path");
 const Module = require("module");
 
-const COMPILED = path.join(__dirname, "..", "compiled");
+const COMPILED = path.join(__dirname, "compiled");
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, ...rest) {
   if (request.startsWith("@/")) request = path.join(COMPILED, request.slice(2));
@@ -28,6 +28,32 @@ Module._resolveFilename = function (request, ...rest) {
 const PARSER = path.join(COMPILED, "lib", "server", "parser");
 const { planCollection } = require(path.join(PARSER, "plan-collection.js"));
 const { parsePage } = require(path.join(PARSER, "parse-page.js"));
+const { toUsd } = require(path.join(COMPILED, "lib", "server", "fx.js"));
+
+/**
+ * A rate provider that answers the same thing every time.
+ *
+ * The real one is an HTTP call to a third party, which this container cannot
+ * make and a test should not depend on anyway: an assertion about a converted
+ * price has to compare against a number the test chose. Only the rate endpoint
+ * is intercepted — anything else that reaches `fetch` is a bug worth seeing.
+ */
+const FIXED_RATES = { EUR: 0.85, GBP: 0.74, UAH: 41, PLN: 3.6 };
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+  const href = typeof input === "string" ? input : input && input.url;
+  if (href && href.includes("open.er-api.com")) {
+    return {
+      ok: true,
+      json: async () => ({
+        result: "success",
+        rates: FIXED_RATES,
+        time_last_update_utc: "Mon, 21 Sep 2026 00:00:01 +0000",
+      }),
+    };
+  }
+  return realFetch(input, init);
+};
 
 const PORT = Number(process.env.STUDIO_PORT || 3302);
 const HOST = "localhost";
@@ -109,7 +135,16 @@ window.addEventListener("message", async (event) => {
     if (stopped) { log("ingest-refused", { url: payload.url }); return reply(msg.id, false, "Stopped by the admin"); }
     try {
       const data = await callApi(Object.assign({ action: "ingest" }, payload));
-      log("ingest", { url: payload.url, htmlLength: (payload.html || "").length, result: data.result });
+      log("ingest", {
+        url: payload.url,
+        htmlLength: (payload.html || "").length,
+        candidates: Array.isArray(payload.images) ? payload.images.length : 0,
+        priceText: payload.priceText || "",
+        // The strip has to still be doing its job: a payload that came back
+        // whole would pass the photo assertions and blow the 3 MB cap.
+        carriesPayload: /__NEXT_DATA__/.test(payload.html || ""),
+        result: data.result,
+      });
       reply(msg.id, true, data);
     } catch (e) { log("ingest-error", { url: payload.url, message: e.message }); reply(msg.id, false, e.message); }
     return;
@@ -164,7 +199,9 @@ const server = http.createServer(async (req, res) => {
 
     if (body.action === "ingest") {
       try {
-        // The real extractor, over the DOM the extension actually captured.
+        // The real extractor, over the DOM the extension actually captured —
+        // and over the evidence it read before stripping the page, exactly as
+        // the shipping route passes it.
         const parsed = await parsePage(body.url, {
           fetchSettings: FETCH_SETTINGS,
           fetchApiKey: "",
@@ -172,14 +209,57 @@ const server = http.createServer(async (req, res) => {
           aiSettings: AI_SETTINGS,
           useAi: false,
           html: body.html,
+          evidence: {
+            images: Array.isArray(body.images) ? body.images : [],
+            priceText: typeof body.priceText === "string" ? body.priceText : "",
+            sizes: Array.isArray(body.sizes) ? body.sizes : [],
+            colorText: typeof body.colorText === "string" ? body.colorText : "",
+            variantUrls: Array.isArray(body.variantUrls) ? body.variantUrls : [],
+            descriptionText: typeof body.descriptionText === "string" ? body.descriptionText : "",
+            specs: Array.isArray(body.specs) ? body.specs : [],
+            breadcrumbs: Array.isArray(body.breadcrumbs) ? body.breadcrumbs : [],
+            brandText: typeof body.brandText === "string" ? body.brandText : "",
+          },
         });
         const product = parsed.products[0];
         if (!parsed.ok) return json(200, { ok: true, result: { url: body.url, status: "failed", reason: parsed.error } });
         if (!product || !product.name) {
           return json(200, { ok: true, result: { url: body.url, status: "skipped", reason: "No product data" } });
         }
-        // importParsedProduct needs Supabase; record instead.
-        imported.push({ url: body.url, name: product.name, brand: product.brand, price: product.price, images: product.images.length });
+        // importParsedProduct needs Supabase; do what it does to the price with
+        // the real fx module, and record the rest instead of writing a row.
+        const converted =
+          product.price && product.currency && product.currency !== "USD"
+            ? await toUsd(product.price, product.currency)
+            : null;
+        imported.push({
+          url: body.url,
+          name: product.name,
+          brand: product.brand,
+          price: product.price,
+          currency: product.currency,
+          usd: converted ? converted.usd : product.price,
+          fxRate: converted ? converted.rate : null,
+          issues: product.issues,
+          images: product.images.length,
+          imageList: product.images,
+          sizes: product.sizes,
+          colors: product.colors,
+          variantUrls: product.variantUrls,
+          material: product.material,
+          category: product.category,
+          subcategory: product.subcategory,
+          breadcrumbCount: Array.isArray(body.breadcrumbs) ? body.breadcrumbs.length : 0,
+          styleKeywords: product.styleKeywords,
+          gtin: product.gtin,
+          mpn: product.mpn,
+          sku: product.sku,
+          description: product.description,
+          specCount: Array.isArray(body.specs) ? body.specs.length : 0,
+          candidates: Array.isArray(body.images) ? body.images.length : 0,
+          sizeCandidates: Array.isArray(body.sizes) ? body.sizes.length : 0,
+          priceText: typeof body.priceText === "string" ? body.priceText : "",
+        });
         return json(200, { ok: true, result: { url: body.url, status: "imported", name: product.name } });
       } catch (e) {
         return json(500, { error: e.message });

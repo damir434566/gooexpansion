@@ -1,6 +1,6 @@
 
 — launching chromium with the unpacked extension —
-  extension id eeigeeoncncieklfpglafmdgdpofaojp
+  extension id pjbcdcadhhapgbljlmbiakkkniiialfa
   ok   installs with access to no store whatsoever (no <all_urls>)
   ok   the only pages it may touch at install are our own collect screen
   ok   asks only for the four narrow APIs
@@ -38,6 +38,36 @@
   ok   with no Crawl-delay the 1.5s floor was applied
   ok   a ~10s rest landed after the 20th page
 
-  27 passed, 0 failed
+— run E: a single-page storefront, and a store priced in hryvnia —
+  ok   run E finished
+  ok   both pages were collected
+  ok   the payload itself was NOT sent — the strip still runs
+  ok   captured markup stays small
+  ok   the single-page product was read
+  ok   the extension handed over the photos it found before stripping
+  ok   all seven photos were imported, not the two the carousel had mounted
+  ok   the recommendations rail stayed out of the product
+  ok   the euro price was converted to dollars at the test's rate
+  ok   the hryvnia product was read
+  ok   its currency came from the rendered text, which is the only place it exists
+  ok   ₴4,000 became $97.56 rather than $4,000
+  ok   and nothing was filed as an unstated currency
+  ok   the extension read the size buttons
+  ok   sizes off the control, with the placeholder and the size-guide link left out
+  ok   sizes out of structured data, where the page has no control to read
+  ok   the colour came off the selected swatch
+  ok   the other colourways were taken from the colour row's links
+  ok   and the care link that shares that row is not one of them
+  ok   the description was read out of a collapsed accordion
+  ok   the extension read the spec rows
+  ok   the material came off the spec table
+  ok   and off a plain line of Ukrainian text on the other store
+  ok   the extension read the breadcrumb trail
+  ok   the piece is filed under a category AND a subcategory
+  ok   the brand came off the designer link, where structured data has none
+  ok   the item's own number came off the offer, check digit and all
+  ok   and an article number off a plain Ukrainian line, where nothing is declared
+  ok   the piece is tagged with a style, from words only the rendered page had
 
-EXIT=0
+  56 passed, 0 failed
+

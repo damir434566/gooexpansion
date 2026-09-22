@@ -1,12 +1,14 @@
 diff --git a/AUDIT_PLAN_BRIEF.md b/AUDIT_PLAN_BRIEF.md
-index 021ad7d..cfe21bc 100644
+index 021ad7d..b0bb8ae 100644
 --- a/AUDIT_PLAN_BRIEF.md
 +++ b/AUDIT_PLAN_BRIEF.md
-@@ -157,6 +157,7 @@
+@@ -157,6 +157,9 @@
  | 2026-09-16 | Третья плашка от CEO — снова без кнопки. Собран сквозной прогон «настоящий сервер → настоящий экран» (раньше половинки проверялись порознь): `discoverProductUrls` реально ходит в магазин, отвечающий 403, его ответ сериализуется как в роуте и в таком виде отдаётся настоящему компоненту страницы. На коде **из `master` (#854, то, что на проде)** ответ — `{ok:false, status:403, isSingleProduct:true, error:"Upstream responded 403"}`, и кнопка рисуется. Значит серверная часть на проде здорова, а в браузере крутится клиент старее ответа, который он показывает (вкладка, открытая до выката; service worker в проекте отсутствует, своих cache-заголовков нет — лечится перезагрузкой или приватным окном). Чтобы текст подсказки не отправлял к кнопке, которой на старом бандле нет, обе ветки отказа теперь называют и панель: «Paste page» во вкладке Parse URL | `src/lib/server/parser/crawl.ts` | Знать на будущее: подсказка, ссылающаяся на элемент UI, живёт дольше, чем сборка этого UI |
  | 2026-09-16 | Родство фотографий в галерее не работает на коротких именах файлов: `stem()` оставляет только буквы и цифры, а `isNumberedFrame` требует восьми символов — поэтому `nebula-1.jpg` / `nebula-2.jpg` (7 символов) сиблингами не считаются, и со страницы уезжает одно фото из четырёх. Для магазина, который называет файлы `1.jpg`, `2.jpg`, галерея теряется вся. Порог осознанный (чужое фото в каталоге хуже пропущенного), поэтому не тронут | `src/lib/server/parser/gallery.ts:200` | Низкая: на реальных именах (`nebula-jacket-aurelio-01.jpg`) галерея собирается полностью — проверено |
  | 2026-09-20 | **Жук доставал не весь каталог, а его верхушку.** Проверено по коду: `sitemap.ts` знал три имени и не умел `.gz` (каталог любого размера отдаёт сайтмап сжатым, `fetchHtml` возвращал бы его декодированной кашей), считал документом и 404-й промах (пять «документов» кончались на трёх неверных догадках), открывал максимум три дочерних сайтмапа и читал `<loc>` только без `CDATA` — у WordPress и Magento сайтмап поэтому читался пустым; `looksLikeProductPath` требовал сегмента `/product(s)/` или цифрового кода, поэтому магазин со slug-адресами (`/shop/nebula-jacket-aurelio`) давал «сайтмап читается, товаров 0»; сайтмап вообще читался только при полностью пустом обходе, а не при коротком; потолки — 500 товаров в `crawl.ts`, 60 якорей на страницу в `extractProductLinks`, 40 товаров и 1 страница по умолчанию на экране; в `direct` не было cookie-jar, то есть каждый запрос к мягкой стене был тем самым первым, который она и отклоняет. **Сделано по прямому указанию CEO** (блок «добыча», шаги 2–4 бесплатного плана; деньги не задействованы, провайдер по решению CEO не берём): семь имён сайтмапа + три `.gz` через новый `fetchBinary` с распознаванием по магическим байтам (только `direct` — провайдер отдаёт текст), `CDATA` в `<loc>`, раздельные бюджеты (18 запросов / 12 прочитанных документов / 10 детей), файл, который магазин сам назвал `product-*`, считается его собственным словом — его URL минуют тест формы адреса, но не плоские отказы (`/cart`); четвёртая форма товарного адреса (секция магазина + слаг из трёх слов, с отсечкой листинговых слов и родителей вида `/collections/<slug>`); сайтмап теперь добирает недобранное, а не только спасает пустое; потолки 2 000 товаров, вся сетка со страницы листинга, по умолчанию 100/3 страницы; cookie-jar на хост (10 минут, `direct`), стук во входную дверь на молчаливом 403 — один раз на хост и только когда сам отказ куку не выдал. **Доказательство:** 51/51 на пяти фиктивных магазинах через настоящий HTTP и настоящий `direct`-fetch (имена ведут на 127.0.0.1 через `/etc/hosts`, поэтому SSRF-гард видит публичный хост и путь кода не подменён): gzip-сайтмап найден после шести мёртвых имён (3 товара, ≤18 запросов); robots → индекс с `CDATA` → `product-sitemap.xml` даёт 3 вещи, включая короткий слаг `/shop/tee`, `/cart` отброшен, `page-sitemap.xml` не открыт; мягкая стена с кукой в самом отказе — ровно один повтор, во входную дверь не стучались; стена с кукой только на главной — 403, один стук в `/`, повтор с кукой прошёл; вторая страница того же магазина прошла с первого раза одним запросом; каталог 1 500 URL собран целиком (потолок 500 снят), якоря листинга внутри, подсказка говорит «added»; сетка из 120 карточек отдаёт 120 при лимите и 60 по умолчанию; магазин, отказывающий во всём, по-прежнему отвечает 403 с подсказкой про Paste page; вставленная одна вещь в slug-форме опознана как товар и сайтмап не читался. `tsc --noEmit` чист, `eslint` по парсеру, роутам и экрану чист, `npm run build` exit 0 | `src/lib/server/parser/{sitemap,fetch,extract,crawl}.ts`, `src/app/api/admin/parser/crawl/route.ts`, `src/app/goo-studio/parser/page.tsx`, `PARSER.md` | Закрыто. Осталось от бесплатного плана: порядок шифров/JA3 (в Node не воспроизводится — нужен свой curl_cffi, решение за CEO). Блоки B (наличие, SKU, размеры, история цен) и C (очередь, возобновление, расписание) не начаты |
 +| 2026-09-21 | **Каталог с защищённого магазина: руки перенесены в браузер CEO, мозги остались на сервере.** Продолжение блока «добыча» (2026-09-20): последний оставшийся бесплатный шаг — порядок шифров/JA3 — в Node не воспроизводится, поэтому **по прямому указанию CEO** (вне порядка волн, деньги не задействованы) задача обойдена целиком: страницы открывает расширение Chrome на машине CEO (его адрес, его куки, уже пройденная проверка), а что открывать и как быстро — решает сервер. Новое: `robots.ts` — разбор robots.txt строго по группе `*` (Googlebot'ом не представляемся), Allow/Disallow по длиннейшему совпадению с `*` и `$`, Crawl-delay, Sitemap, разбор чистый (сеть не трогает); `plan-collection.ts` — чистая функция «страница + сайтмапы + robots → товарные адреса, пауза, что дочитать следующим кругом» поверх существующих `extractProductLinks`/`looksLikeProductPath`/`isNonProductPath` и хелперов `sitemap.ts` (они для этого экспортированы, ни одной копии не заведено; `fromRobots` переведён на общий разбор, дубль исчез); роут `collect` с действиями `plan` и `ingest` (`ingest` зовёт `parsePage` с готовым html — в магазин не ходит вовсе, без html отвечает 400, а не молча фетчит); экран-приёмник `/goo-studio/parser/collect` — мост postMessage ↔ API обычной сессией Clerk; `extension/` (MV3): popup, service worker с очередью и темпом, content script-санитайзер один в один с букмарклетом, bridge. **Ключей в расширении нет** — оно не умеет звать API, только просить открытую вкладку; доступ к магазину через `optional_host_permissions` + запрос по клику. Вежливость: Disallow соблюдается, пауза `max(Crawl-delay, 1.5 с)` + случайный разброс, ~10 с отдыха каждые 20 страниц, два 403/429 подряд — остановка с объяснением, Stop мгновенный (гасит и текущую паузу, и приёмник перестаёт принимать). **Доказательство:** 39/39 на настоящих модулях `robots.ts`/`plan-collection.ts` (длиннейшее совпадение, ничья в пользу Allow, пустой Disallow, `*` и `$`, слитые группы агентов, robots.txt отданный HTML-страницей, пол и потолок паузы, дедуп по `seen`, индекс → дети) и 27/27 сквозным прогоном настоящего расширения в настоящем Chromium против фиктивного магазина: при установке не выдан ни один хост (`explicit_host: []`, скриптуется только собственный экран приёмника, из API — `activeTab`, `scripting`, `storage`, `webRequest`); robots.txt прочитан первым, сайтмап вторым кругом; запрещённый `/product/secret-*` не открыт ни разу и посчитан как blocked; темп 2 с взят из Crawl-delay магазина, разброс между запросами есть; страница ~430 КБ ужата до <300 КБ, JSON-LD цел, лениво подгруженная галерея приехала отрисованной (2 настоящих фото вместо data-URI), настоящий `parsePage` собрал товар из снятого DOM (имя, бренд Fixture Atelier, 249 EUR) при нуле запросов в магазин с нашей стороны; на 403 прогон встал ровно после второй страницы, не третьей; после Stop ни одного импорта и ни одного запроса в магазин; на 21 товаре без Crawl-delay применён пол 1.5 с и после двадцатой страницы лёг отдых 11 с. `tsc --noEmit` чист, `npm run build` exit 0, `eslint` по новым файлам и по `extension/` чист, база линта не выросла (13 ошибок / 52 предупреждения до и после — все чужие, по моим файлам ноль) | `src/lib/server/parser/{robots,plan-collection,sitemap}.ts`, `src/lib/server/audit.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/*` | Закрыто в коде. **Не проверено мной:** живой магазин и установка в Chrome — из контейнера это серверный IP, то есть ровно тот, от которого уходим; проверку на настоящем магазине делает CEO |
++| 2026-09-22 | **Все фотографии вещи и цена в одной валюте.** Три правки по прямому указанию CEO (вне порядка волн), все — поверх сбора расширением от 2026-09-21. **Почему Farfetch отдавал меньше фото, чем остальные** — найдено по коду, а не угадано: `collectCandidates` в `gallery.ts` добывает адреса из инлайновых hydration-payload'ов, но `extension/snapshot.js` удаляет все `<script>` кроме `ld+json` **до** отправки, поэтому на Shopify (галерея в разметке) не терялось ничего, а на SPA вроде Farfetch до сервера доезжали только те слайды, что успела смонтировать карусель. Вторая, более широкая дыра рядом: регулярка payload'а разрешала `\/` лишь сразу после схемы, а внутри пути упиралась в обратный слэш — то есть адрес вида `https:\/\/cdn.shopify.com\/s\/files\/1\/photo.jpg` (так payload, закодированный в JSON дважды, пишет любой адрес) не находился вообще: схема совпадала, до расширения файла дело не доходило. **Сделано.** Фото: `snapshot.js` читает страницу, пока она цела (`currentSrc`, `src`, `srcset`/`data-srcset`, зум-атрибуты, `picture>source`, `link[as=image]`, плюс скан содержимого `<script>` на адреса картинок) и отдаёт найденное как кандидатов вместе с видимым текстом цены — сами payload'ы по-прежнему не отправляются, иначе вернулись бы те мегабайты, ради которых strip и существует; кандидаты проходят **тот же** фильтр `harvestGalleryImages` (новый пятый параметр), так что рельс «you may also like» отбрасывается, как и раньше; новый `PageEvidence` в `types.ts` прокинут `route → parsePage → extractProduct`; регулярка экранированных слэшей исправлена в обоих местах (сервер и расширение); потолок фото 12 → 20 одной общей `MAX_PRODUCT_IMAGES` — до этого три места расходились (нормализация 12, импорт 12, зеркало жёстко `min(max, 12)`, то есть найденное сверх 12 хранилось ссылкой и не скачивалось никогда). Валюта: новый `src/lib/server/fx.ts` (таблица курсов с базой USD, кэш на час, кэшируется и неудача — провайдер, который лёг, лежит не для одного товара; фолбэк-таблица на 31 валюту), `/api/exchange-rates` переведён на него и больше не дублирует ни фетч, ни фолбэк; импорт пересчитывает цену в доллары и пишет `price_min/price_max` в долларах с `currency: USD`, а цену магазина сохраняет там, где она и есть правда — в записи ритейлера (по ней человек платит) и в новых колонках `source_price/source_currency/fx_rate/fx_date` (миграция 019, добавлены в `OPTIONAL_COLUMNS`, так что база без миграции всё равно принимает товар, просто без происхождения); `normalizeCurrency` больше **не** подставляет USD молча — пустая строка и issue «currency not stated», потому что молчаливый дефолт и есть та причина, по которой ₴4 000 приехали как $4 000; `extractCurrencyFromDisplay` расширен (₴ ₽ ₹ ₩ ₪ zł Kč CHF 元, слова грн/руб/лв, CA$/A$/NZ$/HK$/S$/R$ через lookbehind — иначе «S$» внутри «US$» читался как сингапурский доллар, и код ISO принимается только рядом с числом, иначе «incl. VAT» становится валютой, а «Try it on» — турецкой лирой); экран приёмника показывает по каждой странице «N photos · 4000 UAH → $97.56». **Доказательство.** 47/47 юнитов на настоящих модулях (`verification/test-price-and-photos.js`: символы и слова валют, обе ловушки с долларами, конвертация и один фетч курсов на весь прогон, фолбэк при недоступном провайдере, `null` на валюту без курса, кандидаты против рельса рекомендаций и чужого CDN, экранированные слэши, потолок 20, `productToDb`/`dbToProduct` и сброс четырёх колонок на базе без миграции 019) и 40/40 сквозным прогоном настоящего расширения в настоящем Chromium — было 27/27, добавлен режим витрины `spa`, устроенный как Farfetch: галерея только в `__NEXT_DATA__`, половина адресов с экранированными слэшами, рядом рельс чужого товара на том же CDN. На нём: до правки со страницы уезжало 2 фото, теперь 7 из 7; рельс не попал в товар; payload не отправлен (strip работает, разметка <300 КБ); гривневая страница, у которой в разметке `price: "4000"` вовсе без `priceCurrency`: валюта прочитана из отрисованного «4 000 ₴», ₴4 000 → $97.56 по курсу 41, issue об отсутствии валюты не выставлен; евро 1290 → $1517.65; прогоны A–D (вежливость, Crawl-delay, 403, Stop, отдых) без регрессий. `tsc --noEmit` чист, `npm run build` exit 0, `eslint` по изменённым файлам и по `extension/` чист, база линта не выросла (13 ошибок / 52 предупреждения до и после) | `src/lib/server/fx.ts`, `src/lib/server/product-fields.ts`, `src/lib/server/parser/{gallery,extract,normalize,parse-page,import-product,types}.ts`, `src/lib/server/storage/product-images.ts`, `src/lib/data/db.ts`, `src/lib/{types,supabase}.ts`, `src/app/api/exchange-rates/route.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/{snapshot,background}.js`, `supabase/migrations/019_product_source_price.sql` | Закрыто в коде. **Требует шага CEO:** миграция 019 (без неё цена всё равно в долларах, но происхождение не пишется). **Не проверено мной:** живой Farfetch и живая база — Supabase в контейнере нет, поэтому запись строки проверена на чистых `productToDb`/`dbToProduct` и на сбросе колонок, а не на реальном insert. **Осталось от прошлого раза:** название товара (og:title тащит имя магазина, `<h1>` парсер не читает вовсе) — CEO перенёс на потом |
++| 2026-09-22 | **Десять пустых полей товара.** По прямому указанию CEO (вне порядка волн), шесть частей, каждая с отдельным доказательством. **Найдено по коду:** размеры — разбор JSON-LD **всегда** возвращал `sizes: []`, единственным источником были per-site правила, то есть размеров почти никогда и не было; подкатегорию импортёр **не писал вообще** (`resolveSubcategory` существовал, URL-импорт его не звал); `styleKeywords: []` прошит в импортёре при живом словаре из 13 стилей; группировку цветов CSV-импорт умеет (`getGroupKeys`), URL-импорт не звал; сопоставления одного товара между магазинами не было нигде, `sku`/`gtin` со страницы не читались; материал брался только из JSON-LD `material`; описание — из `og:description`, то есть обрезанной маркетинговой строки; цвет и бренд — только из структурных данных, которых у половины магазинов нет. **Сделано.** Общий принцип: расширение добывает кандидатов с отрисованной страницы, словари и проверки живут на сервере в одном месте. Размеры — четыре формы структурных данных (`size`, `hasVariant`, `offers`+`itemOffered`, `additionalProperty` на шести языках) плюс отрисованный контрол; `looksLikeSize`/`pickSizes` отсеивают «Select size», ссылку на сетку и счётчик количества; первый непустой источник, не слияние (иначе «40», «EU 40» и «IT 40» станут тремя размерами). Цвет — выбранный свотч и строка таблицы характеристик выше скана разметки; фильтр цвета заработал сам, потому что `colorGroupNamesFor` уже раскладывал «Charcoal» → Grey и ждал только названия. Описание — отрисованный блок через `textContent` (у свёрнутого аккордеона `innerText` пуст), самый **короткий** подходящий контейнер, а не самый длинный (они вложены, внешний тащит доставку и отзывы); `og:description` переехал в конец цепочки. Материал — `specValue` по таблице (шесть языков; `\b` заменён на lookahead с флагом `u`, иначе `^склад\b` не совпадает с «Склад») и `compositionFromText` по тексту: состав обрывается на 100% (дальше подкладка), волокно — одно слово или два, если дальше конец оборота, «Extra 20% off» не волокно. Бренд — плюс таблица и размеченный на странице дизайнер. Крошки — `BreadcrumbList` из разметки (переживает strip, работает и для вставленной страницы) и отрисованная навигация; из них категория и `matchSubcategoryLabel` в `categories.ts` (совпадение по словам, обе стороны разворачиваются в формы: «accessories» → accessory, «hoodies» → hoodie, «dress» не трогается), ярлык дерева важнее совпадения по ключевому слову, `isBuiltInBucket` не даёт принять чужую корзину, `resolveSubcategory` снимает ярлык, противоречащий категории. Стиль — `inferStyleKeywords` по словарю из 13 стилей (имя, описание, материал, ярлык, крошки), не больше трёх, цвет и название вещи в правилах отсутствуют намеренно. Группировка цветов — `variant-group.ts`: сначала точное совпадение по ссылкам цветового ряда (`source_url`), и только если магазин переключает цвет скриптом — бренд + **точное** базовое имя (префиксное совпадение из SQL-запроса отсеивается в коде: «Wool Coat» и «Wool Coat Long» — две вещи), цвета должны различаться, группа из одного не пишется; ссылки ряда фильтруются тем же `looksLikeProductPath`, что у планировщика, и только свой хост. Тот же товар на других сайтах — `same-item.ts` + миграция 020: GTIN с проверкой контрольной цифры GS1, бренд+MPN, **SKU не сшивает магазины** (у разных ритейлеров одна строка означает разные вещи); при совпадении импортёр не вставляет строку, а дописывает магазин в `retailers`, расширяет вилку цены в сторону дешёвого и заполняет **только пустые** поля. Заодно переписан разбор строки характеристик: блок из текстовых узлов рисуется одной строкой, значение съедало следующие строки — теперь значение кончается там, где начинается следующая метка, а ключ отдаётся в одно-, двух- и трёхсловной форме. **Доказательство:** 150/150 юнитов на настоящих модулях (`verification/test-fields.js`) и 56/56 сквозным прогоном настоящего расширения в настоящем Chromium — было 40/40: размеры сняты с кнопок и отдельно из `hasVariant`; цвет — со свотча на странице, где о цвете не сказано нигде; два соседних цвета из ссылок ряда, `Care instructions` из того же ряда отброшен; описание вынуто из свёрнутого аккордеона; материал из `<dl>` и отдельно из одной строки украинского текста; крошки с отрисованной навигации; товар лёг и в категорию, и в подкатегорию («Bomber Jackets»); бренд со ссылки дизайнера там, где JSON-LD бренда не знает; EAN-13 с оффера, артикул с украинской строки; стиль выведен из слов, существовавших только в скрытом описании. `tsc --noEmit` чист, `npm run build` exit 0, база линта не выросла (13/52), `eslint extension` чист | `src/lib/server/product-fields.ts`, `src/lib/categories.ts`, `src/lib/style-keywords.ts`, `src/lib/server/parser/{extract,normalize,types,import-product,variant-group,same-item}.ts`, `src/lib/{types,supabase}.ts`, `src/lib/data/db.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/{snapshot,background}.js`, `supabase/migrations/020_product_codes.sql` | Закрыто в коде. **Требует шага CEO:** миграции 019 и 020 (без 020 сшивки между магазинами не будет — появится второй товар вместо ссылки). **Не проверено мной:** живая база, поэтому группировка цветов и сшивка товара проверены как чистые функции, а запросы вокруг них нет; живой магазин. **Осталось:** название товара (`og:title` тащит имя магазина, `<h1>` парсер не читает) — по решению CEO отложено |
  
  ---
  
@@ -102,10 +104,10 @@ index 0000000..5904719
 +сессией. Поэтому расширение бесполезно для того, кто не залогинен админом.
 diff --git a/extension/background.js b/extension/background.js
 new file mode 100644
-index 0000000..76777e4
+index 0000000..880b966
 --- /dev/null
 +++ b/extension/background.js
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,537 @@
 +/**
 + * The hands of the operation.
 + *
@@ -390,7 +392,22 @@ index 0000000..76777e4
 +    if (!result || !result.ok) {
 +      return { error: result?.error ?? "Could not read the page" };
 +    }
-+    return { html: result.html, status };
++    // `images` and `priceText` are what the page said before the strip removed
++    // it — see the header of snapshot.js. They travel as candidates; the server
++    // decides which of them belong to the product.
++    return {
++      html: result.html,
++      images: Array.isArray(result.images) ? result.images : [],
++      priceText: typeof result.priceText === "string" ? result.priceText : "",
++      sizes: Array.isArray(result.sizes) ? result.sizes : [],
++      colorText: typeof result.colorText === "string" ? result.colorText : "",
++      variantUrls: Array.isArray(result.variantUrls) ? result.variantUrls : [],
++      descriptionText: typeof result.descriptionText === "string" ? result.descriptionText : "",
++      specs: Array.isArray(result.specs) ? result.specs : [],
++      breadcrumbs: Array.isArray(result.breadcrumbs) ? result.breadcrumbs : [],
++      brandText: typeof result.brandText === "string" ? result.brandText : "",
++      status,
++    };
 +  } catch (err) {
 +    return { error: err?.message ?? "Could not read the page" };
 +  } finally {
@@ -527,7 +544,19 @@ index 0000000..76777e4
 +        continue;
 +      }
 +
-+      const ingested = await askPage("ingest", { url, html: snap.html });
++      const ingested = await askPage("ingest", {
++        url,
++        html: snap.html,
++        images: snap.images,
++        priceText: snap.priceText,
++        sizes: snap.sizes,
++        colorText: snap.colorText,
++        variantUrls: snap.variantUrls,
++        descriptionText: snap.descriptionText,
++        specs: snap.specs,
++        breadcrumbs: snap.breadcrumbs,
++        brandText: snap.brandText,
++      });
 +      collected++;
 +      state.done = collected;
 +      if (ingested.ok) state.imported++;
@@ -1335,28 +1364,48 @@ index 0000000..cd405fd
 +init().catch((err) => note(err?.message ?? "Could not read this tab."));
 diff --git a/extension/snapshot.js b/extension/snapshot.js
 new file mode 100644
-index 0000000..6999dcb
+index 0000000..7257d1d
 --- /dev/null
 +++ b/extension/snapshot.js
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,718 @@
 +/**
-+ * Take the rendered page and hand back markup small enough to post.
++ * Take the rendered page and hand back what the server needs to read it.
 + *
++ * Out of here comes the stripped markup, and then what the strip destroys:
++ * the photos the page actually shows, the price as a shopper reads it, the
++ * sizes it offers, the colour it is showing and the addresses of the same piece
++ * in other colours.
++ *
++ * ── The markup ───────────────────────────────────────────────────────────────
 + * This is the bookmarklet in `src/lib/parser-bookmarklet.ts`, with the clicking
 + * automated. The strip list is deliberately identical — scripts except JSON-LD,
 + * styles, stylesheet links, SVG, noscript, iframes, templates, and inline
 + * data-URIs — because the server runs the very same extractor over what comes
-+ * out of here as over a pasted page. Diverging here would mean a product
-+ * imported by the extension could differ from the same product pasted by hand,
-+ * and there would be no way to tell which was right.
++ * out of here as over a pasted page.
 + *
 + * What the strip is for: a retail page is several megabytes, almost all of it
 + * script and style the parser never reads, and the route on the other end takes
 + * 3 MB. Stripping takes a typical page to a couple of hundred kilobytes.
 + *
-+ * Why JSON-LD survives: it is the densest source of truth on a retail page —
-+ * name, brand, every image, price, currency, colour and material as data rather
-+ * than as markup to mine.
++ * ── Why the extras exist ─────────────────────────────────────────────────────
++ * The strip is also lossy in a way that showed up the moment this ran against a
++ * single-page storefront. The server's gallery harvester mines inline
++ * hydration payloads for image URLs — that is how it finds the photos a React
++ * store never writes into its markup — and those payloads are `<script>`, so
++ * this file deletes them before the server ever sees them. On a Shopify store
++ * the gallery is plain `<img>` and nothing is lost; on Farfetch most of it is
++ * in the payload, and the product arrived with the two photos its carousel had
++ * mounted.
++ *
++ * Shipping the payloads back would mean sending the megabytes the strip exists
++ * to remove. So the page is read here, where it is still whole, and only the
++ * findings travel: image URLs, and the rendered price text. Both are evidence,
++ * not answers — the server puts them through the same host-and-naming tests as
++ * every other candidate, because a page's script data names the "you may also
++ * like" carousel too.
++ *
++ * This is a deliberate divergence from the bookmarklet, and the only one: the
++ * extension can read a page the bookmarklet's one-shot copy cannot.
 + *
 + * Before reading anything it scrolls the page. That is the whole reason a real
 + * tab is worth its cost over a server fetch: a gallery that lazy-loads on
@@ -1372,7 +1421,620 @@ index 0000000..6999dcb
 +  const DROP =
 +    'script:not([type="application/ld+json"]),style,link[rel=stylesheet],svg,noscript,iframe,template';
 +
++  /** Most photos one page can contribute. Well past any real gallery. */
++  const MAX_IMAGES = 300;
++
++  /** Longest URL kept. Past this it is a data-URI or a tracking pixel's essay. */
++  const MAX_URL = 1500;
++
++  /** Script text scanned for image URLs, in total. A ceiling, not a target. */
++  const MAX_SCRIPT_SCAN = 8_000_000;
++
++  /** Most size labels one page can contribute. */
++  const MAX_SIZES = 80;
++
++  /** Attribute text that marks a corner of the page as being about size. */
++  const SIZE_HINT = /size|talla|taille|gr[oö]sse|größe|taglia|розмір|размер/i;
++
++  /** The same, for colour. */
++  const COLOR_HINT = /colou?r|farbe|couleur|colore|barva|kolor|cvet|цвет|колір/i;
++
++  /** Most sibling colourway addresses one page can contribute. */
++  const MAX_VARIANTS = 20;
++
++  /** Most spec rows one page can contribute. */
++  const MAX_SPECS = 40;
++
++  /** Most breadcrumbs one page can contribute. */
++  const MAX_CRUMBS = 12;
++
++  /** Longest description kept. The importer stores five thousand characters. */
++  const MAX_DESCRIPTION = 5000;
++
++  /** Shortest run of text that could be a product description rather than a label. */
++  const MIN_DESCRIPTION = 80;
++
++  /**
++   * Image URLs as they appear in a JSON payload, escaped slashes and all.
++   *
++   * `\/` is allowed in every segment rather than only after the scheme: a
++   * payload that has been JSON-encoded twice escapes every slash in the path,
++   * and a pattern that stops at the first backslash matches the scheme and then
++   * finds no file extension to confirm. Same pattern as the server's harvester,
++   * which unescapes the result the same way.
++   */
++  const JSON_IMAGE =
++    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
++
++  /** A price: a currency marker with digits next to it, either order. */
++  const PRICE_TEXT =
++    /(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)\s*[\d][\d\s.,]*|[\d][\d\s.,]*\s*(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)/;
++
 +  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++
++  /** Resolve against the page, and reject what is not a fetchable address. */
++  function absolute(raw) {
++    if (!raw) return null;
++    const value = String(raw).trim().replace(/\\\//g, "/");
++    if (!value || value.length > MAX_URL) return null;
++    if (/^data:/i.test(value)) return null;
++    try {
++      const url = new URL(value, location.href);
++      return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
++    } catch {
++      return null;
++    }
++  }
++
++  /**
++   * Every address on the page that could be a photo of this product.
++   *
++   * Deliberately greedy: it costs a few hundred strings, and the server rejects
++   * what does not belong to the product. Missing a photo is the expensive
++   * mistake, because nothing downstream can recover it without re-visiting the
++   * store.
++   */
++  function collectImages() {
++    const found = new Set();
++    const add = (raw) => {
++      const url = absolute(raw);
++      if (url && found.size < MAX_IMAGES) found.add(url);
++    };
++    const addSrcset = (value) => {
++      if (!value) return;
++      for (const part of String(value).split(",")) {
++        add(part.trim().split(/\s+/)[0]);
++      }
++    };
++
++    // `currentSrc` first: on a responsive image it is the rendition the browser
++    // actually chose and loaded, which no attribute in the markup states.
++    for (const img of document.images) {
++      add(img.currentSrc);
++      add(img.getAttribute("src"));
++      addSrcset(img.getAttribute("srcset"));
++      addSrcset(img.getAttribute("data-srcset"));
++      for (const attr of [
++        "data-src", "data-original", "data-lazy", "data-image",
++        "data-zoom-image", "data-large_image", "data-large", "data-full", "data-hires",
++      ]) {
++        add(img.getAttribute(attr));
++      }
++    }
++
++    for (const source of document.querySelectorAll("picture source")) {
++      addSrcset(source.getAttribute("srcset"));
++      addSrcset(source.getAttribute("data-srcset"));
++    }
++
++    for (const link of document.querySelectorAll('link[as="image"]')) {
++      add(link.getAttribute("href"));
++      addSrcset(link.getAttribute("imagesrcset"));
++    }
++
++    // The payloads this file is about to delete. A virtualised carousel keeps
++    // the slides it has not mounted here and nowhere else.
++    let scanned = 0;
++    for (const script of document.querySelectorAll("script")) {
++      if (found.size >= MAX_IMAGES || scanned >= MAX_SCRIPT_SCAN) break;
++      const text = script.textContent;
++      if (!text || text.length < 24) continue;
++      scanned += text.length;
++      const matches = text.match(JSON_IMAGE);
++      if (!matches) continue;
++      for (const match of matches) {
++        if (found.size >= MAX_IMAGES) break;
++        add(match);
++      }
++    }
++
++    return [...found];
++  }
++
++  /**
++   * The sizes the page offers, as a shopper sees them.
++   *
++   * This is the field the parser had no source for at all: its JSON-LD reader
++   * returned an empty list by design, so unless an admin had written a per-site
++   * recipe rule, a product arrived with no sizes. And sizes are a control, not
++   * text — buttons, a select, a swatch row — so the strip removes every trace
++   * of them along with the styles that made them look like buttons.
++   *
++   * Read loosely on purpose. The corner of a page that mentions "size" also
++   * holds "Select size", a size-guide link and sometimes a quantity stepper;
++   * `pickSizes` on the server decides which of these strings is a size, so the
++   * vocabulary lives in one place instead of being spelled out here too.
++   *
++   * Sold-out sizes are collected like the rest. The catalogue records the sizes
++   * a piece comes in, not today's stock in one store, and it has nowhere to put
++   * the difference — a size dropped here would read as a size that does not
++   * exist.
++   */
++  function collectSizes() {
++    const found = [];
++    const seen = new Set();
++    const add = (raw) => {
++      const value = String(raw || "").trim().replace(/\s+/g, " ");
++      if (!value || value.length > 24) return;
++      const key = value.toLowerCase();
++      if (seen.has(key) || found.length >= MAX_SIZES) return;
++      seen.add(key);
++      found.push(value);
++    };
++
++    /** Does this element say, in any of its attributes, that it is about size? */
++    const hinted = (el) => {
++      const attrs = [
++        typeof el.className === "string" ? el.className : "",
++        el.id || "",
++        el.getAttribute("name") || "",
++        el.getAttribute("aria-label") || "",
++        el.getAttribute("data-testid") || "",
++        el.getAttribute("data-option") || "",
++      ].join(" ");
++      return SIZE_HINT.test(attrs);
++    };
++
++    // A select is the least ambiguous of the three: its options are the sizes,
++    // in the store's own order, minus the placeholder that carries no value.
++    for (const select of document.querySelectorAll("select")) {
++      if (!hinted(select)) continue;
++      for (const option of select.options) {
++        if (!option.value && option.disabled) continue;
++        add(option.getAttribute("data-value") || option.textContent);
++      }
++    }
++
++    // A store that labels its swatches states the size in the attribute, which
++    // beats reading the button's text — the text is sometimes just a number in
++    // a sprite.
++    for (const el of document.querySelectorAll("[data-size],[data-option-size],[data-value-size]")) {
++      add(
++        el.getAttribute("data-size") ||
++          el.getAttribute("data-option-size") ||
++          el.getAttribute("data-value-size"),
++      );
++    }
++
++    // And the common case: clickable things inside a container that says size.
++    const containers = document.querySelectorAll(
++      '[class*="size" i],[id*="size" i],[data-testid*="size" i],[aria-label*="size" i],fieldset,[role="radiogroup"]',
++    );
++    for (const container of containers) {
++      if (found.length >= MAX_SIZES) break;
++      if (!hinted(container)) continue;
++      const items = container.querySelectorAll(
++        'button,label,li,a,span[role="button"],input[type="radio"]',
++      );
++      for (const item of items) {
++        if (found.length >= MAX_SIZES) break;
++        if (item.tagName === "INPUT") add(item.value || item.getAttribute("aria-label"));
++        else add(item.innerText || item.textContent);
++      }
++    }
++
++    return found;
++  }
++
++  /** Elements whose own attributes say they are the colour control. */
++  function colorContainers() {
++    const out = [];
++    const all = document.querySelectorAll(
++      '[class*="colo" i],[id*="colo" i],[data-testid*="colo" i],[aria-label*="colo" i],[class*="swatch" i],[data-option*="colo" i]',
++    );
++    for (const el of all) {
++      const attrs = [
++        typeof el.className === "string" ? el.className : "",
++        el.id || "",
++        el.getAttribute("aria-label") || "",
++        el.getAttribute("data-testid") || "",
++        el.getAttribute("data-option") || "",
++      ].join(" ");
++      if (COLOR_HINT.test(attrs) || /swatch/i.test(attrs)) out.push(el);
++      if (out.length >= 40) break;
++    }
++    return out;
++  }
++
++  /** A colour name has to be a word, not a placeholder or a number. */
++  function usableColor(raw) {
++    const value = String(raw || "").trim().replace(/\s+/g, " ");
++    if (value.length < 2 || value.length > 40) return "";
++    if (/^\d+$/.test(value)) return "";
++    if (/^(?:select|choose|pick|colou?r|цвет|колір)\b/i.test(value)) return "";
++    return value;
++  }
++
++  /**
++   * The colour this page is showing, in the store's own word for it.
++   *
++   * The catalogue builds the swatch, the colour filter and a good part of the
++   * stylist's vocabulary out of this one string, and a store almost never puts
++   * it in structured data. It puts it in the swatch the shopper has selected —
++   * an aria-label, a title, a tiny image's alt text — or in a line that reads
++   * "Colour: Charcoal". All three are asked, in that order: a selected swatch
++   * is the page pointing at its own answer.
++   */
++  function collectColorText() {
++    const containers = colorContainers();
++    const selected = [
++      '[aria-checked="true"]',
++      '[aria-selected="true"]',
++      '[aria-pressed="true"]',
++      '[data-selected="true"]',
++      ".selected",
++      ".active",
++      ".is-selected",
++      ".is-active",
++    ];
++
++    for (const container of containers) {
++      for (const selector of selected) {
++        let el = null;
++        try {
++          el = container.matches(selector) ? container : container.querySelector(selector);
++        } catch {
++          el = null;
++        }
++        if (!el) continue;
++        const img = el.querySelector && el.querySelector("img");
++        const name = usableColor(
++          el.getAttribute("aria-label") ||
++            el.getAttribute("title") ||
++            el.getAttribute("data-color") ||
++            el.getAttribute("data-colour") ||
++            el.getAttribute("data-color-name") ||
++            (img && img.getAttribute("alt")) ||
++            el.innerText ||
++            el.textContent,
++        );
++        if (name) return name;
++      }
++    }
++
++    for (const attr of ["data-selected-color", "data-selected-colour", "data-color-name"]) {
++      const el = document.querySelector(`[${attr}]`);
++      const name = el && usableColor(el.getAttribute(attr));
++      if (name) return name;
++    }
++
++    // "Colour: Charcoal" — the label and its value in one line of text.
++    for (const container of containers) {
++      const text = (container.innerText || container.textContent || "").trim();
++      if (!text || text.length > 200) continue;
++      const match = text.match(
++        /(?:colou?r|farbe|couleur|colore|цвет|колір)\s*[:：]\s*([^\n,;]{2,40})/i,
++      );
++      const name = match && usableColor(match[1]);
++      if (name) return name;
++    }
++
++    return "";
++  }
++
++  /**
++   * The same piece in other colours, as the colour row links it.
++   *
++   * This is the catalogue's variant grouping stated by the page itself, and it
++   * is worth far more than guessing from names: an address either matches a row
++   * we already have or it does not. Junk that happens to live in the colour row
++   * — a size-guide link, a care-instructions anchor — is left in: the server
++   * drops it with the same test the collect planner uses to recognise a product
++   * address, so this side does not need a second opinion about what a product
++   * URL looks like.
++   */
++  function collectVariantUrls() {
++    const out = new Set();
++    const here = location.href.split("#")[0];
++    for (const container of colorContainers()) {
++      if (out.size >= MAX_VARIANTS) break;
++      for (const anchor of container.querySelectorAll("a[href]")) {
++        if (out.size >= MAX_VARIANTS) break;
++        const url = absolute(anchor.getAttribute("href"));
++        if (!url) continue;
++        const clean = url.split("#")[0];
++        if (clean === here) continue;
++        try {
++          if (new URL(clean).origin !== location.origin) continue;
++        } catch {
++          continue;
++        }
++        out.add(clean);
++      }
++    }
++    return [...out];
++  }
++
++  /**
++   * An element's text, whether or not it is on screen.
++   *
++   * `innerText` is what a reader sees, which is the right answer for a price and
++   * the wrong one for a collapsed accordion: a store that hides its description
++   * behind "Details ⌄" has the text in the DOM and `innerText` returns nothing
++   * for it. `textContent` does not care about rendering, so it is the fallback —
++   * and only the fallback, because it also returns the text of things a reader
++   * would never see.
++   */
++  function textOf(el) {
++    if (!el) return "";
++    const rendered = (el.innerText || "").trim();
++    return rendered || (el.textContent || "").trim();
++  }
++
++  const squash = (value) => String(value || "").replace(/\s+/g, " ").trim();
++
++  /**
++   * The product's description, as the page renders it.
++   *
++   * Two rules, both learned from the shape of a retail page. `itemprop` wins
++   * outright — a store that marks its description has told us which block it is.
++   * Otherwise the SHORTEST candidate over the length of a label wins, not the
++   * longest: these containers nest, and the outer one holds the description plus
++   * delivery, returns and the reviews teaser. The innermost block that is long
++   * enough to be prose is the description itself.
++   */
++  function collectDescription() {
++    const marked = document.querySelector('[itemprop="description"]');
++    const markedText = squash(textOf(marked));
++    if (markedText.length >= MIN_DESCRIPTION) return markedText.slice(0, MAX_DESCRIPTION);
++
++    const candidates = document.querySelectorAll(
++      '[class*="descri" i],[id*="descri" i],[data-testid*="descri" i],[class*="product-details" i],[class*="product-info" i],[class*="опис" i]',
++    );
++    let best = "";
++    for (const el of candidates) {
++      const text = squash(textOf(el));
++      if (text.length < MIN_DESCRIPTION) continue;
++      if (!best || text.length < best.length) best = text;
++    }
++    if (best) return best.slice(0, MAX_DESCRIPTION);
++
++    // Nothing prose-length: take the longest short thing rather than nothing, so
++    // a one-line product blurb still arrives.
++    for (const el of candidates) {
++      const text = squash(textOf(el));
++      if (text.length > best.length) best = text;
++    }
++    return best.slice(0, MAX_DESCRIPTION);
++  }
++
++  /**
++   * Every "Label: value" pair in one line of text.
++   *
++   * A spec block whose rows are bare text nodes renders as ONE line — innerText
++   * collapses the newlines — so "Composition: 80% wool Care: dry clean Article:
++   * FA-1" arrives as a single string carrying three rows. Reading only the first
++   * pair loses the rest; reading them naively makes the first value swallow the
++   * second label.
++   *
++   * So each value ends where the NEXT label begins, and a label is taken as the
++   * single word before its colon. One word is deliberate: a label can be two
++   * ("Article number"), and there is no way to tell "number" from the tail of the
++   * previous value without knowing every label in every language. Cutting one
++   * word early would eat a fibre off a composition, which is the failure that
++   * matters.
++   *
++   * The key is then emitted in three forms — the last word, the last two, the
++   * last three — because the server matches keys against a vocabulary and
++   * "Article number" is in it while "number" is not. Identical values, so a
++   * reader takes whichever form it recognises; this is the price of keeping that
++   * vocabulary on one side of the wire.
++   */
++  function pairsFromLine(line) {
++    const colons = [];
++    for (let i = 0; i < line.length; i++) {
++      if (line[i] === ":" || line[i] === "：") colons.push(i);
++    }
++    if (!colons.length) return [];
++
++    /** The word immediately before `index`, or "" when there is none. */
++    const labelBefore = (index) => {
++      const match = line.slice(0, index).match(/[\p{L}][\p{L}-]*$/u);
++      return match ? match[0] : "";
++    };
++
++    const pairs = [];
++    for (let i = 0; i < colons.length; i++) {
++      const colon = colons[i];
++      const label = labelBefore(colon);
++      if (!label) continue;
++
++      let end = line.length;
++      if (i + 1 < colons.length) {
++        const nextLabel = labelBefore(colons[i + 1]);
++        if (nextLabel) end = colons[i + 1] - nextLabel.length;
++      }
++
++      const value = line.slice(colon + 1, end).trim().replace(/[\s,;.]+$/, "");
++      if (!value) continue;
++
++      // Longer key forms, for the vocabularies that spell a label in two words.
++      const words = line
++        .slice(0, colon)
++        .trim()
++        .split(/\s+/)
++        .filter((w) => /^[\p{L}][\p{L}-]*$/u.test(w));
++      const keys = new Set([label]);
++      if (words.length >= 2) keys.add(words.slice(-2).join(" "));
++      if (words.length >= 3) keys.add(words.slice(-3).join(" "));
++
++      for (const key of keys) pairs.push({ key, value });
++    }
++    return pairs;
++  }
++
++  /**
++   * The store's spec table, row by row, in the store's own words.
++   *
++   * Composition, care, country of origin, article number: printed as a
++   * definition list, a two-column table, or plain "Label: value" lines, and
++   * carried by structured data almost never. The rows are sent as they were
++   * printed — the server knows which key means composition in six languages, and
++   * it also needs the ones it does not recognise yet.
++   */
++  function collectSpecs() {
++    const out = [];
++    const seen = new Set();
++    const add = (rawKey, rawValue) => {
++      const key = squash(rawKey).replace(/[:：]\s*$/, "");
++      const value = squash(rawValue);
++      if (!key || !value || key.length > 40 || value.length > 200) return;
++      if (key.toLowerCase() === value.toLowerCase()) return;
++      const dedupe = `${key.toLowerCase()}=${value.toLowerCase()}`;
++      if (seen.has(dedupe) || out.length >= MAX_SPECS) return;
++      seen.add(dedupe);
++      out.push({ key, value });
++    };
++
++    for (const dl of document.querySelectorAll("dl")) {
++      const kids = [...dl.children];
++      for (let i = 0; i < kids.length - 1; i++) {
++        if (kids[i].tagName === "DT" && kids[i + 1].tagName === "DD") {
++          add(textOf(kids[i]), textOf(kids[i + 1]));
++        }
++      }
++    }
++
++    for (const tr of document.querySelectorAll("tr")) {
++      const cells = tr.querySelectorAll("th,td");
++      if (cells.length === 2) add(textOf(cells[0]), textOf(cells[1]));
++    }
++
++    // "Composition: 80% wool" as a line of text, which is how a store that uses
++    // neither a list nor a table writes it.
++    const blocks = document.querySelectorAll(
++      '[class*="spec" i],[class*="detail" i],[class*="composition" i],[class*="material" i],[class*="attribute" i],[class*="характеристик" i],[class*="склад" i]',
++    );
++    for (const block of blocks) {
++      if (out.length >= MAX_SPECS) break;
++      const text = textOf(block);
++      if (!text || text.length > 2000) continue;
++      for (const line of text.split(/\n+/)) {
++        for (const pair of pairsFromLine(line)) add(pair.key, pair.value);
++      }
++    }
++
++    return out;
++  }
++
++  /**
++   * The breadcrumb trail, outermost crumb first.
++   *
++   * This is the store filing the piece for us, and it is the answer to two
++   * fields the name cannot always give: a product called "Aurelio" says nothing
++   * about being a jacket, and "Women / Clothing / Jackets" says it plainly. A
++   * `BreadcrumbList` in JSON-LD survives the strip and the server reads it from
++   * the markup; this is for the many stores that render a trail and describe it
++   * in no structured form at all.
++   *
++   * The current page's own crumb — the last one, usually the product name, often
++   * not a link — is kept: it costs nothing, and the classifier reads the name
++   * first anyway.
++   */
++  function collectBreadcrumbs() {
++    const containers = [
++      ...document.querySelectorAll(
++        'nav[aria-label*="breadcrumb" i],[class*="breadcrumb" i],[id*="breadcrumb" i],[data-testid*="breadcrumb" i],[itemtype*="BreadcrumbList" i],[class*="крошк" i]',
++      ),
++    ];
++
++    for (const container of containers) {
++      const items = container.querySelectorAll('li,a,[itemprop="name"],span');
++      const crumbs = [];
++      const seen = new Set();
++      for (const item of items) {
++        // A <li> wrapping an <a> would otherwise contribute the same crumb twice.
++        if (item.querySelector && item.querySelector("a,li,span")) continue;
++        const text = squash(textOf(item)).replace(/^[/>·|»–-]\s*|\s*[/>·|»–-]$/g, "");
++        if (!text || text.length > 60) continue;
++        const key = text.toLowerCase();
++        if (seen.has(key)) continue;
++        seen.add(key);
++        crumbs.push(text);
++        if (crumbs.length >= MAX_CRUMBS) break;
++      }
++      // One crumb is a link, not a trail — "Home" on its own says nothing.
++      if (crumbs.length >= 2) return crumbs;
++    }
++    return [];
++  }
++
++  /**
++   * The brand, where the page prints it rather than declares it.
++   *
++   * Structured data usually carries the brand, which is why it was only
++   * sometimes missing; when it is missing it is because the store treats the
++   * designer as a link to a designer page instead of as a property of the
++   * product. The spec table answers this too, and the server reads it from
++   * there — this covers the stores with no table either.
++   */
++  function collectBrandText() {
++    const marked = document.querySelector('[itemprop="brand"]');
++    const markedText = squash(textOf(marked));
++    if (markedText && markedText.length <= 60) return markedText;
++
++    const candidates = document.querySelectorAll(
++      '[class*="brand" i],[class*="designer" i],[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]',
++    );
++    for (const el of candidates) {
++      const text = squash(textOf(el));
++      // A brand is a name, not a sentence, and not the word "Brand" alone.
++      if (!text || text.length < 2 || text.length > 60) continue;
++      if (/^(?:brand|designer|бренд|дизайнер)$/i.test(text)) continue;
++      return text;
++    }
++    return "";
++  }
++
++  /**
++   * The price as the page states it, symbol included.
++   *
++   * The symbol is the point. A store that writes `<span>4 000 ₴</span>` and a
++   * bare number in its structured data leaves the server with no way to know
++   * what currency it is looking at, and a price taken for dollars because
++   * nobody said otherwise is how a coat ends up in the catalogue at forty times
++   * its price. Elements that name themselves "price" are asked first; the
++   * body's own text is the fallback, and its first match is the one the layout
++   * puts nearest the top, which on a product page is the product's price.
++   */
++  function collectPriceText() {
++    const named = document.querySelectorAll(
++      '[itemprop="price"],[data-price],[class*="price" i],[id*="price" i],[data-testid*="price" i]',
++    );
++    for (const el of named) {
++      // Skip the containers that merely wrap a price block: their text carries
++      // the delivery estimate and the instalment offer along with it.
++      const text = (el.innerText || el.textContent || "").trim();
++      if (!text || text.length > 40) continue;
++      if (!el.offsetParent && el.tagName !== "META") continue;
++      const match = text.match(PRICE_TEXT);
++      if (match) return match[0].trim().slice(0, 120);
++    }
++
++    const body = (document.body && document.body.innerText) || "";
++    const match = body.match(PRICE_TEXT);
++    return match ? match[0].trim().slice(0, 120) : "";
++  }
 +
 +  try {
 +    // Walk the page so lazy images commit to a real `src`. Four steps is enough
@@ -1388,6 +2050,17 @@ index 0000000..6999dcb
 +      await sleep(150);
 +    }
 +
++    // Read before stripping: all of these live in what the strip removes.
++    const images = collectImages();
++    const priceText = collectPriceText();
++    const sizes = collectSizes();
++    const colorText = collectColorText();
++    const variantUrls = collectVariantUrls();
++    const descriptionText = collectDescription();
++    const specs = collectSpecs();
++    const breadcrumbs = collectBreadcrumbs();
++    const brandText = collectBrandText();
++
 +    const root = document.documentElement.cloneNode(true);
 +    root.querySelectorAll(DROP).forEach((n) => n.remove());
 +    // An inline data-URI is a whole image encoded in the attribute. The parser
@@ -1395,17 +2068,30 @@ index 0000000..6999dcb
 +    // and the element stays.
 +    root.querySelectorAll('[src^="data:"]').forEach((n) => n.removeAttribute("src"));
 +
-+    return { ok: true, url: location.href, html: `<html>${root.innerHTML}</html>` };
++    return {
++      ok: true,
++      url: location.href,
++      html: `<html>${root.innerHTML}</html>`,
++      images,
++      priceText,
++      sizes,
++      colorText,
++      variantUrls,
++      descriptionText,
++      specs,
++      breadcrumbs,
++      brandText,
++    };
 +  } catch (err) {
 +    return { ok: false, error: err && err.message ? err.message : String(err) };
 +  }
 +})();
 diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
 new file mode 100644
-index 0000000..888330e
+index 0000000..ec0ab46
 --- /dev/null
 +++ b/src/app/api/admin/parser/collect/route.ts
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,323 @@
 +/**
 + * Catalogue collection driven from the admin's own browser.
 + *
@@ -1467,6 +2153,63 @@ index 0000000..888330e
 +
 +/** Addresses the caller may say it has already seen, for de-duplication. */
 +const MAX_SEEN = 5_000;
++
++/**
++ * Image candidates one page may offer.
++ *
++ * The extension reads the rendered page and its hydration payloads before
++ * stripping them (see `extension/snapshot.js`), so these are addresses the
++ * markup below no longer contains. Generous, because the gallery harvester
++ * rejects what does not belong to the product and a photo missed here cannot be
++ * recovered without visiting the store again — and bounded, because this is a
++ * list a browser extension puts in a request body.
++ */
++const MAX_IMAGE_CANDIDATES = 300;
++
++/** Longest image address accepted. Past this it is not an address. */
++const MAX_IMAGE_URL = 1_500;
++
++/** Longest rendered price string accepted, e.g. "4 000 ₴". */
++const MAX_PRICE_TEXT = 120;
++
++/**
++ * Size labels one page may offer.
++ *
++ * Sixty is past any real size run — a shoe store ships twenty, a jeans store
++ * with waist-by-length pairs maybe forty — and the list is filtered by
++ * `pickSizes` before anything is stored, so a generous ceiling costs nothing
++ * but a few strings.
++ */
++const MAX_SIZE_CANDIDATES = 60;
++
++/** Longest size label accepted. "One size" is nine characters. */
++const MAX_SIZE_LABEL = 24;
++
++/** Longest colour name accepted, e.g. "Charcoal marl". */
++const MAX_COLOR_TEXT = 80;
++
++/**
++ * Sibling colourway addresses one page may name.
++ *
++ * Each is looked up against `source_url` exactly, so a junk link that happened
++ * to sit in the colour row matches nothing and costs nothing.
++ */
++const MAX_VARIANT_URLS = 20;
++
++/** Longest rendered description accepted; the importer stores 5,000 characters. */
++const MAX_DESCRIPTION = 5_000;
++
++/** Breadcrumbs accepted, and the length of one crumb. */
++const MAX_BREADCRUMBS = 12;
++const MAX_CRUMB = 60;
++
++/** Longest brand name accepted. */
++const MAX_BRAND_TEXT = 80;
++
++/** Spec rows accepted, and the size of one row's halves. */
++const MAX_SPECS = 40;
++const MAX_SPEC_KEY = 40;
++const MAX_SPEC_VALUE = 200;
 +
 +function str(v: unknown): string {
 +  return typeof v === "string" ? v.trim() : "";
@@ -1537,6 +2280,41 @@ index 0000000..888330e
 +    );
 +  }
 +
++  // What the page showed that its stripped markup no longer says. Both are
++  // candidates at the lowest precedence: every structured source wins over
++  // them, and the image list still has to pass the gallery harvester's
++  // host-and-naming tests.
++  const imageCandidates = (Array.isArray(body?.images) ? body.images : [])
++    .filter(
++      (u: unknown): u is string =>
++        typeof u === "string" && u.length <= MAX_IMAGE_URL && /^https?:\/\//.test(u),
++    )
++    .slice(0, MAX_IMAGE_CANDIDATES);
++  const priceText = str(body?.priceText).slice(0, MAX_PRICE_TEXT);
++  const sizeCandidates = (Array.isArray(body?.sizes) ? body.sizes : [])
++    .filter((v: unknown): v is string => typeof v === "string" && v.length <= MAX_SIZE_LABEL)
++    .slice(0, MAX_SIZE_CANDIDATES);
++  const colorText = str(body?.colorText).slice(0, MAX_COLOR_TEXT);
++  const variantUrls = (Array.isArray(body?.variantUrls) ? body.variantUrls : [])
++    .filter(
++      (u: unknown): u is string =>
++        typeof u === "string" && u.length <= MAX_IMAGE_URL && /^https?:\/\//.test(u),
++    )
++    .slice(0, MAX_VARIANT_URLS);
++  const descriptionText = str(body?.descriptionText).slice(0, MAX_DESCRIPTION);
++  const specs = (Array.isArray(body?.specs) ? body.specs : [])
++    .map((row: unknown) => ({
++      key: str((row as { key?: unknown })?.key).slice(0, MAX_SPEC_KEY),
++      value: str((row as { value?: unknown })?.value).slice(0, MAX_SPEC_VALUE),
++    }))
++    .filter((row: { key: string; value: string }) => !!row.key && !!row.value)
++    .slice(0, MAX_SPECS);
++  const breadcrumbs = (Array.isArray(body?.breadcrumbs) ? body.breadcrumbs : [])
++    .map((v: unknown) => str(v).slice(0, MAX_CRUMB))
++    .filter(Boolean)
++    .slice(0, MAX_BREADCRUMBS);
++  const brandText = str(body?.brandText).slice(0, MAX_BRAND_TEXT);
++
 +  const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
 +    getFetchSettings(),
 +    getFetchApiKey(),
@@ -1559,6 +2337,17 @@ index 0000000..888330e
 +      aiSettings,
 +      useAi,
 +      html,
++      evidence: {
++        images: imageCandidates,
++        priceText,
++        sizes: sizeCandidates,
++        colorText,
++        variantUrls,
++        descriptionText,
++        specs,
++        breadcrumbs,
++        brandText,
++      },
 +    });
 +
 +    const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
@@ -1589,6 +2378,11 @@ index 0000000..888330e
 +            name: product.name,
 +            usedAi,
 +            imagesMirrored: imported.imagesMirrored ?? 0,
++            images: imported.images ?? 0,
++            priceNote: imported.priceNote,
++            variantsLinked: imported.variantsLinked ?? 0,
++            merged: !!imported.mergedInto,
++            mergedFields: imported.mergedFields,
 +          }
 +        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
 +    }
@@ -1621,12 +2415,70 @@ index 0000000..888330e
 +
 +  return NextResponse.json({ ok: true, result });
 +}
+diff --git a/src/app/api/exchange-rates/route.ts b/src/app/api/exchange-rates/route.ts
+index c329278..1af1e83 100644
+--- a/src/app/api/exchange-rates/route.ts
++++ b/src/app/api/exchange-rates/route.ts
+@@ -1,26 +1,33 @@
+ import { NextResponse } from "next/server";
++import { usdRates, FALLBACK_RATES } from "@/lib/server/fx";
+ 
++/**
++ * The rates the currency switcher offers.
++ *
++ * The table itself is fetched and cached by `@/lib/server/fx`, which the
++ * importer uses to state prices in dollars — the same numbers, from one place,
++ * so a product's stored price and the price a shopper sees converted cannot
++ * disagree. This route narrows that table to the currencies the switcher has a
++ * symbol for and hands it to the browser.
++ */
+ const CODES = ["EUR", "GBP", "UAH", "CZK", "JPY", "TRY"];
+-const FALLBACK = { EUR: 0.85, GBP: 0.74, UAH: 44, CZK: 21, JPY: 157, TRY: 45 };
++
++function pick(rates: Record<string, number>): Record<string, number> {
++  return Object.fromEntries(
++    CODES.map((c) => [c, rates[c]]).filter(([, v]) => typeof v === "number"),
++  );
++}
+ 
+ export async function GET() {
+-  try {
+-    const res = await fetch(
+-      "https://open.er-api.com/v6/latest/USD",
+-      { next: { revalidate: 3600 } }
+-    );
+-    if (!res.ok) throw new Error(`${res.status}`);
+-    const data: { result: string; rates: Record<string, number> } = await res.json();
+-    if (data.result !== "success") throw new Error("bad response");
+-    const rates = Object.fromEntries(
+-      CODES.map((c) => [c, data.rates[c]]).filter(([, v]) => v != null)
+-    );
+-    return NextResponse.json(rates, {
+-      headers: { "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=600" },
+-    });
+-  } catch {
+-    return NextResponse.json(FALLBACK, {
+-      headers: { "Cache-Control": "public, s-maxage=300" },
+-    });
+-  }
++  const { rates, live } = await usdRates();
++
++  // A fallback table is cached briefly, so the switcher picks live numbers up
++  // soon after the provider comes back rather than an hour later.
++  return NextResponse.json(pick(live ? rates : FALLBACK_RATES), {
++    headers: {
++      "Cache-Control": live
++        ? "public, s-maxage=3600, stale-while-revalidate=600"
++        : "public, s-maxage=300",
++    },
++  });
+ }
 diff --git a/src/app/goo-studio/parser/collect/page.tsx b/src/app/goo-studio/parser/collect/page.tsx
 new file mode 100644
-index 0000000..8998723
+index 0000000..1088fd3
 --- /dev/null
 +++ b/src/app/goo-studio/parser/collect/page.tsx
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,456 @@
 +"use client";
 +
 +/**
@@ -2005,6 +2857,14 @@ index 0000000..8998723
 +                      {r.reason}
 +                    </span>
 +                  )}
++                  {!r.reason && detailLine(r) && (
++                    <span
++                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[260px] flex-shrink-0"
++                      title={detailLine(r)}
++                    >
++                      {detailLine(r)}
++                    </span>
++                  )}
 +                  <a
 +                    href={r.url}
 +                    target="_blank"
@@ -2030,6 +2890,35 @@ index 0000000..8998723
 +  );
 +}
 +
++/**
++ * What a finished page has to say for itself beyond "imported".
++ *
++ * Two questions the admin would otherwise have to open the catalogue to answer:
++ * how many photos came across, and what happened to the price. The second one
++ * matters most on a store that does not price in dollars — the catalogue stores
++ * dollars, so the row says which rate turned ₴4,000 into a number, rather than
++ * leaving the admin to wonder whether it did.
++ */
++function detailLine(r: CrawlItemResult): string {
++  const parts: string[] = [];
++  if (r.images) parts.push(`${r.images} photo${r.images === 1 ? "" : "s"}`);
++  if (r.priceNote) parts.push(r.priceNote);
++  if (r.variantsLinked) {
++    parts.push(`grouped with ${r.variantsLinked} colour${r.variantsLinked === 1 ? "" : "s"}`);
++  }
++  // A merge is the interesting outcome on this row: the page did not create a
++  // product, it added a place to buy one we already had.
++  if (r.merged) {
++    const filled = (r.mergedFields ?? []).filter((f) => f !== "retailer");
++    parts.push(
++      filled.length
++        ? `linked to an existing product, filling ${filled.join(", ")}`
++        : "linked to an existing product",
++    );
++  }
++  return parts.join(" · ");
++}
++
 +function StatusPill({ status }: { status: CrawlItemResult["status"] }) {
 +  const map: Record<CrawlItemResult["status"], { label: string; cls: string }> = {
 +    imported: { label: "new", cls: "text-emerald-500 bg-emerald-500/10" },
@@ -2046,6 +2935,149 @@ index 0000000..8998723
 +    </span>
 +  );
 +}
+diff --git a/src/lib/categories.ts b/src/lib/categories.ts
+index 20adf85..9029a0c 100644
+--- a/src/lib/categories.ts
++++ b/src/lib/categories.ts
+@@ -159,6 +159,90 @@ export const DEFAULT_CATEGORY_GROUPS: CategoryGroup[] = [
+   },
+ ];
+ 
++/**
++ * Every form a word might be the plural of, itself included.
++ *
++ * A set rather than one answer, because English plurals in -ies are ambiguous
++ * and the tree contains both kinds: "accessories" is the plural of "accessory",
++ * "hoodies" of "hoodie", and no rule tells them apart without a dictionary. Both
++ * candidates are generated and a match on either counts — cheaper and more
++ * honest than a stemmer that is right most of the time.
++ *
++ * What it must never do is mangle a word that merely ends in s: "dress" is not
++ * the plural of "dres".
++ */
++function wordForms(word: string): string[] {
++  const forms = new Set<string>([word]);
++  if (word.length > 3) {
++    if (word.endsWith("ies")) {
++      forms.add(`${word.slice(0, -3)}y`);
++      forms.add(word.slice(0, -1));
++    } else if (/(?:s|x|z|ch|sh)es$/.test(word)) {
++      forms.add(word.slice(0, -2));
++    } else if (!word.endsWith("ss") && word.endsWith("s")) {
++      forms.add(word.slice(0, -1));
++    }
++  }
++  return [...forms];
++}
++
++/**
++ * The tree's own label for what a piece of text is describing.
++ *
++ * The importer had no answer for subcategory at all — it wrote none, so every
++ * product landed with the field empty and the filter showed it under whatever
++ * its category implied. The label is in the text: a product called "Wool-blend
++ * bomber jacket" is a Bomber Jacket, and a breadcrumb reading "Women / Clothing
++ * / Jackets" says Jackets.
++ *
++ * Matching is by words, not by substring, and the most specific label wins — a
++ * bomber jacket matches both "Jackets" and "Bomber Jackets", and the second is
++ * the answer. Labels that name two things ("Hoodies & Sweatshirts") match on
++ * either half, and a trailing plural is stripped from every word so "Sneakers"
++ * finds a sneaker.
++ *
++ * Returns undefined when nothing in the tree is named, which is the honest
++ * answer for "Silk scarf" in a tree with no scarf label — the caller then falls
++ * back to what the category implies.
++ */
++export function matchSubcategoryLabel(
++  text: string,
++  tree: CategoryGroup[] = DEFAULT_CATEGORY_GROUPS,
++): string | undefined {
++  const words = (value: string) =>
++    value
++      .toLowerCase()
++      .replace(/[^\p{L}\p{N}]+/gu, " ")
++      .trim()
++      .split(" ")
++      .filter(Boolean);
++
++  // Both sides are expanded, not just the label: a page writes "Jackets" where
++  // the tree writes "Jackets" and the product name writes "jacket", and all
++  // three have to meet.
++  const textWords = words(text ?? "");
++  if (textWords.join(" ").length < 3) return undefined;
++  const haystack = new Set(textWords.flatMap(wordForms));
++
++  const hasWord = (word: string) => wordForms(word).some((form) => haystack.has(form));
++
++  let best: { label: string; score: number } | undefined;
++
++  for (const group of tree) {
++    for (const item of group.items) {
++      // "Hoodies & Sweatshirts" is two names for one label.
++      for (const half of item.label.split(/\s*&\s*/)) {
++        const parts = words(half);
++        if (!parts.length) continue;
++        if (!parts.every(hasWord)) continue;
++        if (!best || parts.length > best.score) best = { label: item.label, score: parts.length };
++      }
++    }
++  }
++
++  return best?.label;
++}
++
+ /** Subcategory label → the category value it filters on. */
+ export function subcategoryToValue(
+   tree: CategoryGroup[] = DEFAULT_CATEGORY_GROUPS,
+diff --git a/src/lib/data/db.ts b/src/lib/data/db.ts
+index 35bcec8..93123cd 100644
+--- a/src/lib/data/db.ts
++++ b/src/lib/data/db.ts
+@@ -95,6 +95,13 @@ export function dbToProduct(row: DbProduct): Product {
+     colorGroupIds: row.color_group_ids?.length ? row.color_group_ids : undefined,
+     createdAt: row.created_at,
+     bgColor: row.bg_color ?? undefined,
++    sourcePrice: row.source_price ?? undefined,
++    sourceCurrency: row.source_currency ?? undefined,
++    fxRate: row.fx_rate ?? undefined,
++    fxDate: row.fx_date ?? undefined,
++    gtin: row.gtin ?? undefined,
++    mpn: row.mpn ?? undefined,
++    sku: row.sku ?? undefined,
+   };
+ }
+ 
+@@ -132,6 +139,15 @@ export function productToDb(p: Partial<Product>) {
+   if (p.cropData !== undefined)       extras.crop_data = p.cropData ?? null;
+   if (p.colorGroupIds !== undefined)  extras.color_group_ids = p.colorGroupIds ?? [];
+   if (p.bgColor !== undefined)        extras.bg_color = p.bgColor ?? null;
++  // The store's own price, kept beside the catalogue's converted one.
++  if (p.sourcePrice !== undefined)    extras.source_price = p.sourcePrice ?? null;
++  if (p.sourceCurrency !== undefined) extras.source_currency = p.sourceCurrency || null;
++  if (p.fxRate !== undefined)         extras.fx_rate = p.fxRate ?? null;
++  if (p.fxDate !== undefined)         extras.fx_date = p.fxDate || null;
++  // Codes that identify the item, not the listing.
++  if (p.gtin !== undefined)           extras.gtin = p.gtin || null;
++  if (p.mpn !== undefined)            extras.mpn = p.mpn || null;
++  if (p.sku !== undefined)            extras.sku = p.sku || null;
+   return { ...base, ...extras };
+ }
+ 
+@@ -148,6 +164,13 @@ const OPTIONAL_COLUMNS = [
+   "color_hex",
+   "is_group_primary",
+   "bg_color",
++  "source_price",
++  "source_currency",
++  "fx_rate",
++  "fx_date",
++  "gtin",
++  "mpn",
++  "sku",
+ ];
+ 
+ /**
 diff --git a/src/lib/server/audit.ts b/src/lib/server/audit.ts
 index 3f2bb65..fbba421 100644
 --- a/src/lib/server/audit.ts
@@ -2058,6 +3090,1233 @@ index 3f2bb65..fbba421 100644
    | "categories.updated"
    | "products.recategorized"
    | "products.recategorize_undone"
+diff --git a/src/lib/server/fx.ts b/src/lib/server/fx.ts
+new file mode 100644
+index 0000000..e8c1a26
+--- /dev/null
++++ b/src/lib/server/fx.ts
+@@ -0,0 +1,146 @@
++/**
++ * Exchange rates on the server, for one job: state every catalogue price in
++ * the same currency.
++ *
++ * The catalogue's prices are numbers in a column, and everything downstream
++ * reads them as dollars — the browse filter, the stylist's budget and the
++ * search RPCs all compare `price_min` against `max_price_usd` directly. A
++ * product imported from a store that prices in hryvnia therefore arrived as
++ * four thousand *dollars*, and nothing downstream had any way to tell. So the
++ * conversion belongs at import, before the number is written, rather than in
++ * the page that displays it.
++ *
++ * Rates are quoted the way `open.er-api.com` quotes them — how many units of a
++ * currency one dollar buys, so `rates.UAH = 41` means $1 = ₴41 and a hryvnia
++ * price is divided by it. The whole table is kept rather than the handful the
++ * currency switcher offers: a store can price in złoty or won whether or not a
++ * shopper can ask to *see* złoty, and refusing to convert what we cannot
++ * display is how a wrong number gets into the catalogue.
++ *
++ * `src/lib/context/currency-context.tsx` keeps its own copy of the fallback
++ * numbers. That is deliberate rather than a duplicate to clean up: it is a
++ * browser file, offline when this route is what it cannot reach.
++ */
++
++/** How long a fetched table is reused before asking again. */
++const TTL_MS = 3_600_000;
++
++/** Rates to fall back on, USD base, when the provider is unreachable. */
++export const FALLBACK_RATES: Record<string, number> = {
++  EUR: 0.85, GBP: 0.74, UAH: 41, CZK: 21, JPY: 157, TRY: 45,
++  PLN: 3.6, SEK: 9.5, NOK: 10.2, DKK: 6.4, CHF: 0.8, CAD: 1.37,
++  AUD: 1.5, NZD: 1.65, RUB: 80, INR: 88, CNY: 7.1, KRW: 1380,
++  HKD: 7.8, SGD: 1.28, AED: 3.67, BRL: 5.4, MXN: 18.5, ILS: 3.3,
++  RON: 4.3, HUF: 335, BGN: 1.66, ZAR: 17.5, THB: 32, TWD: 30,
++};
++
++export interface UsdRates {
++  /** Units of the currency per 1 USD. */
++  rates: Record<string, number>;
++  /** The day the provider last updated the table, `YYYY-MM-DD`. */
++  asOf: string;
++  /** False when these are the fallback numbers rather than the provider's. */
++  live: boolean;
++}
++
++let cache: { at: number; value: UsdRates } | null = null;
++/** In-flight request, so a burst of imports makes one call rather than twenty. */
++let inFlight: Promise<UsdRates> | null = null;
++
++function today(): string {
++  return new Date().toISOString().slice(0, 10);
++}
++
++function fallback(): UsdRates {
++  return { rates: FALLBACK_RATES, asOf: today(), live: false };
++}
++
++async function fetchRates(): Promise<UsdRates> {
++  try {
++    const res = await fetch("https://open.er-api.com/v6/latest/USD", {
++      next: { revalidate: 3600 },
++    });
++    if (!res.ok) throw new Error(String(res.status));
++    const data = (await res.json()) as {
++      result?: string;
++      rates?: Record<string, number>;
++      time_last_update_utc?: string;
++    };
++    if (data.result !== "success" || !data.rates) throw new Error("bad response");
++
++    // Keep only the numbers that can divide a price. A zero or a NaN in the
++    // table would turn one product's price into Infinity, which is worse than
++    // not converting it at all.
++    const rates: Record<string, number> = {};
++    for (const [code, value] of Object.entries(data.rates)) {
++      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
++        rates[code.toUpperCase()] = value;
++      }
++    }
++    if (!rates.EUR) throw new Error("table looks empty");
++
++    const stamp = data.time_last_update_utc ? new Date(data.time_last_update_utc) : new Date();
++    const asOf = Number.isNaN(stamp.getTime()) ? today() : stamp.toISOString().slice(0, 10);
++    return { rates, asOf, live: true };
++  } catch {
++    return fallback();
++  }
++}
++
++/**
++ * The rate table, cached for an hour.
++ *
++ * A failed fetch is cached too, and on purpose: a provider that is down stays
++ * down for more than one product, and an import run should not spend a network
++ * timeout per page discovering that again.
++ */
++export async function usdRates(): Promise<UsdRates> {
++  if (cache && Date.now() - cache.at < TTL_MS) return cache.value;
++  if (inFlight) return inFlight;
++
++  inFlight = fetchRates()
++    .then((value) => {
++      cache = { at: Date.now(), value };
++      return value;
++    })
++    .finally(() => {
++      inFlight = null;
++    });
++
++  return inFlight;
++}
++
++export interface Converted {
++  /** The amount in dollars, to the cent. */
++  usd: number;
++  /** The rate used — units of the source currency per 1 USD. */
++  rate: number;
++  /** The day that rate is from, `YYYY-MM-DD`. */
++  asOf: string;
++  /** False when the rate came from the fallback table. */
++  live: boolean;
++}
++
++/**
++ * One amount, in dollars.
++ *
++ * Returns null rather than a guess when the currency is unknown to the
++ * provider — an unconvertible price is a price to leave alone and say so
++ * about, not one to quietly relabel.
++ */
++export async function toUsd(amount: number, currency: string): Promise<Converted | null> {
++  const code = (currency ?? "").trim().toUpperCase();
++  if (!code || !Number.isFinite(amount)) return null;
++
++  const { rates, asOf, live } = await usdRates();
++  if (code === "USD") return { usd: round2(amount), rate: 1, asOf, live };
++
++  const rate = rates[code];
++  if (!rate || rate <= 0) return null;
++
++  return { usd: round2(amount / rate), rate, asOf, live };
++}
++
++function round2(n: number): number {
++  return Math.round(n * 100) / 100;
++}
+diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
+index 448a612..3d7167c 100644
+--- a/src/lib/server/parser/extract.ts
++++ b/src/lib/server/parser/extract.ts
+@@ -9,9 +9,21 @@
+  *
+  * No DOM library — pure regex/JSON parsing so it runs in any serverless route.
+  */
+-import type { ParserSiteConfig, RawExtract, ParserRuleField } from "./types";
++import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
+ import { harvestGalleryImages } from "./gallery";
+-import { canonicalColor } from "@/lib/server/product-fields";
++import {
++  canonicalColor,
++  extractCurrencyFromDisplay,
++  pickSizes,
++  specValue,
++  compositionFromText,
++  MATERIAL_KEYS,
++  COLOR_KEYS,
++  BRAND_KEYS,
++  CODE_KEYS,
++  normalizeGtin,
++  normalizeCode,
++} from "@/lib/server/product-fields";
+ 
+ // ── HTML entity decoding (the handful that show up in product copy) ───────────
+ 
+@@ -258,6 +270,159 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
+   return result;
+ }
+ 
++/**
++ * The codes a Product node carries: the item's own number, the maker's, the
++ * store's.
++ *
++ * Read from the node and from its offers, because a store that lists one offer
++ * per size hangs the GTIN off the offer rather than off the product.
++ */
++function codesFromNode(node: JsonObject): { gtin: string; mpn: string; sku: string } {
++  const gtins: string[] = [];
++  const mpns: string[] = [];
++  const skus: string[] = [];
++
++  const read = (obj: JsonObject) => {
++    for (const key of ["gtin", "gtin8", "gtin12", "gtin13", "gtin14", "ean", "upc"] as const) {
++      const value = asString(obj[key]);
++      if (value) gtins.push(value);
++    }
++    const mpn = asString(obj.mpn);
++    if (mpn) mpns.push(mpn);
++    const sku = asString(obj.sku) ?? asString(obj.productID);
++    if (sku) skus.push(sku);
++  };
++
++  read(node);
++  for (const key of ["offers", "hasVariant"] as const) {
++    const value = node[key];
++    if (Array.isArray(value)) value.forEach((x) => isObj(x) && read(x));
++    else if (isObj(value)) read(value);
++  }
++
++  return {
++    gtin: gtins.map(normalizeGtin).find(Boolean) ?? "",
++    mpn: normalizeCode(mpns[0]),
++    sku: normalizeCode(skus[0]),
++  };
++}
++
++/**
++ * The breadcrumb trail out of a `BreadcrumbList`, outermost first.
++ *
++ * Worth reading from the markup even though the extension also sends the
++ * rendered trail: `application/ld+json` survives the content script's strip, so
++ * this works on a pasted page and on a server fetch too, where there is no
++ * rendered page to read.
++ *
++ * The last crumb is usually the product itself and is kept — it costs nothing
++ * for classification, since the name is matched first anyway.
++ */
++function breadcrumbsFromJsonLd(html: string): string[] {
++  for (const block of parseJsonLdBlocks(html)) {
++    const candidates: JsonObject[] = [block];
++    const graph = block["@graph"];
++    if (Array.isArray(graph)) graph.forEach((g) => isObj(g) && candidates.push(g));
++
++    for (const node of candidates) {
++      if (!typeIncludes(node, "BreadcrumbList")) continue;
++      const list = node.itemListElement;
++      if (!Array.isArray(list)) continue;
++
++      const crumbs: { position: number; name: string }[] = [];
++      list.forEach((entry, index) => {
++        if (!isObj(entry)) return;
++        // `item` is either the thing itself or just its URL; only the former
++        // carries a name worth reading.
++        const name =
++          asString(entry.name) ?? (isObj(entry.item) ? asString(entry.item.name) : undefined);
++        if (!name) return;
++        const stated =
++          typeof entry.position === "number" ? entry.position : Number(asString(entry.position));
++        crumbs.push({
++          position: Number.isFinite(stated) ? (stated as number) : index + 1,
++          name: name.trim(),
++        });
++      });
++
++      if (crumbs.length) {
++        return crumbs
++          .sort((a, b) => a.position - b.position)
++          .map((c) => c.name)
++          .filter(Boolean)
++          .slice(0, 12);
++      }
++    }
++  }
++  return [];
++}
++
++/**
++ * The sizes a Product node states, wherever it states them.
++ *
++ * Until now this returned nothing at all: `sizes: []` was hard-coded in both
++ * JSON-LD paths, and the only source of sizes in the whole parser was a per-site
++ * recipe rule an admin had written by hand. A store that publishes its sizes as
++ * structured data — which is most of them, since Google Shopping asks for it —
++ * had them read and thrown away.
++ *
++ * Four places carry them, and a page uses whichever its platform generates:
++ *
++ *   size: "M"                        the product is one size
++ *   size: ["S","M","L"]              or several
++ *   hasVariant: [{ size: "M" }, …]   the schema.org way since 2022
++ *   offers: [{ size: "M" }, …]       the older way, still everywhere
++ *   additionalProperty: [{ name: "Size", value: "M" }]
++ *
++ * `size` itself may be a string, a `SizeSpecification` with a name, or a
++ * `QuantitativeValue` with a value — all three appear in the wild.
++ */
++function sizeValues(v: JsonValue | undefined, out: string[]): void {
++  if (v === undefined || v === null) return;
++  if (Array.isArray(v)) {
++    for (const item of v) sizeValues(item as JsonValue, out);
++    return;
++  }
++  if (isObj(v)) {
++    const named = asString(v.name) ?? asString(v.value) ?? asString(v.sizeLabel);
++    if (named) out.push(named);
++    return;
++  }
++  const str = asString(v);
++  if (str) out.push(str);
++}
++
++function sizesFromNode(node: JsonObject): string[] {
++  const out: string[] = [];
++
++  sizeValues(node.size as JsonValue, out);
++
++  for (const key of ["hasVariant", "offers", "model"] as const) {
++    const value = node[key];
++    const nodes: JsonObject[] = [];
++    if (Array.isArray(value)) value.forEach((x) => isObj(x) && nodes.push(x));
++    else if (isObj(value)) nodes.push(value);
++    for (const child of nodes) {
++      sizeValues(child.size as JsonValue, out);
++      // An offer can hang the size off what it offers rather than off itself.
++      if (isObj(child.itemOffered)) sizeValues(child.itemOffered.size as JsonValue, out);
++    }
++  }
++
++  const props = node.additionalProperty;
++  const propList: JsonObject[] = [];
++  if (Array.isArray(props)) props.forEach((x) => isObj(x) && propList.push(x));
++  else if (isObj(props)) propList.push(props);
++  for (const prop of propList) {
++    const name = (asString(prop.name) ?? "").toLowerCase();
++    if (/^(?:size|sizes|talla|taille|größe|grosse|taglia|розмір|размер)$/.test(name)) {
++      sizeValues(prop.value as JsonValue, out);
++    }
++  }
++
++  return [...new Set(out.map((x) => x.trim()).filter(Boolean))];
++}
++
+ /**
+  * The colour a Product node states, wherever it states it.
+  *
+@@ -319,7 +484,8 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
+     // descriptions are sometimes HTML — strip tags so the catalog stays clean
+     description: description ? stripTags(description) : undefined,
+     url: url && /^https?:\/\//.test(url) ? url : undefined,
+-    sizes: [],
++    sizes: sizesFromNode(node),
++    ...codesFromNode(node),
+   };
+ }
+ 
+@@ -334,7 +500,10 @@ function nodeToRaw(node: JsonObject): RawExtract {
+     currency: r.currency,
+     image: r.image,
+     images: r.images ?? [],
+-    sizes: [],
++    sizes: r.sizes ?? [],
++    gtin: r.gtin,
++    mpn: r.mpn,
++    sku: r.sku,
+     color: r.color,
+     material: r.material,
+     description: r.description,
+@@ -408,6 +577,9 @@ function fromMicrodata(html: string): Partial<RawExtract> {
+     return undefined;
+   };
+   return {
++    gtin: normalizeGtin(prop("gtin13") ?? prop("gtin") ?? prop("gtin12") ?? prop("gtin8")),
++    mpn: normalizeCode(prop("mpn")),
++    sku: normalizeCode(prop("sku") ?? prop("productID")),
+     name: prop("name"),
+     brand: prop("brand"),
+     price: prop("price"),
+@@ -473,6 +645,7 @@ export function extractProduct(
+   html: string,
+   config?: ParserSiteConfig | null,
+   baseUrl?: string,
++  evidence?: PageEvidence,
+ ): RawExtract {
+   const strategies: string[] = [];
+   const jsonld = fromJsonLd(html);
+@@ -492,11 +665,31 @@ export function extractProduct(
+ 
+   const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
+ 
+-  // sizes only come from recipe rules today (split on comma / pipe / semicolon)
++  // Sizes, in order of how directly the page said it: a recipe rule an admin
++  // wrote, then the store's own structured data, then the size control a
++  // shopper clicks.
++  //
++  // First non-empty wins rather than a merge, because the three spell the same
++  // size differently — "40", "EU 40" and "IT 40" are one size in three
++  // vocabularies, and merged they become three sizes the product does not have.
++  //
++  // Only the rendered candidates are filtered. Structured data is the store
++  // stating its own sizes and is taken verbatim; the DOM list arrives with the
++  // size-guide link and the "Select size" placeholder still in it.
+   const sizeRaw = ruleVal("sizes");
+   const sizes = sizeRaw
+     ? sizeRaw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean)
+-    : [];
++    : (jsonld.sizes?.length ? jsonld.sizes : pickSizes(evidence?.sizes));
++
++  // Description: the store's own structured copy, then what the page renders —
++  // which on a store that hides its description in an accordion is the only
++  // full version there is, `og:description` being a truncated marketing line.
++  const description = pick(
++    ruleVal("description"),
++    jsonld.description,
++    evidence?.descriptionText,
++    meta.description,
++  );
+ 
+   const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
+ 
+@@ -509,16 +702,44 @@ export function extractProduct(
+   if (baseUrl) {
+     const anchor = image ? [image, ...images] : images;
+     const productName = pick(ruleVal("name"), jsonld.name, meta.name, micro.name) ?? "";
+-    galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName);
++    galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName, evidence?.images ?? []);
+     if (galleryImages.length) strategies.push("gallery");
+   }
+ 
+   return {
+     name: pick(ruleVal("name"), jsonld.name, meta.name, micro.name),
+-    brand: pick(ruleVal("brand"), jsonld.brand, meta.brand, micro.brand),
+-    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price),
++    // Brand: structured data first, then the two places a store that treats its
++    // designer as a link rather than a property puts it — the spec table, and
++    // whatever the page marks as the brand.
++    brand: pick(
++      ruleVal("brand"),
++      jsonld.brand,
++      meta.brand,
++      micro.brand,
++      specValue(evidence?.specs, BRAND_KEYS),
++      evidence?.brandText,
++    ),
++    // The trail, from the markup and from the rendered page. The markup's own
++    // BreadcrumbList wins: it is data rather than a reading of the layout.
++    breadcrumbs: (() => {
++      const fromMarkup = breadcrumbsFromJsonLd(html);
++      return fromMarkup.length ? fromMarkup : (evidence?.breadcrumbs ?? []).slice(0, 12);
++    })(),
++    // The rendered price is the last resort for both fields, and for opposite
++    // reasons. For the amount it is a rescue: a page whose markup states no
++    // price at all would otherwise be skipped entirely. For the currency it is
++    // the common case rather than the exception — plenty of stores put a bare
++    // number in their markup and leave the symbol to the text a shopper reads,
++    // and assuming dollars there is how a hryvnia price became a dollar one.
++    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price, evidence?.priceText),
+     priceOriginal: jsonld.priceOriginal,
+-    currency: pick(ruleVal("currency"), jsonld.currency, meta.currency, micro.currency),
++    currency: pick(
++      ruleVal("currency"),
++      jsonld.currency,
++      meta.currency,
++      micro.currency,
++      evidence?.priceText ? extractCurrencyFromDisplay(evidence.priceText) : undefined,
++    ),
+     image,
+     images: [
+       ...(image && !images.includes(image) ? [image, ...images] : images),
+@@ -528,9 +749,45 @@ export function extractProduct(
+     // Colour is worth chasing through every layer: it is what the swatch, the
+     // colour filter and half the stylist's vocabulary are built from, and a
+     // page that says "Black" anywhere means it.
+-    color: pick(ruleVal("color"), jsonld.color, meta.color, micro.color, colorFromHtml(html)),
+-    material: pick(ruleVal("material"), jsonld.material, micro.material),
+-    description: pick(ruleVal("description"), jsonld.description, meta.description),
++    // Colour, in order of how directly the page said it. The rendered swatch and
++    // the spec row come before the markup scan because they are what the shopper
++    // is looking at: `colorFromHtml` mines attributes and inline JSON, which on
++    // a page with several colourways can name any of them.
++    color: pick(
++      ruleVal("color"),
++      jsonld.color,
++      meta.color,
++      micro.color,
++      evidence?.colorText,
++      specValue(evidence?.specs, COLOR_KEYS),
++      colorFromHtml(html),
++    ),
++    // Material, which until now came from JSON-LD `material` and nowhere else —
++    // a field few stores fill, while the page prints "80% wool, 20% polyamide"
++    // two lines under the price. Now: the spec table the extension read, then
++    // the composition out of the description's own text.
++    material: pick(
++      ruleVal("material"),
++      jsonld.material,
++      micro.material,
++      // A composition read out of the spec row beats the row itself. The row is
++      // whatever the page printed on that line, and a store that renders its
++      // whole spec block as one run of text hands over "95% cotton, 5% elastane
++      // Care: machine wash" — the blend is the field, the care instruction is
++      // the next row that never got its own line.
++      compositionFromText(specValue(evidence?.specs, MATERIAL_KEYS)),
++      specValue(evidence?.specs, MATERIAL_KEYS),
++      compositionFromText(evidence?.descriptionText ?? ""),
++      compositionFromText(description ?? ""),
++    ),
++    description,
++    variantUrls: evidence?.variantUrls ?? [],
++    // Codes, for recognising this item on another store's page. The spec table
++    // is the fallback: an article number printed in a table is what a store
++    // shows when it declares nothing.
++    gtin: pick(jsonld.gtin, micro.gtin, normalizeGtin(specValue(evidence?.specs, CODE_KEYS))),
++    mpn: pick(jsonld.mpn, micro.mpn),
++    sku: pick(jsonld.sku, micro.sku, normalizeCode(specValue(evidence?.specs, CODE_KEYS))),
+     strategies,
+   };
+ }
+diff --git a/src/lib/server/parser/gallery.ts b/src/lib/server/parser/gallery.ts
+index 89e9657..afdb8b5 100644
+--- a/src/lib/server/parser/gallery.ts
++++ b/src/lib/server/parser/gallery.ts
+@@ -305,7 +305,15 @@ function collectCandidates(html: string): string[] {
+ 
+   // Inline JSON blobs (Shopify/Next hydration payloads) reference the gallery
+   // as escaped URLs the tag scanners above never see.
+-  const jsonUrlRe = /(?:https?:)?\\?\/\\?\/[^"'\s\\)>]+?\.(?:jpe?g|png|webp|avif)(?:\?[^"'\s\\)>]*)?/gi;
++  //
++  // `\/` has to be allowed for every segment, not just the two after the
++  // scheme. A payload that has been JSON-encoded twice — which is how Shopify
++  // writes one into a script tag — spells a photo
++  // `https:\/\/cdn.shopify.com\/s\/files\/1\/photo.jpg`, and a pattern that
++  // stops at the first backslash never reaches the extension that identifies it
++  // as an image. It matched the scheme and then quietly found nothing.
++  const jsonUrlRe =
++    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
+   while ((m = jsonUrlRe.exec(html))) out.push(m[0].replace(/\\\//g, "/"));
+ 
+   return out;
+@@ -318,12 +326,21 @@ function collectCandidates(html: string): string[] {
+  * search, and are also what a candidate must resemble to be accepted. Returns
+  * only the NEW images, in document order; the caller keeps the trusted ones
+  * first so the primary photo never changes.
++ *
++ * `extra` is for candidates the markup does not contain. The collect extension
++ * reads the rendered page, so it sees what a virtualised carousel mounted, what
++ * a lazy `<img>` finally resolved to, and the URLs inside the hydration payload
++ * it strips before sending — none of which survive into the HTML this function
++ * is given. They are candidates and nothing more: every one of them goes
++ * through the same host and naming tests below, because a page's script data
++ * names the recommendations carousel too.
+  */
+ export function harvestGalleryImages(
+   html: string,
+   baseUrl: string,
+   trusted: string[],
+   productName = "",
++  extra: string[] = [],
+ ): string[] {
+   const trustedUrls = trusted
+     .map((u) => upgradeImageUrl(u, baseUrl))
+@@ -346,7 +363,7 @@ export function harvestGalleryImages(
+   const seen = new Set(trustedUrls.map(imageKey));
+   const out: string[] = [];
+ 
+-  const candidates = collectCandidates(html)
++  const candidates = [...collectCandidates(html), ...extra]
+     .map((raw) => upgradeImageUrl(raw, baseUrl))
+     .filter((u): u is string => !!u);
+ 
+diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
+index 70f8911..b38e75f 100644
+--- a/src/lib/server/parser/import-product.ts
++++ b/src/lib/server/parser/import-product.ts
+@@ -11,7 +11,22 @@
+  */
+ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+ import { productToDb, writeProductRow } from "@/lib/data/db";
+-import { colorToHex, colorGroupNamesFor } from "@/lib/server/product-fields";
++import { colorToHex, colorGroupNamesFor, MAX_PRODUCT_IMAGES } from "@/lib/server/product-fields";
++import { toUsd } from "@/lib/server/fx";
++import { normalizeStyleKeywords } from "@/lib/style-keywords";
++import {
++  chooseGroup,
++  isColorSiblingByName,
++  variantBaseName,
++  MIN_BASE_NAME,
++  type VariantCandidate,
++} from "./variant-group";
++import {
++  isSameItem,
++  mergePatch,
++  type ExistingItem,
++  type IncomingItem,
++} from "./same-item";
+ import { loadRetailerRules, resolveRetailer } from "@/lib/server/retailer-domains";
+ import { mirrorProductImages } from "@/lib/server/storage/product-images";
+ import { storeBackgroundColor } from "@/lib/server/bg-color";
+@@ -67,6 +82,204 @@ async function colorGroupIdsFor(colors: string[]): Promise<number[] | undefined>
+   return ids.length ? [...new Set(ids)] : undefined;
+ }
+ 
++// ── Colour variants ───────────────────────────────────────────────────────────
++// One colourway per page is how a store sells; one card per piece is how the
++// catalogue shows. The CSV importer forms those groups inside a batch, but a
++// collect run imports one page at a time, so grouping has to happen against the
++// rows already in the table. Two signals, judged in `variant-group.ts`: the
++// addresses the page's own colour row links to, and — only when the store
++// switches colours with script instead of links — brand and base name.
++
++interface VariantRow {
++  id: string;
++  name: string | null;
++  colors: string[] | null;
++  variant_group_id: string | null;
++  is_group_primary: boolean | null;
++}
++
++function toCandidate(row: VariantRow): VariantCandidate {
++  return {
++    id: row.id,
++    name: row.name ?? "",
++    colors: row.colors ?? [],
++    variantGroupId: row.variant_group_id,
++    isGroupPrimary: row.is_group_primary,
++  };
++}
++
++const VARIANT_COLUMNS = "id, name, colors, variant_group_id, is_group_primary";
++
++/** PostgREST pattern metacharacters, so a product named "50% Wool" cannot match everything. */
++function escapeLike(value: string): string {
++  return value.replace(/[%_]/g, (c) => `\\${c}`);
++}
++
++/**
++ * Put this row in a colour group with the siblings it belongs to, and answer how
++ * many it found.
++ *
++ * Runs after the write because it needs our own row id, and returns 0 rather
++ * than throwing: a database without the variant columns, or a group that cannot
++ * be formed, is a missing swatch row — not a reason to fail an import that has
++ * already stored the product.
++ */
++async function linkColorVariants(input: {
++  productId: string;
++  brand: string;
++  name: string;
++  colors: string[];
++  variantUrls: string[];
++  sourceUrl: string | null;
++}): Promise<number> {
++  const siblings = new Map<string, VariantCandidate>();
++
++  try {
++    if (input.variantUrls.length) {
++      const { data } = await supabase!
++        .from("products")
++        .select(VARIANT_COLUMNS)
++        .in("source_url", input.variantUrls.slice(0, 20));
++      for (const row of (data ?? []) as VariantRow[]) {
++        if (row.id !== input.productId) siblings.set(row.id, toCandidate(row));
++      }
++    }
++
++    // Only when the page named no siblings: a store that links its colourways
++    // has already given the exact answer, and the name test is the guess.
++    if (!siblings.size && input.brand) {
++      const base = variantBaseName(input.name);
++      if (base.length >= MIN_BASE_NAME) {
++        const { data } = await supabase!
++          .from("products")
++          .select(VARIANT_COLUMNS)
++          .eq("brand", input.brand)
++          .ilike("name", `${escapeLike(base)}%`)
++          .limit(25);
++        const ours = { brand: input.brand, name: input.name, colors: input.colors };
++        for (const row of (data ?? []) as VariantRow[]) {
++          if (row.id === input.productId) continue;
++          const candidate = toCandidate(row);
++          if (isColorSiblingByName(ours, candidate)) siblings.set(row.id, candidate);
++        }
++      }
++    }
++
++    // A group of one is not a group. When the page links colourways we have not
++    // collected yet, nothing is written now: whichever of them is imported next
++    // will find this row by its address and form the group then.
++    if (!siblings.size) return 0;
++
++    const list = [...siblings.values()];
++    const { groupId, hasPrimary } = chooseGroup(list);
++    const group = groupId ?? crypto.randomUUID();
++
++    const orphans = list.filter((s) => !s.variantGroupId).map((s) => s.id);
++    if (orphans.length) {
++      await supabase!
++        .from("products")
++        .update({ variant_group_id: group })
++        .in("id", orphans.slice(0, 20));
++    }
++
++    const { error } = await supabase!
++      .from("products")
++      .update({ variant_group_id: group, is_group_primary: !hasPrimary })
++      .eq("id", input.productId);
++    if (error) return 0;
++
++    return list.length;
++  } catch {
++    return 0;
++  }
++}
++
++// ── The same item, sold somewhere else ────────────────────────────────────────
++
++const MERGE_COLUMNS =
++  "id, brand, gtin, mpn, sku, source_url, price_min, price_max, retailers, material, description, subcategory, sizes, colors, images";
++
++interface MergeRow {
++  id: string;
++  brand: string | null;
++  gtin: string | null;
++  mpn: string | null;
++  sku: string | null;
++  source_url: string | null;
++  price_min: number | null;
++  price_max: number | null;
++  retailers: Product["retailers"] | null;
++  material: string | null;
++  description: string | null;
++  subcategory: string | null;
++  sizes: string[] | null;
++  colors: string[] | null;
++  images: string[] | null;
++}
++
++function toExisting(row: MergeRow): ExistingItem {
++  return {
++    id: row.id,
++    brand: row.brand,
++    gtin: row.gtin,
++    mpn: row.mpn,
++    sku: row.sku,
++    sourceUrl: row.source_url,
++    priceMin: row.price_min,
++    priceMax: row.price_max,
++    retailers: row.retailers ?? null,
++    material: row.material,
++    description: row.description,
++    subcategory: row.subcategory,
++    sizes: row.sizes,
++    colors: row.colors,
++    images: row.images,
++  };
++}
++
++/**
++ * The product this page is a second listing of, if we already have it.
++ *
++ * Asked by code only — GTIN, or the maker's part number together with the brand.
++ * Returns null on any database complaint, including the one a database without
++ * migration 020 makes, so a catalogue that has not run it keeps importing
++ * exactly as it did before: a second row rather than a second link.
++ */
++async function findSameItem(incoming: IncomingItem, sourceUrl: string | null): Promise<ExistingItem | null> {
++  try {
++    const queries: PromiseLike<{ data: unknown; error: unknown }>[] = [];
++    if (incoming.gtin) {
++      queries.push(supabase!.from("products").select(MERGE_COLUMNS).eq("gtin", incoming.gtin).limit(5));
++    }
++    if (incoming.mpn && incoming.brand) {
++      queries.push(
++        supabase!
++          .from("products")
++          .select(MERGE_COLUMNS)
++          .eq("mpn", incoming.mpn)
++          .eq("brand", incoming.brand)
++          .limit(5),
++      );
++    }
++    if (!queries.length) return null;
++
++    for (const query of queries) {
++      const { data, error } = await query;
++      if (error || !Array.isArray(data)) continue;
++      for (const row of data as MergeRow[]) {
++        // A row we are re-importing is an update, not a merge; that path has
++        // already run by the time this is asked.
++        if (sourceUrl && row.source_url === sourceUrl) continue;
++        const existing = toExisting(row);
++        if (isSameItem(incoming, existing)) return existing;
++      }
++    }
++  } catch {
++    /* no columns, no connection — fall through to an ordinary insert */
++  }
++  return null;
++}
++
+ export interface ImportOptions {
+   /** Download photos into Supabase Storage and store our URLs instead. */
+   mirrorImages?: boolean;
+@@ -81,6 +294,16 @@ export interface ImportResult {
+   imagesMirrored?: number;
+   /** Photos we failed to mirror (kept as original URLs). */
+   imagesFailed?: number;
++  /** Photos stored on the product, mirrored or not. */
++  images?: number;
++  /** The conversion that was applied to the price, or why none was. */
++  priceNote?: string;
++  /** How many colour siblings this row was grouped with, if any. */
++  variantsLinked?: number;
++  /** Set when this page joined an existing product instead of creating one. */
++  mergedInto?: string;
++  /** What the merge filled in on that product. */
++  mergedFields?: string[];
+ }
+ 
+ export async function importParsedProduct(
+@@ -104,11 +327,63 @@ export async function importParsedProduct(
+     ? (p.gender as Gender)
+     : undefined;
+ 
+-  const price = Math.max(0, Number(p.price) || 0);
+-  const priceOriginal = Math.max(0, Number(p.priceOriginal) || 0);
+-  const currency = String(p.currency ?? "USD").trim().toUpperCase().slice(0, 3) || "USD";
++  // The tree's label for what this piece is. The parser resolves it against the
++  // category tree, so whatever arrives here is a label that tree claims — but it
++  // is written only when there is one, because an empty string means "cleared"
++  // to `productToDb` and would erase a label an admin had set by hand.
++  const subcategory = String(p.subcategory ?? "").trim().slice(0, 60);
+ 
+-  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, 12);
++  // Codes arrive validated from the parser (a GTIN has had its check digit
++  // verified); trimmed again here because this function is also called with
++  // hand-assembled records from the admin's own import screens.
++  const gtin = String(p.gtin ?? "").replace(/\D/g, "").slice(0, 14);
++  const mpn = String(p.mpn ?? "").trim().slice(0, 60);
++  const sku = String(p.sku ?? "").trim().slice(0, 60);
++
++  // ── Price, in one currency ──────────────────────────────────────────────────
++  // The catalogue is read as dollars by everything downstream: the browse
++  // filter, the stylist's budget and the search RPCs all compare `price_min`
++  // against a dollar figure without ever consulting the currency column. So a
++  // price arrives here in whatever the store charges and is written in dollars,
++  // with the store's own number kept beside it — on the retailer entry, which
++  // is what a shopper clicking through will actually be asked to pay, and in
++  // the source columns, so a wrong rate can be traced instead of guessed at.
++  const sourcePrice = Math.max(0, Number(p.price) || 0);
++  const sourcePriceOriginal = Math.max(0, Number(p.priceOriginal) || 0);
++  const sourceCurrency = String(p.currency ?? "").trim().toUpperCase().slice(0, 3);
++
++  let price = sourcePrice;
++  let priceOriginal = sourcePriceOriginal;
++  let currency = sourceCurrency || "USD";
++  let fxRate: number | null = null;
++  let fxDate: string | null = null;
++  let priceNote: string | undefined;
++
++  if (sourcePrice && sourceCurrency && sourceCurrency !== "USD") {
++    const converted = await toUsd(sourcePrice, sourceCurrency);
++    if (converted) {
++      price = converted.usd;
++      // The same rate for both, rather than a second lookup: an original price
++      // and a sale price converted at rates an hour apart would show a discount
++      // the store never offered.
++      priceOriginal = sourcePriceOriginal
++        ? Math.round((sourcePriceOriginal / converted.rate) * 100) / 100
++        : 0;
++      currency = "USD";
++      fxRate = converted.rate;
++      fxDate = converted.asOf;
++      priceNote = `${sourcePrice} ${sourceCurrency} → $${price}${converted.live ? "" : " (fallback rate)"}`;
++    } else {
++      // A currency with no rate is left exactly as the store stated it. It will
++      // read wrong in a dollar filter, and that is the lesser wrong: relabelling
++      // it as dollars would make it read wrong everywhere, silently.
++      priceNote = `no rate for ${sourceCurrency} — price kept as ${sourcePrice} ${sourceCurrency}`;
++    }
++  } else if (sourcePrice && !sourceCurrency) {
++    priceNote = "the page never stated a currency — price taken as dollars";
++  }
++
++  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
+   let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
+ 
+   // Mirror photos to our storage before writing the row, so the catalog only
+@@ -147,8 +422,10 @@ export async function importParsedProduct(
+     ? [{
+         name: resolved.name,
+         url: sourceUrl,
+-        price,
+-        currency,
++        // What this store charges, in what it charges — the catalogue's price
++        // is a conversion, this is the thing itself.
++        price: sourcePrice || price,
++        currency: sourceCurrency || currency,
+         availability: "in stock",
+         isOfficial: resolved.isOfficial,
+       }]
+@@ -160,6 +437,7 @@ export async function importParsedProduct(
+     name,
+     brand: brand as Product["brand"],
+     category,
++    ...(subcategory ? { subcategory } : {}),
+     description: String(p.description ?? "").slice(0, 5000),
+     imageUrl,
+     images: images.length ? images : (imageUrl ? [imageUrl] : []),
+@@ -169,13 +447,29 @@ export async function importParsedProduct(
+     priceMin: price,
+     priceMax: priceOriginal > price ? priceOriginal : price,
+     currency,
++    ...(sourceCurrency && sourceCurrency !== "USD"
++      ? {
++          sourcePrice,
++          sourceCurrency,
++          fxRate: fxRate ?? undefined,
++          fxDate: fxDate ?? undefined,
++        }
++      : {}),
+     isNew: true,
+     isSaved: false,
+     gender,
+-    styleKeywords: [],
++    // Filtered through the shared vocabulary rather than trusted: this function
++    // is also called with hand-assembled records, and a tag the pickers do not
++    // offer is a tag nothing can ever match.
++    styleKeywords: normalizeStyleKeywords(p.styleKeywords),
+     retailers,
+     ...(colors[0] ? { colorHex: colorToHex(colors[0]) } : {}),
+     ...(colorGroupIds ? { colorGroupIds } : {}),
++    // The codes that identify the item away from this listing. Written on the
++    // row so the NEXT store's page can find it.
++    ...(gtin ? { gtin } : {}),
++    ...(mpn ? { mpn } : {}),
++    ...(sku ? { sku } : {}),
+   };
+ 
+   const dbRow = { ...productToDb(product), source_url: sourceUrl };
+@@ -208,6 +502,47 @@ export async function importParsedProduct(
+       productId = data?.id ?? id;
+       updated = true;
+     } else {
++      // Before writing a new row: is this the same item, sold by someone else?
++      //
++      // Asked here rather than at the top of the function so the ordinary paths
++      // stay untouched. The cost is that photos were mirrored a moment ago and
++      // may go unused — bounded, and not always wasted, since a merge fills the
++      // existing row's photos when it has none.
++      const incoming: IncomingItem = {
++        brand,
++        gtin: product.gtin,
++        mpn: product.mpn,
++        sku: product.sku,
++        price,
++        retailer: retailers[0],
++        material: product.material,
++        description: product.description,
++        subcategory: product.subcategory,
++        sizes,
++        colors,
++        images: product.images,
++      };
++      const twin = await findSameItem(incoming, sourceUrl);
++
++      if (twin) {
++        const { patch, filled } = mergePatch(twin, incoming);
++        const { error } = await writeProductRow<{ id: string }>(patch, (row) =>
++          supabase!.from("products").update(row).eq("id", twin.id).select("id").maybeSingle(),
++        );
++        if (error) throw new Error(error.message);
++        return {
++          ok: true,
++          productId: twin.id,
++          updated: true,
++          imagesMirrored,
++          imagesFailed,
++          images: images.length,
++          priceNote,
++          mergedInto: twin.id,
++          mergedFields: filled,
++        };
++      }
++
+       const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);
+       if (error) throw new Error(error.message);
+       productId = data?.id ?? null;
+@@ -232,6 +567,21 @@ export async function importParsedProduct(
+     await storeBackgroundColor(productId, imageUrl);
+   }
+ 
++  // Group this colourway with the ones already in the table.
++  let variantsLinked = 0;
++  if (productId) {
++    variantsLinked = await linkColorVariants({
++      productId,
++      brand,
++      name,
++      colors,
++      variantUrls: (Array.isArray(p.variantUrls) ? p.variantUrls : [])
++        .map((u: unknown) => httpUrl(u))
++        .filter(Boolean),
++      sourceUrl,
++    });
++  }
++
+   // Record an import job (best-effort — table is optional, ignore if absent).
+   if (sourceUrl) {
+     try {
+@@ -243,5 +593,14 @@ export async function importParsedProduct(
+     } catch { /* import_jobs not migrated — non-critical */ }
+   }
+ 
+-  return { ok: true, productId, updated, imagesMirrored, imagesFailed };
++  return {
++    ok: true,
++    productId,
++    updated,
++    imagesMirrored,
++    imagesFailed,
++    images: images.length,
++    priceNote,
++    variantsLinked,
++  };
+ }
+diff --git a/src/lib/server/parser/normalize.ts b/src/lib/server/parser/normalize.ts
+index 5e23814..c187df6 100644
+--- a/src/lib/server/parser/normalize.ts
++++ b/src/lib/server/parser/normalize.ts
+@@ -7,12 +7,23 @@ import {
+   cleanName,
+   parsePrice,
+   extractCurrencyFromDisplay,
++  normalizeGtin,
++  normalizeCode,
++  MAX_PRODUCT_IMAGES,
+   matchCategory,
+   inferGenderFromText,
+   canonicalColor,
+ } from "@/lib/server/product-fields";
+ import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
++import { inferStyleKeywords } from "@/lib/style-keywords";
++import {
++  isBuiltInBucket,
++  matchSubcategoryLabel,
++  resolveSubcategory,
++  subcategoryToValue,
++} from "@/lib/categories";
+ import { upgradeImageUrl, imageKey } from "./gallery";
++import { looksLikeProductPath, isNonProductPath } from "./extract";
+ 
+ /** Resolve a possibly-relative image URL against the page URL. */
+ function absoluteUrl(src: string, base: string): string | null {
+@@ -25,10 +36,20 @@ function absoluteUrl(src: string, base: string): string | null {
+   }
+ }
+ 
++/**
++ * The currency this price is in, or "" when the page never said.
++ *
++ * Returning "" rather than "USD" is the point. The importer converts what it
++ * can into dollars, and a currency it merely assumed would be converted by a
++ * rate that has nothing to do with the price — or, worse, left alone and
++ * counted as dollars, which is how a ₴4,000 coat arrived in the catalogue
++ * priced like a designer one. An empty answer is a fact the caller can act on;
++ * a defaulted one is a guess wearing a fact's clothes.
++ */
+ function normalizeCurrency(rawCurrency: string | undefined, rawPrice: string | undefined): string {
+   const c = (rawCurrency ?? "").trim().toUpperCase();
+   if (/^[A-Z]{3}$/.test(c)) return c;
+-  return (extractCurrencyFromDisplay(rawCurrency ?? "") || extractCurrencyFromDisplay(rawPrice ?? "") || "USD").toUpperCase();
++  return (extractCurrencyFromDisplay(rawCurrency ?? "") || extractCurrencyFromDisplay(rawPrice ?? "")).toUpperCase();
+ }
+ 
+ export function normalizeExtract(
+@@ -48,6 +69,27 @@ export function normalizeExtract(
+   const priceOriginal = parsePrice(raw.priceOriginal ?? "");
+ 
+   const currency = normalizeCurrency(raw.currency, raw.price);
++  if (price && !currency) issues.push("currency not stated");
++
++  // The store's own filing of this piece, outermost crumb first. Two things are
++  // read out of it, and both used to be guessed from the name alone or not
++  // answered at all: which category the piece belongs to when its name says
++  // nothing ("Aurelio"), and which of that category's labels it is.
++  const trail = (raw.breadcrumbs ?? []).filter(Boolean).join(" > ");
++
++  // The tree's label for what this piece is: from the name first, which is more
++  // specific ("Wool-blend bomber jacket" over a trail's "Jackets"), then from the
++  // trail, which answers for a name that classifies nothing ("Aurelio").
++  const subLabelFromName = matchSubcategoryLabel(name);
++  const subLabelFromTrail = trail ? matchSubcategoryLabel(trail) : undefined;
++  const labelValues = subcategoryToValue();
++  const labelCategory = (label: string | undefined) => {
++    const value = label ? labelValues[label] : undefined;
++    // The admin can point a tree label at a bucket outside the code's own list.
++    // Such a bucket works in the browse filters and is unknown to `Category`, so
++    // a label's bucket is only adopted when the code knows it.
++    return value && isBuiltInBucket(value) ? (value as ParsedProduct["category"]) : undefined;
++  };
+ 
+   // Category: explicit override → product name/description → URL path hint.
+   // Prefer the name-based guess; only fall back to the URL path when the name
+@@ -58,9 +100,30 @@ export function normalizeExtract(
+     // 92% against 88% when the description is included: descriptions name-drop
+     // other garments, and "pairs well with shorts" reads as "is shorts".
+     matchCategory(name) ??
++    // A label out of the tree, from the name and then from the trail, before any
++    // more keyword matching. A tree label is the catalogue's own vocabulary
++    // rather than a hint read out of a string, and it carries the category with
++    // it: a trail ending in "Blazers" files the piece under blazers, where a
++    // keyword pass over the same words would stop at the first thing that looks
++    // like outerwear.
++    labelCategory(subLabelFromName) ??
++    labelCategory(subLabelFromTrail) ??
++    matchCategory(trail) ??
+     matchCategory(safePath(sourceUrl)) ??
+     "accessories";
+ 
++  // `resolveSubcategory` drops a label the tree does not claim for this
++  // category, so a disagreement — an override that says footwear over a name
++  // that says bomber jacket — resolves rather than persists.
++  const subcategory = resolveSubcategory(category, subLabelFromName ?? subLabelFromTrail);
++
++  // Style, from everything the page said about the piece. The description
++  // carries most of it ("a pared-back essential", "utility pockets"), the
++  // material some ("linen"), and the label the tree filed it under the rest.
++  const styleKeywords = inferStyleKeywords(
++    [name, raw.description ?? "", raw.material ?? "", subcategory ?? "", trail].join(" "),
++  );
++
+   // Gender: explicit override → URL → name/description
+   const gender =
+     config?.genderOverride ??
+@@ -84,7 +147,7 @@ export function normalizeExtract(
+     const key = imageKey(full);
+     if (!byPhoto.has(key)) byPhoto.set(key, full);
+   }
+-  const images = [...byPhoto.values()].slice(0, 12);
++  const images = [...byPhoto.values()].slice(0, MAX_PRODUCT_IMAGES);
+ 
+   const rawAbs = raw.image && absoluteUrl(raw.image, sourceUrl);
+   const rawPrimary = rawAbs ? (upgradeImageUrl(rawAbs, sourceUrl) ?? rawAbs) : null;
+@@ -102,6 +165,35 @@ export function normalizeExtract(
+   const colors = [colorFrom(raw.color, name, sourceUrl)].filter(Boolean) as string[];
+   const sizes = raw.sizes ?? [];
+ 
++  // Same piece, other colours. Resolved and de-duplicated here so the importer
++  // receives addresses it can compare against `source_url` directly, and never
++  // this page's own address — a product is not a variant of itself.
++  //
++  // A colour row holds more than colourways: a care-instructions anchor, a
++  // size-guide link, a "more colours" page. They are dropped with the same test
++  // the collect planner uses to decide what is a product address at all, rather
++  // than left to fail a lookup later — an address that reaches the importer is
++  // one it will compare against every row it has.
++  const variantUrls = [
++    ...new Set(
++      (raw.variantUrls ?? [])
++        .map((u) => absoluteUrl(u, sourceUrl))
++        .filter((u): u is string => !!u && u !== sourceUrl)
++        .filter((u) => {
++          try {
++            const candidate = new URL(u);
++            // Same store only. The same piece on another retailer's site is not
++            // a colourway of this one — it is the same thing sold twice, which
++            // belongs in the retailer list, not in a swatch row.
++            if (candidate.host !== new URL(sourceUrl).host) return false;
++            return looksLikeProductPath(candidate.pathname) && !isNonProductPath(candidate.pathname);
++          } catch {
++            return false;
++          }
++        }),
++    ),
++  ].slice(0, 20);
++
+   return {
+     name,
+     brand,
+@@ -112,6 +204,15 @@ export function normalizeExtract(
+     images: images.length ? images : (imageUrl ? [imageUrl] : []),
+     colors,
+     sizes,
++    variantUrls,
++    ...(subcategory ? { subcategory } : {}),
++    styleKeywords,
++    // Validated here rather than trusted: a GTIN that fails its check digit is
++    // a digit string the page happened to carry, and matching products on one
++    // would link a coat to a phone number's worth of coincidence.
++    ...(normalizeGtin(raw.gtin) ? { gtin: normalizeGtin(raw.gtin) } : {}),
++    ...(normalizeCode(raw.mpn) ? { mpn: normalizeCode(raw.mpn) } : {}),
++    ...(normalizeCode(raw.sku) ? { sku: normalizeCode(raw.sku) } : {}),
+     material: raw.material ?? "",
+     price,
+     priceOriginal,
+diff --git a/src/lib/server/parser/parse-page.ts b/src/lib/server/parser/parse-page.ts
+index aacafb0..6cb8ad4 100644
+--- a/src/lib/server/parser/parse-page.ts
++++ b/src/lib/server/parser/parse-page.ts
+@@ -18,6 +18,7 @@ import { fetchStorefrontProduct } from "./storefront";
+ import { aiExtract, mergeAiIntoRaw, shouldUseAi } from "./ai-extract";
+ import { matchSiteConfig, effectiveFetchSettings } from "./configs";
+ import type {
++  PageEvidence,
+   ParsedProduct,
+   ParserAiSettings,
+   ParserFetchSettings,
+@@ -68,6 +69,15 @@ export interface ParsePageOptions {
+    * extractor, gallery harvester, colour reading and import run on it.
+    */
+   html?: string;
++  /**
++   * What the browser saw that its markup no longer says.
++   *
++   * Sent with `html` by the collect extension and by nothing else: a server
++   * fetch has no rendered page to read, and a pasted page is markup alone. The
++   * fields are candidates, not answers — they enter the same extractor at the
++   * lowest precedence, behind every structured source.
++   */
++  evidence?: PageEvidence;
+ }
+ 
+ function resolveUrl(href: string, base: string): string {
+@@ -170,7 +180,7 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
+   const single = async (): Promise<ParsedProduct[]> => {
+     // pageUrl lets the extractor harvest the gallery out of the markup —
+     // relative and protocol-relative image URLs need a base to resolve against.
+-    let raw = extractProduct(fetched.html, matched, pageUrl);
++    let raw = extractProduct(fetched.html, matched, pageUrl, opts.evidence);
+ 
+     const aiAllowed = opts.useAi ?? opts.aiSettings.enabled;
+     const aiWanted = aiAllowed && (opts.aiSettings.mode === "always" || shouldUseAi(raw));
 diff --git a/src/lib/server/parser/plan-collection.ts b/src/lib/server/parser/plan-collection.ts
 new file mode 100644
 index 0000000..9004d57
@@ -2540,6 +4799,169 @@ index 0000000..7ce95f3
 +    return false;
 +  }
 +}
+diff --git a/src/lib/server/parser/same-item.ts b/src/lib/server/parser/same-item.ts
+new file mode 100644
+index 0000000..22ee6ca
+--- /dev/null
++++ b/src/lib/server/parser/same-item.ts
+@@ -0,0 +1,157 @@
++/**
++ * Recognising the same item on a second store's page.
++ *
++ * A collect run walks one store at a time, so the same coat collected from two
++ * retailers used to become two products, each showing one place to buy it. What
++ * the catalogue wanted was one product with two links — which is only safe when
++ * the two pages can be shown to be the same ITEM, not merely similar ones.
++ *
++ * Codes decide it, and only two of the three are usable:
++ *
++ *   gtin       the item's own number. Same GTIN, same thing, whoever sells it.
++ *   brand+mpn  the maker's part number within its brand.
++ *   sku        the store's shelf label — two retailers use the same string for
++ *              different things, so it is never matched across hosts.
++ *
++ * Names are not used at all. "Wool Blend Bomber Jacket" is what four brands call
++ * four different jackets, and a wrong merge is worse than two rows: it puts a
++ * link on a product that sends a shopper to something else, and it reads as
++ * correct while doing it.
++ *
++ * The merge itself only ever FILLS: a field the existing row has is left alone.
++ * Two stores describe the same coat differently, and the row that arrived first
++ * is the one an admin may already have edited.
++ */
++import type { Retailer } from "@/lib/types";
++
++/** The columns the importer needs to decide and to merge. */
++export interface ExistingItem {
++  id: string;
++  brand?: string | null;
++  gtin?: string | null;
++  mpn?: string | null;
++  sourceUrl?: string | null;
++  priceMin?: number | null;
++  priceMax?: number | null;
++  retailers?: Retailer[] | null;
++  material?: string | null;
++  description?: string | null;
++  subcategory?: string | null;
++  sizes?: string[] | null;
++  colors?: string[] | null;
++  images?: string[] | null;
++  sku?: string | null;
++}
++
++export interface IncomingItem {
++  brand: string;
++  gtin?: string;
++  mpn?: string;
++  sku?: string;
++  /** Price in the catalogue's currency, i.e. already converted to dollars. */
++  price: number;
++  retailer?: Retailer;
++  material?: string;
++  description?: string;
++  subcategory?: string;
++  sizes?: string[];
++  colors?: string[];
++  images?: string[];
++}
++
++/** True when `row` is the same item as `incoming`, by code. */
++export function isSameItem(incoming: IncomingItem, row: ExistingItem): boolean {
++  const gtin = (incoming.gtin ?? "").trim();
++  if (gtin && (row.gtin ?? "").trim() === gtin) return true;
++
++  const mpn = (incoming.mpn ?? "").trim().toLowerCase();
++  if (mpn && (row.mpn ?? "").trim().toLowerCase() === mpn) {
++    const ours = incoming.brand.trim().toLowerCase();
++    const theirs = (row.brand ?? "").trim().toLowerCase();
++    return !!ours && ours === theirs;
++  }
++
++  return false;
++}
++
++/**
++ * The retailer list with this store's entry in it.
++ *
++ * Replaced rather than appended when the store is already there, by URL first
++ * and by name second: re-collecting a product must update its price, not give it
++ * the same shop twice.
++ */
++export function withRetailer(existing: Retailer[] | null | undefined, entry: Retailer): Retailer[] {
++  const list = Array.isArray(existing) ? [...existing] : [];
++  const index = list.findIndex(
++    (r) =>
++      (r.url && entry.url && r.url === entry.url) ||
++      (r.name && entry.name && r.name.toLowerCase() === entry.name.toLowerCase()),
++  );
++  if (index >= 0) list[index] = entry;
++  else list.push(entry);
++  return list.slice(0, 20);
++}
++
++export interface MergeResult {
++  /** Database columns to write on the existing row. */
++  patch: Record<string, unknown>;
++  /** Field names this merge filled in, for the admin's row in the run. */
++  filled: string[];
++}
++
++/**
++ * What to write on the existing row so it carries this store too.
++ *
++ * The price range widens to include the new store's price: a product sold at two
++ * prices has both, and the lower one is what a shopper is shown. Everything else
++ * is filled only where the existing row is empty.
++ */
++export function mergePatch(row: ExistingItem, incoming: IncomingItem): MergeResult {
++  const patch: Record<string, unknown> = {};
++  const filled: string[] = [];
++
++  if (incoming.retailer) {
++    patch.retailers = withRetailer(row.retailers, incoming.retailer);
++    filled.push("retailer");
++  }
++
++  if (incoming.price > 0) {
++    const currentMin = typeof row.priceMin === "number" && row.priceMin > 0 ? row.priceMin : Infinity;
++    const currentMax = typeof row.priceMax === "number" ? row.priceMax : 0;
++    const nextMin = Math.min(currentMin, incoming.price);
++    const nextMax = Math.max(currentMax, incoming.price);
++    if (nextMin !== currentMin) {
++      patch.price_min = nextMin;
++      filled.push("price");
++    }
++    if (nextMax !== currentMax) patch.price_max = nextMax;
++  }
++
++  const fillText = (column: string, current: unknown, value: string | undefined) => {
++    if (!value) return;
++    if (typeof current === "string" && current.trim()) return;
++    patch[column] = value;
++    filled.push(column);
++  };
++
++  fillText("material", row.material, incoming.material);
++  fillText("description", row.description, incoming.description);
++  fillText("subcategory", row.subcategory, incoming.subcategory);
++  fillText("gtin", row.gtin, incoming.gtin);
++  fillText("mpn", row.mpn, incoming.mpn);
++  fillText("sku", row.sku, incoming.sku);
++
++  const fillList = (column: string, current: unknown, value: string[] | undefined) => {
++    if (!value?.length) return;
++    if (Array.isArray(current) && current.length) return;
++    patch[column] = value;
++    filled.push(column);
++  };
++
++  fillList("sizes", row.sizes, incoming.sizes);
++  fillList("colors", row.colors, incoming.colors);
++  fillList("images", row.images, incoming.images);
++
++  return { patch, filled };
++}
 diff --git a/src/lib/server/parser/sitemap.ts b/src/lib/server/parser/sitemap.ts
 index 61b81ca..c236f7e 100644
 --- a/src/lib/server/parser/sitemap.ts
@@ -2611,3 +5033,916 @@ index 61b81ca..c236f7e 100644
  }
  
  export interface SitemapOptions {
+diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
+index b2f84ec..2c87d9e 100644
+--- a/src/lib/server/parser/types.ts
++++ b/src/lib/server/parser/types.ts
+@@ -6,6 +6,12 @@
+  * intentionally site-agnostic: the generic extractor reads JSON-LD / OpenGraph /
+  * microdata, and per-site "recipes" only add overrides where a site is unusual.
+  */
++// A spec row is defined where the helpers that read one live, so the parser
++// and the CSV importer cannot end up with two shapes for the same thing.
++import type { SpecPair } from "@/lib/server/product-fields";
++
++export type { SpecPair };
++
+ import type { Category, Gender } from "@/lib/types";
+ 
+ /**
+@@ -78,6 +84,94 @@ export interface ParserSiteConfig {
+   notes?: string;
+ }
+ 
++/**
++ * What the collect extension saw on the rendered page, beyond its markup.
++ *
++ * The extension strips scripts and styles before sending a page — a retail
++ * page is megabytes of them — and a single-page storefront keeps half of what
++ * we want in exactly that discarded payload. Rather than send it all back,
++ * the extension reads the page while it still has it and sends the findings:
++ * small, already-resolved, and still only evidence. The server decides what to
++ * do with it, the same way it decides about the markup.
++ */
++export interface PageEvidence {
++  /** Image URLs from the live DOM and the page's own data payloads. */
++  images?: string[];
++  /**
++   * The price as the shopper reads it, e.g. "4 000 ₴".
++   *
++   * On plenty of stores this is the only place the currency is stated at all:
++   * the markup carries a bare number and the symbol lives in the rendered text.
++   */
++  priceText?: string;
++  /**
++   * Size labels off the size control, loose and unfiltered.
++   *
++   * A store renders its sizes as buttons, a select or a swatch row, and none of
++   * that survives the strip — which is why the parser's only source of sizes
++   * used to be a recipe rule written by hand. The list arrives with whatever
++   * else lives in that corner of the page ("Select size", the size-guide link)
++   * and is filtered by `pickSizes` on the way in.
++   */
++  sizes?: string[];
++  /**
++   * The colour this page is showing, in the store's own word for it.
++   *
++   * Stores state it in the swatch a shopper has selected — an `aria-label`, a
++   * `title`, the alt text of a tiny image — or in a line reading "Colour:
++   * Charcoal". None of that is structured data, and the colour is what the
++   * swatch, the colour filter and half the stylist's vocabulary are built from.
++   */
++  colorText?: string;
++  /**
++   * Addresses of the same piece in other colours, as the colour row links them.
++   *
++   * This is the catalogue's variant grouping problem stated by the page itself:
++   * a colour row is usually a row of links, and each link is this product in
++   * another colourway. An address either matches a row we already have or it
++   * does not — no guessing about names. Whatever else shares that row (a care
++   * link, a size guide) is dropped on the way in by the same test the planner
++   * uses to recognise a product address.
++   */
++  variantUrls?: string[];
++  /**
++   * The description as the page renders it.
++   *
++   * Stores put the real copy in an accordion and `og:description` gets a
++   * truncated marketing line, so this is often the only full version. Hidden
++   * panels count: a collapsed accordion is in the DOM, and `textContent` reads
++   * it even when `innerText` will not.
++   */
++  descriptionText?: string;
++  /**
++   * The store's own spec table, row by row, in its own language.
++   *
++   * Composition, care, country, article number — printed as a definition list
++   * or a two-column table, and carried by structured data almost never. This is
++   * where the material comes from.
++   */
++  specs?: SpecPair[];
++  /**
++   * The breadcrumb trail, outermost first: ["Women", "Clothing", "Jackets"].
++   *
++   * What it answers is the category and the subcategory. The name classifies
++   * well when a store names its pieces plainly ("Wool bomber jacket") and not at
++   * all when it does not ("Aurelio"), and the trail is the store's own filing of
++   * the same piece. A `BreadcrumbList` in JSON-LD survives the strip and is read
++   * from the markup; this is for the stores that render a trail and describe it
++   * nowhere.
++   */
++  breadcrumbs?: string[];
++  /**
++   * The brand as the page prints it, from a marked element or the designer link.
++   *
++   * Structured data carries it more often than not, which is why brand was only
++   * *sometimes* missing — and when it is missing it is usually because the store
++   * treats the designer as a link rather than as a property.
++   */
++  brandText?: string;
++}
++
+ /** Raw string fields pulled out of a page before normalisation. */
+ export interface RawExtract {
+   name?: string;
+@@ -93,6 +187,16 @@ export interface RawExtract {
+   description?: string;
+   /** Per-product URL (set when extracting from a listing/ItemList). */
+   url?: string;
++  /** Same piece, other colours — the addresses the page's colour row links to. */
++  variantUrls?: string[];
++  /** The breadcrumb trail, outermost first, from the markup or the rendered page. */
++  breadcrumbs?: string[];
++  /** The item's own number (EAN/UPC), verified — the only code safe across stores. */
++  gtin?: string;
++  /** The maker's part number, unique within a brand. */
++  mpn?: string;
++  /** The store's own shelf label. Kept for reference, never matched across hosts. */
++  sku?: string;
+   /** Which strategies contributed at least one field (diagnostics). */
+   strategies: string[];
+ }
+@@ -102,6 +206,14 @@ export interface ParsedProduct {
+   name: string;
+   brand: string;
+   category: Category;
++  /**
++   * The tree's label for what this piece is — "Bomber Jackets", "Sneakers".
++   *
++   * Absent when nothing in the tree names it. The importer used to write no
++   * subcategory at all, so every product filed under whatever its category
++   * implied.
++   */
++  subcategory?: string;
+   gender?: Gender;
+   description: string;
+   imageUrl: string;
+@@ -113,6 +225,22 @@ export interface ParsedProduct {
+   priceOriginal: number;
+   currency: string;
+   sourceUrl: string;
++  /** Same piece, other colours, for the importer to group this row with. */
++  variantUrls: string[];
++  /** The item's own number, verified. Matching it across stores is exact. */
++  gtin?: string;
++  /** The maker's part number; with a brand, good enough to match across stores. */
++  mpn?: string;
++  /** The store's shelf label, for reference. */
++  sku?: string;
++  /**
++   * The styles the page's own words imply.
++   *
++   * The importer wrote an empty list for every product it created; the stylist
++   * reads this column, so an empty one is a catalogue it cannot reason about
++   * past category and colour.
++   */
++  styleKeywords: string[];
+   /** Diagnostics for the admin UI. */
+   strategies: string[];
+   issues: string[];
+@@ -149,6 +277,16 @@ export interface CrawlItemResult {
+   reason?: string;
+   usedAi?: boolean;
+   imagesMirrored?: number;
++  /** How many photos the page yielded, before the mirror ran. */
++  images?: number;
++  /** What happened to the price: the conversion applied, or why none was. */
++  priceNote?: string;
++  /** Colour siblings this row was grouped with, if any. */
++  variantsLinked?: number;
++  /** Set when the page joined an existing product instead of creating one. */
++  merged?: boolean;
++  /** What that merge filled in. */
++  mergedFields?: string[];
+ }
+ 
+ export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {
+diff --git a/src/lib/server/parser/variant-group.ts b/src/lib/server/parser/variant-group.ts
+new file mode 100644
+index 0000000..3f3d93c
+--- /dev/null
++++ b/src/lib/server/parser/variant-group.ts
+@@ -0,0 +1,92 @@
++/**
++ * Deciding whether two rows are the same piece in another colour.
++ *
++ * The catalogue already knows how to show colour variants: rows sharing a
++ * `variant_group_id` collapse into one card with a swatch row, and the CSV
++ * importer forms those groups inside a batch. What had no answer was the URL
++ * importer — a store collected one page at a time, so every colourway arrived
++ * as its own product and the swatch row stayed empty.
++ *
++ * Two signals, and they are not equal:
++ *
++ *   The page's own links.  A colour row is usually a row of links, one per
++ *   colourway, so the page states outright which addresses are the same piece.
++ *   An address either matches a row we have or it does not; there is nothing to
++ *   judge, and this is the signal to trust.
++ *
++ *   Brand and name.  What is left when the store switches colours with script
++ *   instead of links. Here the judgement has to be conservative, because the
++ *   cost of a wrong answer is not a missing swatch — it is two different coats
++ *   shown to a shopper as one coat in two colours.
++ *
++ * So the name test below insists on an exact base-name match rather than a
++ * prefix one. "Wool Coat" and "Wool Coat Long" share a prefix and are two
++ * products; a database query can only ask for the prefix, so this function
++ * throws back what the query over-fetched.
++ *
++ * It also insists the colours differ. Two rows of the same piece in the same
++ * colour are not variants of each other — they are the same thing twice, which
++ * is a different problem with a different fix (the retailer list).
++ */
++import { cleanName, getBaseProductName } from "@/lib/server/product-fields";
++
++export interface VariantCandidate {
++  id: string;
++  name: string;
++  colors: string[];
++  variantGroupId?: string | null;
++  isGroupPrimary?: boolean | null;
++}
++
++/** The name a variant group is keyed on: no size suffix, no colour suffix. */
++export function variantBaseName(name: string): string {
++  return getBaseProductName(cleanName(name ?? "")).trim().toLowerCase();
++}
++
++/**
++ * Shortest base name worth matching on.
++ *
++ * Below this a name is a word, not an identity: "Tee" or "Bag" would group a
++ * brand's whole catalogue into one card.
++ */
++export const MIN_BASE_NAME = 8;
++
++/** True when `candidate` is our piece in a different colour, by name alone. */
++export function isColorSiblingByName(
++  ours: { brand: string; name: string; colors: string[] },
++  candidate: VariantCandidate,
++): boolean {
++  const brand = (ours.brand ?? "").trim();
++  if (!brand) return false;
++
++  const base = variantBaseName(ours.name);
++  if (base.length < MIN_BASE_NAME) return false;
++  if (variantBaseName(candidate.name) !== base) return false;
++
++  const ourColor = (ours.colors[0] ?? "").trim().toLowerCase();
++  const theirColor = (candidate.colors[0] ?? "").trim().toLowerCase();
++  // An unknown colour on either side is not evidence of sameness, but it is not
++  // evidence against it either: the piece is still the same piece, and a group
++  // whose colours are half-known is better than no group at all.
++  if (ourColor && theirColor && ourColor === theirColor) return false;
++
++  return true;
++}
++
++/**
++ * The group these siblings already belong to, if any, and whether anyone has
++ * claimed to be its primary.
++ *
++ * A group with two primaries renders twice in the catalogue, so a row only
++ * claims it when nobody else has.
++ */
++export function chooseGroup(siblings: VariantCandidate[]): {
++  groupId?: string;
++  hasPrimary: boolean;
++} {
++  const groupId = siblings.find((s) => !!s.variantGroupId)?.variantGroupId ?? undefined;
++  const hasPrimary = siblings.some(
++    (s) => s.isGroupPrimary === true && (!groupId || s.variantGroupId === groupId),
++  );
++  return { groupId: groupId ?? undefined, hasPrimary };
++}
+diff --git a/src/lib/server/product-fields.ts b/src/lib/server/product-fields.ts
+index 2981d38..a59ef1c 100644
+--- a/src/lib/server/product-fields.ts
++++ b/src/lib/server/product-fields.ts
+@@ -48,28 +48,324 @@ export function parsePrice(raw: string): number {
+ }
+ 
+ // ── Extract ISO currency code from a display price string ─────────────────────
+-// Handles: "£49.99", "GBP89.00", "€39,00", "USD 29.99"
++// Handles: "£49.99", "GBP89.00", "€39,00", "USD 29.99", "4 000 ₴", "12 990 руб".
++//
++// Two audiences, one function: the CSV feeds, which write a tidy price string,
++// and the collect extension, which sends the price as the shopper sees it —
++// spaced, localised, sometimes with a word after it. That second case is why
++// the symbol table covers more than the currencies the switcher displays and
++// why there is a loose ISO pass at the end: a store that prices in złoty is a
++// store whose prices we still have to convert correctly.
++
++/** Symbols and words that name a currency outright, most specific first. */
++const CURRENCY_MARKERS: [RegExp, string][] = [
++  // Dollar signs that are not the US dollar. These come before the bare "$"
++  // test, which would otherwise claim every one of them for USD — and each is
++  // guarded by a lookbehind so the "S$" inside "US$" cannot be read as the
++  // Singapore dollar.
++  [/(?<![A-Za-z])US\s?\$/i, "USD"],
++  [/(?<![A-Za-z])CA?\s?\$/i, "CAD"],
++  [/(?<![A-Za-z])AU?\s?\$/i, "AUD"],
++  [/(?<![A-Za-z])NZ\s?\$/i, "NZD"],
++  [/(?<![A-Za-z])HK\s?\$/i, "HKD"],
++  [/(?<![A-Za-z])SG?\s?\$/i, "SGD"],
++  [/(?<![A-Za-z])R\s?\$/, "BRL"],
++  // Symbols.
++  [/£/, "GBP"],
++  [/€/, "EUR"],
++  [/₴/, "UAH"],
++  [/₽/, "RUB"],
++  [/₺/, "TRY"],
++  [/₹/, "INR"],
++  [/₩/, "KRW"],
++  [/₪/, "ILS"],
++  [/(?:CN|RM)\s?¥|元/i, "CNY"],
++  [/¥/, "JPY"],
++  [/zł/, "PLN"],
++  [/Kč/, "CZK"],
++  [/CHF/i, "CHF"],
++  // Words. A price the shopper reads often names its currency in the local
++  // language rather than in ISO, and "грн" is what a Ukrainian store writes.
++  [/грн/i, "UAH"],
++  [/руб/i, "RUB"],
++  [/лв/i, "BGN"],
++  [/kr/, "SEK"],
++  [/\$/, "USD"],
++];
++
++/** Codes the loose pass will accept, so "SALE" cannot become a currency. */
++const ISO_CODES = new Set([
++  "USD", "EUR", "GBP", "UAH", "RUB", "PLN", "CZK", "SEK", "NOK", "DKK", "CHF",
++  "CAD", "AUD", "NZD", "JPY", "CNY", "TRY", "INR", "KRW", "HKD", "SGD", "AED",
++  "BRL", "MXN", "ILS", "RON", "HUF", "BGN", "ZAR", "THB", "TWD",
++]);
+ 
+ export function extractCurrencyFromDisplay(raw: string): string {
+   if (!raw) return "";
+-  if (raw.includes("£")) return "GBP";
+-  if (raw.includes("€")) return "EUR";
+-  if (raw.includes("zł")) return "PLN";
+-  if (raw.includes("₺")) return "TRY";
+-  if (raw.includes("¥")) return "JPY";
+-  if (raw.includes("₴")) return "UAH";
+-  if (raw.includes("Kč")) return "CZK";
+-  if (raw.includes("kr")) return "SEK";
+-  if (raw.includes("$")) return "USD";
++
++  for (const [pattern, code] of CURRENCY_MARKERS) {
++    if (pattern.test(raw)) return code;
++  }
++
++  // A known code standing next to the number: "Price 4 000 UAH incl. VAT".
++  //
++  // This runs before the anchored tests below, and both halves of the condition
++  // earn their place. Without the known-code list, "incl. VAT" at the end of a
++  // line reads as a currency — the anchored suffix test accepts any three
++  // capitals after a full stop. Without the adjacent digit, "Try it on" makes
++  // the Turkish lira out of an English sentence. Together they only fire on a
++  // code that is actually pricing something.
++  const upper = raw.toUpperCase();
++  for (const m of upper.matchAll(/\b[A-Z]{3}\b/g)) {
++    const code = m[0];
++    if (!ISO_CODES.has(code)) continue;
++    const index = m.index ?? 0;
++    const around = upper.slice(Math.max(0, index - 8), index + code.length + 8);
++    if (/\d/.test(around)) return code;
++  }
++
+   // ISO code prefix without space: "GBP89.00"
+   const prefixMatch = raw.match(/^([A-Z]{3})\s*[\d.,]/);
+   if (prefixMatch) return prefixMatch[1];
+-  // ISO code suffix: "29.99 GBP"
++  // ISO code suffix: "29.99 GBP". Last, and deliberately unrestricted: a CSV
++  // feed may quote a currency this file has never heard of, and at the end of a
++  // tidy price string three capitals are what they look like.
+   const suffixMatch = raw.match(/[\d.,]\s*([A-Z]{3})$/);
+   if (suffixMatch) return suffixMatch[1];
+   return "";
+ }
+ 
++// ── Product codes ─────────────────────────────────────────────────────────────
++// Three kinds of code appear on a product page, and the difference between them
++// decides what they may be used for:
++//
++//   GTIN (EAN/UPC)  the item's own number, issued once for the whole world. Two
++//                   pages carrying the same GTIN are the same thing, whoever is
++//                   selling it. This is the only code safe to match ACROSS
++//                   stores.
++//   MPN             the maker's part number. Unique within a brand, so it works
++//                   across stores when the brand matches too.
++//   SKU             the store's shelf label. Two retailers can and do use the
++//                   same SKU string for different things, so it is kept for
++//                   reference and never matched on across hosts.
++//
++// Getting that wrong does not produce a missing link — it produces a coat with
++// a "also at" link to a totally different coat, which reads as correct.
++
++/**
++ * A GTIN reduced to its digits, or "" when it is not one.
++ *
++ * The check digit is verified rather than assumed. A page carries plenty of
++ * digit strings — a style code, a phone number, a timestamp — and a GTIN field
++ * filled with one of those would match another product filled with the same
++ * junk. GS1's mod-10 is three lines and turns "is this thirteen digits" into "is
++ * this a number the world issued".
++ */
++export function normalizeGtin(raw: unknown): string {
++  const digits = String(raw ?? "").replace(/\D/g, "");
++  if (![8, 12, 13, 14].includes(digits.length)) return "";
++  if (/^0+$/.test(digits)) return "";
++
++  // Weights alternate 3 and 1 from the right, excluding the check digit itself.
++  const body = digits.slice(0, -1);
++  const check = Number(digits.slice(-1));
++  let sum = 0;
++  for (let i = 0; i < body.length; i++) {
++    const digit = Number(body[body.length - 1 - i]);
++    sum += i % 2 === 0 ? digit * 3 : digit;
++  }
++  return (10 - (sum % 10)) % 10 === check ? digits : "";
++}
++
++/** A code kept for reference: trimmed, bounded, and stripped of decoration. */
++export function normalizeCode(raw: unknown, max = 60): string {
++  return String(raw ?? "")
++    .trim()
++    .replace(/^(?:ref\.?|sku|art\.?|артикул)\s*[:#]?\s*/i, "")
++    .slice(0, max);
++}
++
++// ── The store's own spec table ────────────────────────────────────────────────
++// Composition, care, country of origin, article number: a store prints them as
++// a definition list or a two-column table, and structured data almost never
++// carries them. The collect extension sends the rows as they were printed, in
++// the store's own language, and these helpers read a field out of them.
++//
++// This is where "no material" was decided. The parser only ever looked at
++// JSON-LD `material`, which is rare enough that most products arrived with the
++// field empty while the page said "80% wool, 20% polyamide" two lines under the
++// price.
++
++export interface SpecPair {
++  key: string;
++  value: string;
++}
++
++// The trailing guard is a lookahead rather than `\b`, and the flags carry `u`.
++// `\b` is defined on ASCII word characters, so it never fires after a Cyrillic
++// letter: /^склад\b/ does not match "Склад", which is exactly the key a
++// Ukrainian store prints its composition under.
++
++/** Key names that mean composition, in the languages a European store ships. */
++export const MATERIAL_KEYS =
++  /^(?:material|materials|fabric|composition|made\s*of|fabrication|matière|matiere|tissu|zusammensetzung|materialien|materiale|composizione|composición|tejido|склад|состав|матеріал|материал|тканина|ткань)(?![\p{L}\p{N}])/iu;
++
++/** Key names that mean colour. */
++export const COLOR_KEYS =
++  /^(?:colou?r|colourway|colorway|farbe|couleur|colore|kolor|barva|цвет|колір|кольор)(?![\p{L}\p{N}])/iu;
++
++/** Key names that mean the brand, which a spec table often states outright. */
++export const BRAND_KEYS =
++  /^(?:brand|designer|label|maker|manufacturer|marke|marque|marca|бренд|виробник|производитель|торгов\p{L}*\s*марка)(?![\p{L}\p{N}])/iu;
++
++/** Key names that mean the store's own article number. */
++export const CODE_KEYS =
++  /^(?:sku|mpn|style\s*(?:code|no|number|#)?|product\s*(?:code|id|number)|item\s*(?:code|no|number)|article\s*(?:code|no|number)?|ref(?:erence)?|артикул|код\s*товару|код\s*товара)(?![\p{L}\p{N}])/iu;
++
++/**
++ * The value of the first spec row whose key matches, trimmed.
++ *
++ * First rather than best: a spec table lists each field once, and a page that
++ * repeats one (a mobile copy of the same block) repeats the same value.
++ */
++export function specValue(specs: SpecPair[] | undefined, keys: RegExp): string {
++  if (!Array.isArray(specs)) return "";
++  for (const pair of specs) {
++    const key = String(pair?.key ?? "").trim();
++    const value = String(pair?.value ?? "").trim();
++    if (!key || !value) continue;
++    if (keys.test(key)) return value;
++  }
++  return "";
++}
++
++/**
++ * A composition read out of running text: "Outer: 80% wool, 20% polyamide".
++ *
++ * The last resort for material, and a surprisingly good one — a percentage
++ * followed by a fibre is a sentence no marketing copy writes by accident. The
++ * whole run of percentages is returned rather than the first, because a garment
++ * is its blend and "80% wool" alone misstates it.
++ */
++export function compositionFromText(text: string): string {
++  const source = (text ?? "").replace(/\s+/g, " ");
++  if (!source) return "";
++
++  // Read the percentages one at a time and rebuild the blend, rather than
++  // matching the whole run in place. A pattern loose enough to span "80% wool,
++  // 20% polyamide" is also loose enough to keep going into "with ribbed trims",
++  // and a material field that ends mid-sentence reads like a bug because it is
++  // one. A fibre is one word, or two when the second is followed by the end of
++  // the clause — so "organic cotton," survives and "polyamide with" does not.
++  const atom =
++    /(\d{1,3})\s?%\s?([\p{L}][\p{L}-]{1,20}(?:\s[\p{L}][\p{L}-]{1,20}(?=\s*(?:[,;./)]|$)))?)/gu;
++
++  const parts: string[] = [];
++  let total = 0;
++  for (const match of source.matchAll(atom)) {
++    const fibre = match[2].trim();
++    // "20% off" is not a fibre, and a sale banner sits closer to the price than
++    // the composition does.
++    if (NOT_A_FIBRE.test(fibre)) continue;
++
++    const share = Number(match[1]);
++    parts.push(`${share}% ${fibre}`);
++    total += share;
++    // A composition adds up to 100. Once it does, the next percentage on the
++    // page belongs to another part of the garment — "Lining: 100% viscose" —
++    // and appending it would state a blend that adds up to two hundred.
++    if (total >= 100 || parts.length >= 6) break;
++  }
++  return parts.join(", ").slice(0, 200);
++}
++
++/** Words that follow a percentage without being a fibre. */
++const NOT_A_FIBRE =
++  /^(?:off|discount|sale|extra|more|less|code|promo|cashback|bonus|скидк\p{L}*|знижк\p{L}*|вигод\p{L}*)$/iu;
++
++// ── Is this string a size? ────────────────────────────────────────────────────
++// The collect extension reads size labels off the rendered page — buttons, a
++// select, a swatch row — because that is where a store puts them and the
++// stripped markup keeps none of it. It reads them loosely on purpose: a
++// container that mentions "size" also holds "Select size", a size-guide link,
++// the quantity stepper and sometimes the word "Sold out". Deciding what is
++// actually a size belongs here, next to the other field vocabularies, so the
++// extension stays a pair of eyes and the judgement has one home.
++//
++// What counts, in the spellings a European storefront ships:
++//   XS · S · M · XXL · 3XL          letter sizes, and their pairs (S/M, M-L)
++//   38 · 40.5 · 9.5                 clothing and shoe numbers
++//   EU 38 · UK 10 · US 6 · IT 42    the same with the system named
++//   32x34 · W32 L34                 waist and length
++//   One size · OS · Единый размер   the size that is not a size
++//
++// Anything else — a sentence, a price, a colour name, "Add to bag" — is not a
++// size, and a wrong size on a product is worse than a missing one: a shopper
++// picks it, and nobody finds out until the order.
++
++const LETTER_SIZE = "(?:xx?xs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl)";
++const SIZE_SYSTEM = "(?:eu|uk|us|fr|it|de|jp|cn|ru|ua|int)";
++
++const SIZE_PATTERNS: RegExp[] = [
++  // Letter sizes, alone or paired: "S", "M/L", "XS-S".
++  new RegExp(`^${LETTER_SIZE}(?:\\s?[/–—-]\\s?${LETTER_SIZE})*$`, "i"),
++  // A plain number, whole or half: "38", "40,5", "9.5". Bounded below 100 so a
++  // price or a product code cannot pass as a size.
++  /^\d{1,2}(?:[.,]5)?$/,
++  // A number with its system, either order: "EU 38", "38 EU", "UK10".
++  new RegExp(`^${SIZE_SYSTEM}\\s?\\d{1,2}(?:[.,]5)?$`, "i"),
++  new RegExp(`^\\d{1,2}(?:[.,]5)?\\s?${SIZE_SYSTEM}$`, "i"),
++  // Waist and length: "32x34", "32/34", "W32 L34".
++  /^\d{2}\s?[x×х/]\s?\d{2}$/i,
++  /^w\s?\d{2}\s?l\s?\d{2}$/i,
++  // One size, in the words stores write it in.
++  /^(?:one[\s-]?size|onesize|os|free[\s-]?size|taille unique|unica|единый размер|один размер|універсальний|безрозмірний)$/i,
++];
++
++/** True when `raw` reads as a size a shopper could pick. */
++export function looksLikeSize(raw: string): boolean {
++  const value = (raw ?? "").trim().replace(/\s+/g, " ");
++  // Twenty, not twelve: "Единый размер" and "Taille unique" are sizes and are
++  // thirteen characters long. Long enough for the longest real label, short
++  // enough that the fit advice under the size row cannot pass.
++  if (!value || value.length > 20) return false;
++  return SIZE_PATTERNS.some((p) => p.test(value));
++}
++
++/**
++ * Size labels out of a loose list of candidates: the ones that are sizes, tidied,
++ * de-duplicated, in the order the page offered them.
++ *
++ * Page order is kept rather than sorted because it is the store's own order —
++ * XS before XXL, 36 before 46 — and any sort this function invented would have
++ * to re-derive it from the labels it just accepted.
++ */
++export function pickSizes(candidates: unknown, max = 40): string[] {
++  const list = Array.isArray(candidates) ? candidates : [];
++  const seen = new Set<string>();
++  const out: string[] = [];
++  for (const raw of list) {
++    const value = String(raw ?? "").trim().replace(/\s+/g, " ");
++    if (!looksLikeSize(value)) continue;
++    const key = value.toLowerCase().replace(/[\s.,]/g, "");
++    if (seen.has(key)) continue;
++    seen.add(key);
++    out.push(value);
++    if (out.length >= max) break;
++  }
++  return out;
++}
++
++// ── How many photos one product keeps ─────────────────────────────────────────
++// A fashion product page carries four to a dozen shots — front, back, detail,
++// on-model, flat-lay — and the catalogue wants the set, not a sample of it.
++// The number is a ceiling on storage and on mirror downloads per import rather
++// than a target, and it is shared so the parser, the importer and the mirror
++// cannot disagree about it: a cap that differs between them shows up as photos
++// that are extracted, stored as URLs, and then never downloaded.
++
++export const MAX_PRODUCT_IMAGES = 20;
++
+ // ── Shared category keyword table ─────────────────────────────────────────────
+ // One ordered rule list, used by BOTH retail-category parsing and product-name
+ // inference, so a garment is classified the same way whichever field it comes
+diff --git a/src/lib/server/storage/product-images.ts b/src/lib/server/storage/product-images.ts
+index 79fb337..8fbeba4 100644
+--- a/src/lib/server/storage/product-images.ts
++++ b/src/lib/server/storage/product-images.ts
+@@ -11,6 +11,7 @@
+  * background-removal tool (`/api/admin/image-tools`) reuses them too.
+  */
+ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
++import { MAX_PRODUCT_IMAGES } from "@/lib/server/product-fields";
+ 
+ export const PRODUCT_IMAGES_BUCKET = "product-images";
+ 
+@@ -150,7 +151,11 @@ export async function mirrorProductImages(input: {
+ }): Promise<MirrorResult> {
+   const imageUrl = (input.imageUrl ?? "").trim();
+   const gallery = (input.images ?? []).map((u) => (u ?? "").trim()).filter(Boolean);
+-  const max = Math.max(1, Math.min(input.max ?? 12, 12));
++  // Shared with the extractor and the importer. A mirror ceiling below theirs
++  // is the quiet kind of bug: the photos are found, stored as URLs, and then
++  // simply never downloaded, so the product looks complete until the retailer
++  // CDN stops serving it.
++  const max = Math.max(1, Math.min(input.max ?? MAX_PRODUCT_IMAGES, MAX_PRODUCT_IMAGES));
+ 
+   if (!isSupabaseConfigured || !supabase) {
+     return { imageUrl, images: gallery, mirrored: 0, failed: 0, attempted: false };
+diff --git a/src/lib/style-keywords.ts b/src/lib/style-keywords.ts
+index 88c462d..23b09d8 100644
+--- a/src/lib/style-keywords.ts
++++ b/src/lib/style-keywords.ts
+@@ -47,3 +47,57 @@ export function normalizeStyleKeywords(values: unknown): StyleKeyword[] {
+   const wanted = new Set(list.map((v) => String(v).trim()).filter(Boolean));
+   return STYLE_KEYWORD_LIST.filter((k) => wanted.has(k));
+ }
++
++// ── Reading a style off a product ─────────────────────────────────────────────
++// The importer wrote `styleKeywords: []` for every product it has ever created:
++// the vocabulary above existed, the pickers used it, and nothing ever filled it
++// from a page. The stylist reads these tags, so an empty column means a
++// catalogue the stylist cannot reason about beyond category and colour.
++//
++// The rules below are the same shape as the category classifier's: ordered
++// pairs of a pattern and the value it implies, matched against the words a page
++// already gives us — the product's name, its description, its material and the
++// label the tree filed it under.
++//
++// Deliberately narrow. A style tag is a soft signal (a filter, a hint to the
++// stylist), so a missing one costs little and a wrong one teaches the stylist
++// something false about the piece. Words that name a garment rather than a
++// manner — "jacket", "dress" — are not here at all, and neither are colours:
++// black is not a style, and inferring "dark" from it would tag half the
++// catalogue.
++
++const STYLE_RULES: [RegExp, StyleKeyword][] = [
++  [/\bavant[-\s]?garde|deconstructed|asymmetric(?:al)?|sculptural|conceptual\b/i, "avant-garde"],
++  [/\bstreetwear|street\s?style|skate|graffiti|graphic\s?(?:tee|print)|hype\b/i, "streetwear"],
++  [/\butility|utilitarian|workwear|military|combat|tactical|technical|multi[-\s]?pocket\b/i, "utilitarian"],
++  [/\bbohemian|\bboho\b|crochet|fringe[ds]?|paisley|kaftan|caftan|peasant\b/i, "bohemian"],
++  [/\bpreppy|varsity|collegiate|argyle|letterman|pinstripe\b/i, "preppy"],
++  [/\bacademic|academia|tweed|houndstooth|herringbone|corduroy|scholar\b/i, "academic"],
++  [/\bsport|sports|sporty|athletic|performance|running|training|track\s?(?:suit|top|pant)|activewear|gym\b/i, "sporty"],
++  [/\bcoastal|nautical|resort|seersucker|beachwear|vacation|holiday\s?shop|\blinen\b/i, "coastal"],
++  [/\bromantic|feminine|floral|lace|ruffle[ds]?|bow\s?detail|chiffon|broderie\b/i, "romantic"],
++  [/\bmaximalis[mt]|eclectic|statement\s?(?:piece|print)|sequin|leopard|animal\s?print|vibrant\b/i, "maximalist"],
++  [/\bgothic|grunge|punk|darkwear|distressed\b/i, "dark"],
++  [/\bclassic|timeless|heritage|tailor(?:ed|ing)|refined|elegant|trench|loafer\b/i, "classic"],
++  [/\bminimal(?:ist)?|understated|clean\s?line|essential|pared[-\s]?back|sleek\b/i, "minimal"],
++];
++
++/**
++ * The styles a product's own words imply, at most `max` of them.
++ *
++ * Returned in the vocabulary's order rather than the order they were found, so
++ * two products tagged with the same pair read the same way — the same rule
++ * `normalizeStyleKeywords` follows.
++ */
++export function inferStyleKeywords(text: string, max = 3): StyleKeyword[] {
++  const source = (text ?? "").replace(/\s+/g, " ");
++  if (source.length < 3) return [];
++
++  const found = new Set<StyleKeyword>();
++  for (const [pattern, style] of STYLE_RULES) {
++    if (pattern.test(source)) found.add(style);
++  }
++  if (!found.size) return [];
++
++  return STYLE_KEYWORD_LIST.filter((k) => found.has(k)).slice(0, max);
++}
+diff --git a/src/lib/supabase.ts b/src/lib/supabase.ts
+index 67d73f5..b7af566 100644
+--- a/src/lib/supabase.ts
++++ b/src/lib/supabase.ts
+@@ -142,4 +142,13 @@ export type DbProduct = {
+   color_group_ids?: number[] | null;
+   // Backdrop colour sampled from the photo's corners (migration 015)
+   bg_color?: string | null;
++  // What the store charged, before the importer converted it (migration 019)
++  source_price?: number | null;
++  source_currency?: string | null;
++  fx_rate?: number | null;
++  fx_date?: string | null;
++  // Codes that identify the item rather than the listing (migration 020)
++  gtin?: string | null;
++  mpn?: string | null;
++  sku?: string | null;
+ };
+diff --git a/src/lib/types.ts b/src/lib/types.ts
+index c671fc0..3343d7f 100644
+--- a/src/lib/types.ts
++++ b/src/lib/types.ts
+@@ -162,6 +162,31 @@ export interface Product {
+   priceMin: number;
+   priceMax: number;
+   currency: string;
++  /**
++   * What the store charged, before the importer stated it in dollars.
++   *
++   * `priceMin`/`priceMax` are the catalogue's own figures and are compared
++   * across products, so they are one currency. These three say where a
++   * converted figure came from: the amount, its currency, and the rate and day
++   * used — enough to re-check a price that looks wrong without re-visiting the
++   * store. Absent on products that were priced in dollars to begin with.
++   */
++  sourcePrice?: number;
++  sourceCurrency?: string;
++  fxRate?: number;
++  fxDate?: string;
++  /**
++   * The codes that identify this item away from any one store.
++   *
++   * `gtin` is the item's own number and is verified before it is stored, so two
++   * rows carrying the same one are the same thing — which is how a second
++   * retailer's page joins this product instead of becoming a second copy of it.
++   * `mpn` does the same within a brand. `sku` is one store's shelf label and is
++   * kept for reference only.
++   */
++  gtin?: string;
++  mpn?: string;
++  sku?: string;
+   isNew: boolean;
+   isSaved: boolean;
+   styleKeywords: StyleKeyword[];
+diff --git a/supabase/migrations/019_product_source_price.sql b/supabase/migrations/019_product_source_price.sql
+new file mode 100644
+index 0000000..f7ee10b
+--- /dev/null
++++ b/supabase/migrations/019_product_source_price.sql
+@@ -0,0 +1,74 @@
++-- Migration 019: Remember what the store charged, before we said it in dollars.
++--
++-- The catalogue's prices are compared, not just displayed. `price_min` is what
++-- the browse filter sorts on, what the stylist reads as a budget, and what the
++-- search functions in migration 014 test against their `max_price_usd`
++-- argument — which, as the name says, they take to be dollars. Nothing in that
++-- path ever consults `products.currency`.
++--
++-- So a coat imported from a store that prices in hryvnia arrived as four
++-- thousand dollars. The number was right and the unit was invented, and no
++-- query downstream had any way to notice. The importer now converts at import
++-- and writes dollars, which is what those readers already assumed they had.
++--
++-- A conversion is a claim about a moment, though, and these four columns are
++-- what makes it checkable afterwards:
++--
++--   source_price      the amount the store showed
++--   source_currency   the currency it showed it in, ISO 4217
++--   fx_rate           units of that currency per 1 USD, the rate used
++--   fx_date           the day that rate is from
++--
++-- All four are NULL on a product that was priced in dollars to begin with:
++-- there was no conversion, so there is nothing to record. Together they mean a
++-- price that looks wrong can be re-checked — was the rate wrong, or was the
++-- extraction? — without going back to the store to ask.
++
++alter table public.products
++  add column if not exists source_price numeric;
++
++alter table public.products
++  add column if not exists source_currency text;
++
++alter table public.products
++  add column if not exists fx_rate numeric;
++
++alter table public.products
++  add column if not exists fx_date date;
++
++-- The currency is written into a retailer entry and read back as a code, so
++-- its shape is guarded here as well as in the importer. Three letters or
++-- nothing: a symbol or a stray word in this column would be a conversion no
++-- one can reproduce.
++alter table public.products
++  drop constraint if exists products_source_currency_shape;
++
++alter table public.products
++  add constraint products_source_currency_shape
++  check (source_currency is null or source_currency ~ '^[A-Z]{3}$');
++
++-- A rate divides a price, so zero and negative are not merely odd values, they
++-- are an infinity waiting to be written into someone's catalogue.
++alter table public.products
++  drop constraint if exists products_fx_rate_positive;
++
++alter table public.products
++  add constraint products_fx_rate_positive
++  check (fx_rate is null or fx_rate > 0);
++
++comment on column public.products.source_price is
++  'Amount the store charged, in source_currency, before the importer converted it to the dollars held in price_min and price_max. NULL when the store priced in dollars.';
++
++comment on column public.products.source_currency is
++  'ISO 4217 code the store priced in, e.g. UAH or GBP. NULL when the store priced in dollars.';
++
++comment on column public.products.fx_rate is
++  'Units of source_currency per 1 USD used for the conversion, so price_min times fx_rate returns the amount the store showed.';
++
++comment on column public.products.fx_date is
++  'Day the fx_rate is from, so a price that looks wrong can be checked against the rate that produced it.';
++
++-- Without this PostgREST keeps serving from a schema cache that has never heard
++-- of the columns, and the API answers "column products.source_price does not
++-- exist" while the columns plainly exist.
++notify pgrst, 'reload schema';
+diff --git a/supabase/migrations/020_product_codes.sql b/supabase/migrations/020_product_codes.sql
+new file mode 100644
+index 0000000..86d2dfc
+--- /dev/null
++++ b/supabase/migrations/020_product_codes.sql
+@@ -0,0 +1,64 @@
++-- Migration 020: The codes that identify an item rather than a listing.
++--
++-- A collect run imports pages, and a page belongs to one store. So the same coat
++-- collected from two retailers became two products, each with one "where to buy"
++-- link, and nothing in the catalogue knew they were the same coat.
++--
++-- What tells them apart from two similar coats is a code:
++--
++--   gtin  the item's own number (EAN/UPC), issued once for the whole world.
++--         Two rows carrying the same GTIN are the same thing, whoever sells it.
++--         Stored only after its check digit verifies, so a style code or a
++--         timestamp that happened to sit in the field cannot match anything.
++--   mpn   the maker's part number. Unique within a brand, so it identifies an
++--         item when the brand matches too.
++--   sku   the store's own shelf label. Kept for reference and deliberately NOT
++--         matched on across stores: two retailers use the same SKU string for
++--         different things often enough that a match would link a coat to a
++--         stranger, and a wrong "also available at" link reads as correct.
++--
++-- The importer uses gtin, then brand+mpn, to add a second store to an existing
++-- product instead of writing a second product.
++
++alter table public.products
++  add column if not exists gtin text;
++
++alter table public.products
++  add column if not exists mpn text;
++
++alter table public.products
++  add column if not exists sku text;
++
++-- Digits only, and only the lengths GS1 issues. The check digit is verified in
++-- the importer; this is the shape guard, so a hand edit cannot put a sentence
++-- where a number belongs.
++alter table public.products
++  drop constraint if exists products_gtin_shape;
++
++alter table public.products
++  add constraint products_gtin_shape
++  check (gtin is null or gtin ~ '^[0-9]{8}$' or gtin ~ '^[0-9]{12,14}$');
++
++-- The lookups the importer makes per product: one by gtin, one by brand and mpn.
++-- Partial, because most rows will carry neither and an index over those nulls
++-- would be dead weight.
++create index if not exists products_gtin_idx
++  on public.products (gtin)
++  where gtin is not null;
++
++create index if not exists products_brand_mpn_idx
++  on public.products (brand, mpn)
++  where mpn is not null;
++
++comment on column public.products.gtin is
++  'EAN/UPC of the item, digits only, check digit verified before storing. Two rows with the same value are the same item sold by different stores.';
++
++comment on column public.products.mpn is
++  'Manufacturer part number. Identifies the item within its brand, so it is matched together with brand.';
++
++comment on column public.products.sku is
++  'The source stores own article number. Reference only: SKU strings are not unique between retailers and are never matched across them.';
++
++-- Without this PostgREST keeps serving from a schema cache that has never heard
++-- of the columns.
++notify pgrst, 'reload schema';

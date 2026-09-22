@@ -5,8 +5,12 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const CHROME = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
-const EXT = "/home/user/darakhamia/goo-fashion/extension";
+// Both paths are overridable, so this runs on a machine other than the one it
+// was written on: CHROME_PATH for a local Chrome or Chromium, EXT_PATH if the
+// extension under test lives somewhere other than this repository's copy.
+const CHROME =
+  process.env.CHROME_PATH || "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
+const EXT = process.env.EXT_PATH || path.join(__dirname, "..", "extension");
 const PROFILE = path.join(__dirname, "profile");
 const PORT = 9333;
 const STORE = "http://127.0.0.1:3301";
@@ -419,6 +423,190 @@ async function main() {
     "a ~10s rest landed after the 20th page",
     typeof restGap === "number" && restGap >= 11000,
     `gap after page 20 was ${restGap}ms`,
+  );
+
+  collect.close(); popup.close();
+
+  // ── Run E: the gallery in the payload, the currency in the text ───────────
+  //
+  // The two cases this round was asked about. One page keeps its gallery in a
+  // hydration payload, the way Farfetch does, and the content script deletes
+  // that payload before sending — so before this change the product arrived
+  // with the photos its carousel had mounted and nothing else. The other prices
+  // in hryvnia and states that nowhere but in rendered text.
+  console.log("\n— run E: a single-page storefront, and a store priced in hryvnia —");
+  await storeControl({ mode: "spa", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  popup = await openPopup(extId);
+
+  await popup.evaluate(
+    `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:5}})`,
+  );
+  const doneE = await waitForEvent("done", 180000);
+  check("run E finished", !!doneE);
+
+  const eventsE = (await studioEvents()).events;
+  const ingestsE = eventsE.filter((e) => e.kind === "ingest");
+  const importedE = (await studioEvents()).imported;
+
+  check("both pages were collected", ingestsE.length === 2, `got ${ingestsE.length}`);
+  check(
+    "the payload itself was NOT sent — the strip still runs",
+    ingestsE.every((e) => e.detail.carriesPayload === false),
+    JSON.stringify(ingestsE.map((e) => e.detail.carriesPayload)),
+  );
+  check(
+    "captured markup stays small",
+    ingestsE.every((e) => e.detail.htmlLength < 300_000),
+    JSON.stringify(ingestsE.map((e) => e.detail.htmlLength)),
+  );
+
+  const bomber = importedE.find((i) => /Wool-blend bomber/.test(i.name || ""));
+  check("the single-page product was read", !!bomber, JSON.stringify(importedE.map((i) => i.name)));
+  check(
+    "the extension handed over the photos it found before stripping",
+    !!bomber && bomber.candidates >= 7,
+    bomber && `candidates: ${bomber.candidates}`,
+  );
+  check(
+    "all seven photos were imported, not the two the carousel had mounted",
+    !!bomber && bomber.images === 7,
+    bomber && `${bomber.images}: ${JSON.stringify(bomber.imageList)}`,
+  );
+  check(
+    "the recommendations rail stayed out of the product",
+    !!bomber && !bomber.imageList.some((u) => u.includes("31224455")),
+    bomber && JSON.stringify(bomber.imageList.filter((u) => u.includes("31224455"))),
+  );
+  check(
+    "the euro price was converted to dollars at the test's rate",
+    !!bomber && bomber.currency === "EUR" && bomber.price === 1290 && bomber.usd === 1517.65,
+    bomber && JSON.stringify({ price: bomber.price, currency: bomber.currency, usd: bomber.usd }),
+  );
+
+  const uah = importedE.find((i) => /Куртка/.test(i.name || ""));
+  check("the hryvnia product was read", !!uah, JSON.stringify(importedE.map((i) => i.name)));
+  check(
+    "its currency came from the rendered text, which is the only place it exists",
+    !!uah && uah.priceText === "4 000 ₴" && uah.currency === "UAH",
+    uah && JSON.stringify({ priceText: uah.priceText, currency: uah.currency }),
+  );
+  check(
+    "₴4,000 became $97.56 rather than $4,000",
+    !!uah && uah.price === 4000 && uah.usd === 97.56 && uah.fxRate === 41,
+    uah && JSON.stringify({ price: uah.price, usd: uah.usd, fxRate: uah.fxRate }),
+  );
+  check(
+    "and nothing was filed as an unstated currency",
+    !!uah && !(uah.issues || []).includes("currency not stated"),
+    uah && JSON.stringify(uah.issues),
+  );
+
+  // Sizes. On the single-page product they exist only as buttons — the field
+  // the parser had no source for at all. On the hryvnia page they are in the
+  // store's own structured data, which used to be read and thrown away.
+  check(
+    "the extension read the size buttons",
+    !!bomber && bomber.sizeCandidates >= 5,
+    bomber && `candidates: ${bomber.sizeCandidates}`,
+  );
+  check(
+    "sizes off the control, with the placeholder and the size-guide link left out",
+    !!bomber && JSON.stringify(bomber.sizes) === JSON.stringify(["XS", "S", "M", "L", "XL"]),
+    bomber && JSON.stringify(bomber.sizes),
+  );
+  check(
+    "sizes out of structured data, where the page has no control to read",
+    !!uah && JSON.stringify(uah.sizes) === JSON.stringify(["44", "46"]),
+    uah && JSON.stringify(uah.sizes),
+  );
+
+  // Colour and colourways. This page states its colour nowhere but in the
+  // swatch a shopper has selected — no `color` in its structured data, as on
+  // the site it stands for.
+  check(
+    "the colour came off the selected swatch",
+    !!bomber && JSON.stringify(bomber.colors) === JSON.stringify(["Charcoal"]),
+    bomber && JSON.stringify(bomber.colors),
+  );
+  check(
+    "the other colourways were taken from the colour row's links",
+    !!bomber &&
+      bomber.variantUrls.length === 2 &&
+      bomber.variantUrls.every((u) => /item-2853003[45]\.aspx$/.test(u)),
+    bomber && JSON.stringify(bomber.variantUrls),
+  );
+  check(
+    "and the care link that shares that row is not one of them",
+    !!bomber && !bomber.variantUrls.some((u) => u.includes("/care")),
+    bomber && JSON.stringify(bomber.variantUrls),
+  );
+
+  // Description and material. The description is collapsed behind an accordion
+  // — in the DOM, invisible, and empty as far as `innerText` is concerned — and
+  // the composition is a definition list. Neither is in structured data.
+  check(
+    "the description was read out of a collapsed accordion",
+    !!bomber && /Cut from a wool blend/.test(bomber.description || ""),
+    bomber && JSON.stringify((bomber.description || "").slice(0, 80)),
+  );
+  check(
+    "the extension read the spec rows",
+    !!bomber && bomber.specCount >= 3,
+    bomber && `specs: ${bomber.specCount}`,
+  );
+  check(
+    "the material came off the spec table",
+    !!bomber && bomber.material === "80% wool, 20% polyamide",
+    bomber && JSON.stringify(bomber.material),
+  );
+  check(
+    "and off a plain line of Ukrainian text on the other store",
+    !!uah && uah.material === "95% бавовна, 5% еластан",
+    uah && JSON.stringify(uah.material),
+  );
+
+  // Brand, category and subcategory. The trail is rendered and described in no
+  // structured form; the other store treats its brand as a link rather than a
+  // property, which is the case where brand used to arrive empty.
+  check(
+    "the extension read the breadcrumb trail",
+    !!bomber && bomber.breadcrumbCount >= 3,
+    bomber && `crumbs: ${bomber.breadcrumbCount}`,
+  );
+  check(
+    "the piece is filed under a category AND a subcategory",
+    !!bomber && bomber.category === "outerwear" && bomber.subcategory === "Bomber Jackets",
+    bomber && JSON.stringify({ category: bomber.category, subcategory: bomber.subcategory }),
+  );
+  check(
+    "the brand came off the designer link, where structured data has none",
+    !!uah && uah.brand === "Fixture UA",
+    uah && JSON.stringify(uah.brand),
+  );
+
+  // The codes that let a second retailer's page join this product rather than
+  // duplicate it. The joining itself needs a database and is unit-tested; what
+  // runs here is the reading.
+  check(
+    "the item's own number came off the offer, check digit and all",
+    !!bomber && bomber.gtin === "4006381333931" && bomber.mpn === "FA-2285",
+    bomber && JSON.stringify({ gtin: bomber.gtin, mpn: bomber.mpn, sku: bomber.sku }),
+  );
+  check(
+    "and an article number off a plain Ukrainian line, where nothing is declared",
+    !!uah && uah.sku === "UA-88213" && !uah.gtin,
+    uah && JSON.stringify({ gtin: uah.gtin, sku: uah.sku }),
+  );
+
+  // Style, read out of the description the accordion was hiding — which is the
+  // whole chain in one assertion: there was nothing to infer from until that
+  // text arrived.
+  check(
+    "the piece is tagged with a style, from words only the rendered page had",
+    !!bomber && JSON.stringify(bomber.styleKeywords) === JSON.stringify(["minimal"]),
+    bomber && JSON.stringify(bomber.styleKeywords),
   );
 
   collect.close(); popup.close();
