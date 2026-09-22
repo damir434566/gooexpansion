@@ -376,6 +376,14 @@ export default function CollectPage() {
                       {r.reason}
                     </span>
                   )}
+                  {!r.reason && detailLine(r) && (
+                    <span
+                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[260px] flex-shrink-0"
+                      title={detailLine(r)}
+                    >
+                      {detailLine(r)}
+                    </span>
+                  )}
                   <a
                     href={r.url}
                     target="_blank"
@@ -399,6 +407,22 @@ export default function CollectPage() {
       )}
     </div>
   );
+}
+
+/**
+ * What a finished page has to say for itself beyond "imported".
+ *
+ * Two questions the admin would otherwise have to open the catalogue to answer:
+ * how many photos came across, and what happened to the price. The second one
+ * matters most on a store that does not price in dollars — the catalogue stores
+ * dollars, so the row says which rate turned ₴4,000 into a number, rather than
+ * leaving the admin to wonder whether it did.
+ */
+function detailLine(r: CrawlItemResult): string {
+  const parts: string[] = [];
+  if (r.images) parts.push(`${r.images} photo${r.images === 1 ? "" : "s"}`);
+  if (r.priceNote) parts.push(r.priceNote);
+  return parts.join(" · ");
 }
 
 function StatusPill({ status }: { status: CrawlItemResult["status"] }) {

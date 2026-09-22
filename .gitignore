@@ -1,0 +1,4 @@
+# Build output of the verification harness (see verification/compile.sh) and the
+# Chrome profile its end-to-end run creates. Both are generated on demand.
+verification/compiled/
+verification/profile/

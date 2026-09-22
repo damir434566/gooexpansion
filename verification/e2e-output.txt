@@ -1,6 +1,6 @@
 
 — launching chromium with the unpacked extension —
-  extension id eeigeeoncncieklfpglafmdgdpofaojp
+  extension id pjbcdcadhhapgbljlmbiakkkniiialfa
   ok   installs with access to no store whatsoever (no <all_urls>)
   ok   the only pages it may touch at install are our own collect screen
   ok   asks only for the four narrow APIs
@@ -38,6 +38,20 @@
   ok   with no Crawl-delay the 1.5s floor was applied
   ok   a ~10s rest landed after the 20th page
 
-  27 passed, 0 failed
+— run E: a single-page storefront, and a store priced in hryvnia —
+  ok   run E finished
+  ok   both pages were collected
+  ok   the payload itself was NOT sent — the strip still runs
+  ok   captured markup stays small
+  ok   the single-page product was read
+  ok   the extension handed over the photos it found before stripping
+  ok   all seven photos were imported, not the two the carousel had mounted
+  ok   the recommendations rail stayed out of the product
+  ok   the euro price was converted to dollars at the test's rate
+  ok   the hryvnia product was read
+  ok   its currency came from the rendered text, which is the only place it exists
+  ok   ₴4,000 became $97.56 rather than $4,000
+  ok   and nothing was filed as an unstated currency
 
-EXIT=0
+  40 passed, 0 failed
+

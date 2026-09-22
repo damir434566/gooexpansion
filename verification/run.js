@@ -5,8 +5,12 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const CHROME = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
-const EXT = "/home/user/darakhamia/goo-fashion/extension";
+// Both paths are overridable, so this runs on a machine other than the one it
+// was written on: CHROME_PATH for a local Chrome or Chromium, EXT_PATH if the
+// extension under test lives somewhere other than this repository's copy.
+const CHROME =
+  process.env.CHROME_PATH || "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
+const EXT = process.env.EXT_PATH || path.join(__dirname, "..", "extension");
 const PROFILE = path.join(__dirname, "profile");
 const PORT = 9333;
 const STORE = "http://127.0.0.1:3301";
@@ -419,6 +423,84 @@ async function main() {
     "a ~10s rest landed after the 20th page",
     typeof restGap === "number" && restGap >= 11000,
     `gap after page 20 was ${restGap}ms`,
+  );
+
+  collect.close(); popup.close();
+
+  // ── Run E: the gallery in the payload, the currency in the text ───────────
+  //
+  // The two cases this round was asked about. One page keeps its gallery in a
+  // hydration payload, the way Farfetch does, and the content script deletes
+  // that payload before sending — so before this change the product arrived
+  // with the photos its carousel had mounted and nothing else. The other prices
+  // in hryvnia and states that nowhere but in rendered text.
+  console.log("\n— run E: a single-page storefront, and a store priced in hryvnia —");
+  await storeControl({ mode: "spa", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  popup = await openPopup(extId);
+
+  await popup.evaluate(
+    `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:5}})`,
+  );
+  const doneE = await waitForEvent("done", 180000);
+  check("run E finished", !!doneE);
+
+  const eventsE = (await studioEvents()).events;
+  const ingestsE = eventsE.filter((e) => e.kind === "ingest");
+  const importedE = (await studioEvents()).imported;
+
+  check("both pages were collected", ingestsE.length === 2, `got ${ingestsE.length}`);
+  check(
+    "the payload itself was NOT sent — the strip still runs",
+    ingestsE.every((e) => e.detail.carriesPayload === false),
+    JSON.stringify(ingestsE.map((e) => e.detail.carriesPayload)),
+  );
+  check(
+    "captured markup stays small",
+    ingestsE.every((e) => e.detail.htmlLength < 300_000),
+    JSON.stringify(ingestsE.map((e) => e.detail.htmlLength)),
+  );
+
+  const bomber = importedE.find((i) => /Wool-blend bomber/.test(i.name || ""));
+  check("the single-page product was read", !!bomber, JSON.stringify(importedE.map((i) => i.name)));
+  check(
+    "the extension handed over the photos it found before stripping",
+    !!bomber && bomber.candidates >= 7,
+    bomber && `candidates: ${bomber.candidates}`,
+  );
+  check(
+    "all seven photos were imported, not the two the carousel had mounted",
+    !!bomber && bomber.images === 7,
+    bomber && `${bomber.images}: ${JSON.stringify(bomber.imageList)}`,
+  );
+  check(
+    "the recommendations rail stayed out of the product",
+    !!bomber && !bomber.imageList.some((u) => u.includes("31224455")),
+    bomber && JSON.stringify(bomber.imageList.filter((u) => u.includes("31224455"))),
+  );
+  check(
+    "the euro price was converted to dollars at the test's rate",
+    !!bomber && bomber.currency === "EUR" && bomber.price === 1290 && bomber.usd === 1517.65,
+    bomber && JSON.stringify({ price: bomber.price, currency: bomber.currency, usd: bomber.usd }),
+  );
+
+  const uah = importedE.find((i) => /Куртка/.test(i.name || ""));
+  check("the hryvnia product was read", !!uah, JSON.stringify(importedE.map((i) => i.name)));
+  check(
+    "its currency came from the rendered text, which is the only place it exists",
+    !!uah && uah.priceText === "4 000 ₴" && uah.currency === "UAH",
+    uah && JSON.stringify({ priceText: uah.priceText, currency: uah.currency }),
+  );
+  check(
+    "₴4,000 became $97.56 rather than $4,000",
+    !!uah && uah.price === 4000 && uah.usd === 97.56 && uah.fxRate === 41,
+    uah && JSON.stringify({ price: uah.price, usd: uah.usd, fxRate: uah.fxRate }),
+  );
+  check(
+    "and nothing was filed as an unstated currency",
+    !!uah && !(uah.issues || []).includes("currency not stated"),
+    uah && JSON.stringify(uah.issues),
   );
 
   collect.close(); popup.close();

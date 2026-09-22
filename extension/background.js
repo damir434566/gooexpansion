@@ -282,7 +282,15 @@ async function snapshotPage(url) {
     if (!result || !result.ok) {
       return { error: result?.error ?? "Could not read the page" };
     }
-    return { html: result.html, status };
+    // `images` and `priceText` are what the page said before the strip removed
+    // it — see the header of snapshot.js. They travel as candidates; the server
+    // decides which of them belong to the product.
+    return {
+      html: result.html,
+      images: Array.isArray(result.images) ? result.images : [],
+      priceText: typeof result.priceText === "string" ? result.priceText : "",
+      status,
+    };
   } catch (err) {
     return { error: err?.message ?? "Could not read the page" };
   } finally {
@@ -419,7 +427,12 @@ async function run({ storeUrl, limit }) {
         continue;
       }
 
-      const ingested = await askPage("ingest", { url, html: snap.html });
+      const ingested = await askPage("ingest", {
+        url,
+        html: snap.html,
+        images: snap.images,
+        priceText: snap.priceText,
+      });
       collected++;
       state.done = collected;
       if (ingested.ok) state.imported++;

@@ -60,6 +60,24 @@ const MAX_SITEMAPS = 12;
 /** Addresses the caller may say it has already seen, for de-duplication. */
 const MAX_SEEN = 5_000;
 
+/**
+ * Image candidates one page may offer.
+ *
+ * The extension reads the rendered page and its hydration payloads before
+ * stripping them (see `extension/snapshot.js`), so these are addresses the
+ * markup below no longer contains. Generous, because the gallery harvester
+ * rejects what does not belong to the product and a photo missed here cannot be
+ * recovered without visiting the store again — and bounded, because this is a
+ * list a browser extension puts in a request body.
+ */
+const MAX_IMAGE_CANDIDATES = 300;
+
+/** Longest image address accepted. Past this it is not an address. */
+const MAX_IMAGE_URL = 1_500;
+
+/** Longest rendered price string accepted, e.g. "4 000 ₴". */
+const MAX_PRICE_TEXT = 120;
+
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
@@ -129,6 +147,18 @@ export async function POST(req: Request) {
     );
   }
 
+  // What the page showed that its stripped markup no longer says. Both are
+  // candidates at the lowest precedence: every structured source wins over
+  // them, and the image list still has to pass the gallery harvester's
+  // host-and-naming tests.
+  const imageCandidates = (Array.isArray(body?.images) ? body.images : [])
+    .filter(
+      (u: unknown): u is string =>
+        typeof u === "string" && u.length <= MAX_IMAGE_URL && /^https?:\/\//.test(u),
+    )
+    .slice(0, MAX_IMAGE_CANDIDATES);
+  const priceText = str(body?.priceText).slice(0, MAX_PRICE_TEXT);
+
   const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
     getFetchSettings(),
     getFetchApiKey(),
@@ -151,6 +181,7 @@ export async function POST(req: Request) {
       aiSettings,
       useAi,
       html,
+      evidence: { images: imageCandidates, priceText },
     });
 
     const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
@@ -181,6 +212,8 @@ export async function POST(req: Request) {
             name: product.name,
             usedAi,
             imagesMirrored: imported.imagesMirrored ?? 0,
+            images: imported.images ?? 0,
+            priceNote: imported.priceNote,
           }
         : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
     }

@@ -1,21 +1,22 @@
 diff --git a/AUDIT_PLAN_BRIEF.md b/AUDIT_PLAN_BRIEF.md
-index 021ad7d..cfe21bc 100644
+index 021ad7d..be51000 100644
 --- a/AUDIT_PLAN_BRIEF.md
 +++ b/AUDIT_PLAN_BRIEF.md
-@@ -157,6 +157,7 @@
+@@ -157,6 +157,8 @@
  | 2026-09-16 | Третья плашка от CEO — снова без кнопки. Собран сквозной прогон «настоящий сервер → настоящий экран» (раньше половинки проверялись порознь): `discoverProductUrls` реально ходит в магазин, отвечающий 403, его ответ сериализуется как в роуте и в таком виде отдаётся настоящему компоненту страницы. На коде **из `master` (#854, то, что на проде)** ответ — `{ok:false, status:403, isSingleProduct:true, error:"Upstream responded 403"}`, и кнопка рисуется. Значит серверная часть на проде здорова, а в браузере крутится клиент старее ответа, который он показывает (вкладка, открытая до выката; service worker в проекте отсутствует, своих cache-заголовков нет — лечится перезагрузкой или приватным окном). Чтобы текст подсказки не отправлял к кнопке, которой на старом бандле нет, обе ветки отказа теперь называют и панель: «Paste page» во вкладке Parse URL | `src/lib/server/parser/crawl.ts` | Знать на будущее: подсказка, ссылающаяся на элемент UI, живёт дольше, чем сборка этого UI |
  | 2026-09-16 | Родство фотографий в галерее не работает на коротких именах файлов: `stem()` оставляет только буквы и цифры, а `isNumberedFrame` требует восьми символов — поэтому `nebula-1.jpg` / `nebula-2.jpg` (7 символов) сиблингами не считаются, и со страницы уезжает одно фото из четырёх. Для магазина, который называет файлы `1.jpg`, `2.jpg`, галерея теряется вся. Порог осознанный (чужое фото в каталоге хуже пропущенного), поэтому не тронут | `src/lib/server/parser/gallery.ts:200` | Низкая: на реальных именах (`nebula-jacket-aurelio-01.jpg`) галерея собирается полностью — проверено |
  | 2026-09-20 | **Жук доставал не весь каталог, а его верхушку.** Проверено по коду: `sitemap.ts` знал три имени и не умел `.gz` (каталог любого размера отдаёт сайтмап сжатым, `fetchHtml` возвращал бы его декодированной кашей), считал документом и 404-й промах (пять «документов» кончались на трёх неверных догадках), открывал максимум три дочерних сайтмапа и читал `<loc>` только без `CDATA` — у WordPress и Magento сайтмап поэтому читался пустым; `looksLikeProductPath` требовал сегмента `/product(s)/` или цифрового кода, поэтому магазин со slug-адресами (`/shop/nebula-jacket-aurelio`) давал «сайтмап читается, товаров 0»; сайтмап вообще читался только при полностью пустом обходе, а не при коротком; потолки — 500 товаров в `crawl.ts`, 60 якорей на страницу в `extractProductLinks`, 40 товаров и 1 страница по умолчанию на экране; в `direct` не было cookie-jar, то есть каждый запрос к мягкой стене был тем самым первым, который она и отклоняет. **Сделано по прямому указанию CEO** (блок «добыча», шаги 2–4 бесплатного плана; деньги не задействованы, провайдер по решению CEO не берём): семь имён сайтмапа + три `.gz` через новый `fetchBinary` с распознаванием по магическим байтам (только `direct` — провайдер отдаёт текст), `CDATA` в `<loc>`, раздельные бюджеты (18 запросов / 12 прочитанных документов / 10 детей), файл, который магазин сам назвал `product-*`, считается его собственным словом — его URL минуют тест формы адреса, но не плоские отказы (`/cart`); четвёртая форма товарного адреса (секция магазина + слаг из трёх слов, с отсечкой листинговых слов и родителей вида `/collections/<slug>`); сайтмап теперь добирает недобранное, а не только спасает пустое; потолки 2 000 товаров, вся сетка со страницы листинга, по умолчанию 100/3 страницы; cookie-jar на хост (10 минут, `direct`), стук во входную дверь на молчаливом 403 — один раз на хост и только когда сам отказ куку не выдал. **Доказательство:** 51/51 на пяти фиктивных магазинах через настоящий HTTP и настоящий `direct`-fetch (имена ведут на 127.0.0.1 через `/etc/hosts`, поэтому SSRF-гард видит публичный хост и путь кода не подменён): gzip-сайтмап найден после шести мёртвых имён (3 товара, ≤18 запросов); robots → индекс с `CDATA` → `product-sitemap.xml` даёт 3 вещи, включая короткий слаг `/shop/tee`, `/cart` отброшен, `page-sitemap.xml` не открыт; мягкая стена с кукой в самом отказе — ровно один повтор, во входную дверь не стучались; стена с кукой только на главной — 403, один стук в `/`, повтор с кукой прошёл; вторая страница того же магазина прошла с первого раза одним запросом; каталог 1 500 URL собран целиком (потолок 500 снят), якоря листинга внутри, подсказка говорит «added»; сетка из 120 карточек отдаёт 120 при лимите и 60 по умолчанию; магазин, отказывающий во всём, по-прежнему отвечает 403 с подсказкой про Paste page; вставленная одна вещь в slug-форме опознана как товар и сайтмап не читался. `tsc --noEmit` чист, `eslint` по парсеру, роутам и экрану чист, `npm run build` exit 0 | `src/lib/server/parser/{sitemap,fetch,extract,crawl}.ts`, `src/app/api/admin/parser/crawl/route.ts`, `src/app/goo-studio/parser/page.tsx`, `PARSER.md` | Закрыто. Осталось от бесплатного плана: порядок шифров/JA3 (в Node не воспроизводится — нужен свой curl_cffi, решение за CEO). Блоки B (наличие, SKU, размеры, история цен) и C (очередь, возобновление, расписание) не начаты |
 +| 2026-09-21 | **Каталог с защищённого магазина: руки перенесены в браузер CEO, мозги остались на сервере.** Продолжение блока «добыча» (2026-09-20): последний оставшийся бесплатный шаг — порядок шифров/JA3 — в Node не воспроизводится, поэтому **по прямому указанию CEO** (вне порядка волн, деньги не задействованы) задача обойдена целиком: страницы открывает расширение Chrome на машине CEO (его адрес, его куки, уже пройденная проверка), а что открывать и как быстро — решает сервер. Новое: `robots.ts` — разбор robots.txt строго по группе `*` (Googlebot'ом не представляемся), Allow/Disallow по длиннейшему совпадению с `*` и `$`, Crawl-delay, Sitemap, разбор чистый (сеть не трогает); `plan-collection.ts` — чистая функция «страница + сайтмапы + robots → товарные адреса, пауза, что дочитать следующим кругом» поверх существующих `extractProductLinks`/`looksLikeProductPath`/`isNonProductPath` и хелперов `sitemap.ts` (они для этого экспортированы, ни одной копии не заведено; `fromRobots` переведён на общий разбор, дубль исчез); роут `collect` с действиями `plan` и `ingest` (`ingest` зовёт `parsePage` с готовым html — в магазин не ходит вовсе, без html отвечает 400, а не молча фетчит); экран-приёмник `/goo-studio/parser/collect` — мост postMessage ↔ API обычной сессией Clerk; `extension/` (MV3): popup, service worker с очередью и темпом, content script-санитайзер один в один с букмарклетом, bridge. **Ключей в расширении нет** — оно не умеет звать API, только просить открытую вкладку; доступ к магазину через `optional_host_permissions` + запрос по клику. Вежливость: Disallow соблюдается, пауза `max(Crawl-delay, 1.5 с)` + случайный разброс, ~10 с отдыха каждые 20 страниц, два 403/429 подряд — остановка с объяснением, Stop мгновенный (гасит и текущую паузу, и приёмник перестаёт принимать). **Доказательство:** 39/39 на настоящих модулях `robots.ts`/`plan-collection.ts` (длиннейшее совпадение, ничья в пользу Allow, пустой Disallow, `*` и `$`, слитые группы агентов, robots.txt отданный HTML-страницей, пол и потолок паузы, дедуп по `seen`, индекс → дети) и 27/27 сквозным прогоном настоящего расширения в настоящем Chromium против фиктивного магазина: при установке не выдан ни один хост (`explicit_host: []`, скриптуется только собственный экран приёмника, из API — `activeTab`, `scripting`, `storage`, `webRequest`); robots.txt прочитан первым, сайтмап вторым кругом; запрещённый `/product/secret-*` не открыт ни разу и посчитан как blocked; темп 2 с взят из Crawl-delay магазина, разброс между запросами есть; страница ~430 КБ ужата до <300 КБ, JSON-LD цел, лениво подгруженная галерея приехала отрисованной (2 настоящих фото вместо data-URI), настоящий `parsePage` собрал товар из снятого DOM (имя, бренд Fixture Atelier, 249 EUR) при нуле запросов в магазин с нашей стороны; на 403 прогон встал ровно после второй страницы, не третьей; после Stop ни одного импорта и ни одного запроса в магазин; на 21 товаре без Crawl-delay применён пол 1.5 с и после двадцатой страницы лёг отдых 11 с. `tsc --noEmit` чист, `npm run build` exit 0, `eslint` по новым файлам и по `extension/` чист, база линта не выросла (13 ошибок / 52 предупреждения до и после — все чужие, по моим файлам ноль) | `src/lib/server/parser/{robots,plan-collection,sitemap}.ts`, `src/lib/server/audit.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/*` | Закрыто в коде. **Не проверено мной:** живой магазин и установка в Chrome — из контейнера это серверный IP, то есть ровно тот, от которого уходим; проверку на настоящем магазине делает CEO |
++| 2026-09-22 | **Все фотографии вещи и цена в одной валюте.** Три правки по прямому указанию CEO (вне порядка волн), все — поверх сбора расширением от 2026-09-21. **Почему Farfetch отдавал меньше фото, чем остальные** — найдено по коду, а не угадано: `collectCandidates` в `gallery.ts` добывает адреса из инлайновых hydration-payload'ов, но `extension/snapshot.js` удаляет все `<script>` кроме `ld+json` **до** отправки, поэтому на Shopify (галерея в разметке) не терялось ничего, а на SPA вроде Farfetch до сервера доезжали только те слайды, что успела смонтировать карусель. Вторая, более широкая дыра рядом: регулярка payload'а разрешала `\/` лишь сразу после схемы, а внутри пути упиралась в обратный слэш — то есть адрес вида `https:\/\/cdn.shopify.com\/s\/files\/1\/photo.jpg` (так payload, закодированный в JSON дважды, пишет любой адрес) не находился вообще: схема совпадала, до расширения файла дело не доходило. **Сделано.** Фото: `snapshot.js` читает страницу, пока она цела (`currentSrc`, `src`, `srcset`/`data-srcset`, зум-атрибуты, `picture>source`, `link[as=image]`, плюс скан содержимого `<script>` на адреса картинок) и отдаёт найденное как кандидатов вместе с видимым текстом цены — сами payload'ы по-прежнему не отправляются, иначе вернулись бы те мегабайты, ради которых strip и существует; кандидаты проходят **тот же** фильтр `harvestGalleryImages` (новый пятый параметр), так что рельс «you may also like» отбрасывается, как и раньше; новый `PageEvidence` в `types.ts` прокинут `route → parsePage → extractProduct`; регулярка экранированных слэшей исправлена в обоих местах (сервер и расширение); потолок фото 12 → 20 одной общей `MAX_PRODUCT_IMAGES` — до этого три места расходились (нормализация 12, импорт 12, зеркало жёстко `min(max, 12)`, то есть найденное сверх 12 хранилось ссылкой и не скачивалось никогда). Валюта: новый `src/lib/server/fx.ts` (таблица курсов с базой USD, кэш на час, кэшируется и неудача — провайдер, который лёг, лежит не для одного товара; фолбэк-таблица на 31 валюту), `/api/exchange-rates` переведён на него и больше не дублирует ни фетч, ни фолбэк; импорт пересчитывает цену в доллары и пишет `price_min/price_max` в долларах с `currency: USD`, а цену магазина сохраняет там, где она и есть правда — в записи ритейлера (по ней человек платит) и в новых колонках `source_price/source_currency/fx_rate/fx_date` (миграция 019, добавлены в `OPTIONAL_COLUMNS`, так что база без миграции всё равно принимает товар, просто без происхождения); `normalizeCurrency` больше **не** подставляет USD молча — пустая строка и issue «currency not stated», потому что молчаливый дефолт и есть та причина, по которой ₴4 000 приехали как $4 000; `extractCurrencyFromDisplay` расширен (₴ ₽ ₹ ₩ ₪ zł Kč CHF 元, слова грн/руб/лв, CA$/A$/NZ$/HK$/S$/R$ через lookbehind — иначе «S$» внутри «US$» читался как сингапурский доллар, и код ISO принимается только рядом с числом, иначе «incl. VAT» становится валютой, а «Try it on» — турецкой лирой); экран приёмника показывает по каждой странице «N photos · 4000 UAH → $97.56». **Доказательство.** 47/47 юнитов на настоящих модулях (`verification/test-price-and-photos.js`: символы и слова валют, обе ловушки с долларами, конвертация и один фетч курсов на весь прогон, фолбэк при недоступном провайдере, `null` на валюту без курса, кандидаты против рельса рекомендаций и чужого CDN, экранированные слэши, потолок 20, `productToDb`/`dbToProduct` и сброс четырёх колонок на базе без миграции 019) и 40/40 сквозным прогоном настоящего расширения в настоящем Chromium — было 27/27, добавлен режим витрины `spa`, устроенный как Farfetch: галерея только в `__NEXT_DATA__`, половина адресов с экранированными слэшами, рядом рельс чужого товара на том же CDN. На нём: до правки со страницы уезжало 2 фото, теперь 7 из 7; рельс не попал в товар; payload не отправлен (strip работает, разметка <300 КБ); гривневая страница, у которой в разметке `price: "4000"` вовсе без `priceCurrency`: валюта прочитана из отрисованного «4 000 ₴», ₴4 000 → $97.56 по курсу 41, issue об отсутствии валюты не выставлен; евро 1290 → $1517.65; прогоны A–D (вежливость, Crawl-delay, 403, Stop, отдых) без регрессий. `tsc --noEmit` чист, `npm run build` exit 0, `eslint` по изменённым файлам и по `extension/` чист, база линта не выросла (13 ошибок / 52 предупреждения до и после) | `src/lib/server/fx.ts`, `src/lib/server/product-fields.ts`, `src/lib/server/parser/{gallery,extract,normalize,parse-page,import-product,types}.ts`, `src/lib/server/storage/product-images.ts`, `src/lib/data/db.ts`, `src/lib/{types,supabase}.ts`, `src/app/api/exchange-rates/route.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/{snapshot,background}.js`, `supabase/migrations/019_product_source_price.sql` | Закрыто в коде. **Требует шага CEO:** миграция 019 (без неё цена всё равно в долларах, но происхождение не пишется). **Не проверено мной:** живой Farfetch и живая база — Supabase в контейнере нет, поэтому запись строки проверена на чистых `productToDb`/`dbToProduct` и на сбросе колонок, а не на реальном insert. **Осталось от прошлого раза:** название товара (og:title тащит имя магазина, `<h1>` парсер не читает вовсе) — CEO перенёс на потом |
  
  ---
  
 diff --git a/extension/background.js b/extension/background.js
 new file mode 100644
-index 0000000..76777e4
+index 0000000..85751a7
 --- /dev/null
 +++ b/extension/background.js
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,523 @@
 +/**
 + * The hands of the operation.
 + *
@@ -300,7 +301,15 @@ index 0000000..76777e4
 +    if (!result || !result.ok) {
 +      return { error: result?.error ?? "Could not read the page" };
 +    }
-+    return { html: result.html, status };
++    // `images` and `priceText` are what the page said before the strip removed
++    // it — see the header of snapshot.js. They travel as candidates; the server
++    // decides which of them belong to the product.
++    return {
++      html: result.html,
++      images: Array.isArray(result.images) ? result.images : [],
++      priceText: typeof result.priceText === "string" ? result.priceText : "",
++      status,
++    };
 +  } catch (err) {
 +    return { error: err?.message ?? "Could not read the page" };
 +  } finally {
@@ -437,7 +446,12 @@ index 0000000..76777e4
 +        continue;
 +      }
 +
-+      const ingested = await askPage("ingest", { url, html: snap.html });
++      const ingested = await askPage("ingest", {
++        url,
++        html: snap.html,
++        images: snap.images,
++        priceText: snap.priceText,
++      });
 +      collected++;
 +      state.done = collected;
 +      if (ingested.ok) state.imported++;
@@ -1158,28 +1172,46 @@ index 0000000..cd405fd
 +init().catch((err) => note(err?.message ?? "Could not read this tab."));
 diff --git a/extension/snapshot.js b/extension/snapshot.js
 new file mode 100644
-index 0000000..6999dcb
+index 0000000..21d2052
 --- /dev/null
 +++ b/extension/snapshot.js
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,217 @@
 +/**
-+ * Take the rendered page and hand back markup small enough to post.
++ * Take the rendered page and hand back what the server needs to read it.
 + *
++ * Three things come out of here: the stripped markup, the photos the page
++ * actually shows, and the price as a shopper reads it.
++ *
++ * ── The markup ───────────────────────────────────────────────────────────────
 + * This is the bookmarklet in `src/lib/parser-bookmarklet.ts`, with the clicking
 + * automated. The strip list is deliberately identical — scripts except JSON-LD,
 + * styles, stylesheet links, SVG, noscript, iframes, templates, and inline
 + * data-URIs — because the server runs the very same extractor over what comes
-+ * out of here as over a pasted page. Diverging here would mean a product
-+ * imported by the extension could differ from the same product pasted by hand,
-+ * and there would be no way to tell which was right.
++ * out of here as over a pasted page.
 + *
 + * What the strip is for: a retail page is several megabytes, almost all of it
 + * script and style the parser never reads, and the route on the other end takes
 + * 3 MB. Stripping takes a typical page to a couple of hundred kilobytes.
 + *
-+ * Why JSON-LD survives: it is the densest source of truth on a retail page —
-+ * name, brand, every image, price, currency, colour and material as data rather
-+ * than as markup to mine.
++ * ── Why the extras exist ─────────────────────────────────────────────────────
++ * The strip is also lossy in a way that showed up the moment this ran against a
++ * single-page storefront. The server's gallery harvester mines inline
++ * hydration payloads for image URLs — that is how it finds the photos a React
++ * store never writes into its markup — and those payloads are `<script>`, so
++ * this file deletes them before the server ever sees them. On a Shopify store
++ * the gallery is plain `<img>` and nothing is lost; on Farfetch most of it is
++ * in the payload, and the product arrived with the two photos its carousel had
++ * mounted.
++ *
++ * Shipping the payloads back would mean sending the megabytes the strip exists
++ * to remove. So the page is read here, where it is still whole, and only the
++ * findings travel: image URLs, and the rendered price text. Both are evidence,
++ * not answers — the server puts them through the same host-and-naming tests as
++ * every other candidate, because a page's script data names the "you may also
++ * like" carousel too.
++ *
++ * This is a deliberate divergence from the bookmarklet, and the only one: the
++ * extension can read a page the bookmarklet's one-shot copy cannot.
 + *
 + * Before reading anything it scrolls the page. That is the whole reason a real
 + * tab is worth its cost over a server fetch: a gallery that lazy-loads on
@@ -1195,7 +1227,141 @@ index 0000000..6999dcb
 +  const DROP =
 +    'script:not([type="application/ld+json"]),style,link[rel=stylesheet],svg,noscript,iframe,template';
 +
++  /** Most photos one page can contribute. Well past any real gallery. */
++  const MAX_IMAGES = 300;
++
++  /** Longest URL kept. Past this it is a data-URI or a tracking pixel's essay. */
++  const MAX_URL = 1500;
++
++  /** Script text scanned for image URLs, in total. A ceiling, not a target. */
++  const MAX_SCRIPT_SCAN = 8_000_000;
++
++  /**
++   * Image URLs as they appear in a JSON payload, escaped slashes and all.
++   *
++   * `\/` is allowed in every segment rather than only after the scheme: a
++   * payload that has been JSON-encoded twice escapes every slash in the path,
++   * and a pattern that stops at the first backslash matches the scheme and then
++   * finds no file extension to confirm. Same pattern as the server's harvester,
++   * which unescapes the result the same way.
++   */
++  const JSON_IMAGE =
++    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
++
++  /** A price: a currency marker with digits next to it, either order. */
++  const PRICE_TEXT =
++    /(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)\s*[\d][\d\s.,]*|[\d][\d\s.,]*\s*(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)/;
++
 +  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++
++  /** Resolve against the page, and reject what is not a fetchable address. */
++  function absolute(raw) {
++    if (!raw) return null;
++    const value = String(raw).trim().replace(/\\\//g, "/");
++    if (!value || value.length > MAX_URL) return null;
++    if (/^data:/i.test(value)) return null;
++    try {
++      const url = new URL(value, location.href);
++      return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
++    } catch {
++      return null;
++    }
++  }
++
++  /**
++   * Every address on the page that could be a photo of this product.
++   *
++   * Deliberately greedy: it costs a few hundred strings, and the server rejects
++   * what does not belong to the product. Missing a photo is the expensive
++   * mistake, because nothing downstream can recover it without re-visiting the
++   * store.
++   */
++  function collectImages() {
++    const found = new Set();
++    const add = (raw) => {
++      const url = absolute(raw);
++      if (url && found.size < MAX_IMAGES) found.add(url);
++    };
++    const addSrcset = (value) => {
++      if (!value) return;
++      for (const part of String(value).split(",")) {
++        add(part.trim().split(/\s+/)[0]);
++      }
++    };
++
++    // `currentSrc` first: on a responsive image it is the rendition the browser
++    // actually chose and loaded, which no attribute in the markup states.
++    for (const img of document.images) {
++      add(img.currentSrc);
++      add(img.getAttribute("src"));
++      addSrcset(img.getAttribute("srcset"));
++      addSrcset(img.getAttribute("data-srcset"));
++      for (const attr of [
++        "data-src", "data-original", "data-lazy", "data-image",
++        "data-zoom-image", "data-large_image", "data-large", "data-full", "data-hires",
++      ]) {
++        add(img.getAttribute(attr));
++      }
++    }
++
++    for (const source of document.querySelectorAll("picture source")) {
++      addSrcset(source.getAttribute("srcset"));
++      addSrcset(source.getAttribute("data-srcset"));
++    }
++
++    for (const link of document.querySelectorAll('link[as="image"]')) {
++      add(link.getAttribute("href"));
++      addSrcset(link.getAttribute("imagesrcset"));
++    }
++
++    // The payloads this file is about to delete. A virtualised carousel keeps
++    // the slides it has not mounted here and nowhere else.
++    let scanned = 0;
++    for (const script of document.querySelectorAll("script")) {
++      if (found.size >= MAX_IMAGES || scanned >= MAX_SCRIPT_SCAN) break;
++      const text = script.textContent;
++      if (!text || text.length < 24) continue;
++      scanned += text.length;
++      const matches = text.match(JSON_IMAGE);
++      if (!matches) continue;
++      for (const match of matches) {
++        if (found.size >= MAX_IMAGES) break;
++        add(match);
++      }
++    }
++
++    return [...found];
++  }
++
++  /**
++   * The price as the page states it, symbol included.
++   *
++   * The symbol is the point. A store that writes `<span>4 000 ₴</span>` and a
++   * bare number in its structured data leaves the server with no way to know
++   * what currency it is looking at, and a price taken for dollars because
++   * nobody said otherwise is how a coat ends up in the catalogue at forty times
++   * its price. Elements that name themselves "price" are asked first; the
++   * body's own text is the fallback, and its first match is the one the layout
++   * puts nearest the top, which on a product page is the product's price.
++   */
++  function collectPriceText() {
++    const named = document.querySelectorAll(
++      '[itemprop="price"],[data-price],[class*="price" i],[id*="price" i],[data-testid*="price" i]',
++    );
++    for (const el of named) {
++      // Skip the containers that merely wrap a price block: their text carries
++      // the delivery estimate and the instalment offer along with it.
++      const text = (el.innerText || el.textContent || "").trim();
++      if (!text || text.length > 40) continue;
++      if (!el.offsetParent && el.tagName !== "META") continue;
++      const match = text.match(PRICE_TEXT);
++      if (match) return match[0].trim().slice(0, 120);
++    }
++
++    const body = (document.body && document.body.innerText) || "";
++    const match = body.match(PRICE_TEXT);
++    return match ? match[0].trim().slice(0, 120) : "";
++  }
 +
 +  try {
 +    // Walk the page so lazy images commit to a real `src`. Four steps is enough
@@ -1211,6 +1377,10 @@ index 0000000..6999dcb
 +      await sleep(150);
 +    }
 +
++    // Read before stripping: both of these live in what the strip removes.
++    const images = collectImages();
++    const priceText = collectPriceText();
++
 +    const root = document.documentElement.cloneNode(true);
 +    root.querySelectorAll(DROP).forEach((n) => n.remove());
 +    // An inline data-URI is a whole image encoded in the attribute. The parser
@@ -1218,17 +1388,17 @@ index 0000000..6999dcb
 +    // and the element stays.
 +    root.querySelectorAll('[src^="data:"]').forEach((n) => n.removeAttribute("src"));
 +
-+    return { ok: true, url: location.href, html: `<html>${root.innerHTML}</html>` };
++    return { ok: true, url: location.href, html: `<html>${root.innerHTML}</html>`, images, priceText };
 +  } catch (err) {
 +    return { ok: false, error: err && err.message ? err.message : String(err) };
 +  }
 +})();
 diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
 new file mode 100644
-index 0000000..888330e
+index 0000000..ba93202
 --- /dev/null
 +++ b/src/app/api/admin/parser/collect/route.ts
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,248 @@
 +/**
 + * Catalogue collection driven from the admin's own browser.
 + *
@@ -1290,6 +1460,24 @@ index 0000000..888330e
 +
 +/** Addresses the caller may say it has already seen, for de-duplication. */
 +const MAX_SEEN = 5_000;
++
++/**
++ * Image candidates one page may offer.
++ *
++ * The extension reads the rendered page and its hydration payloads before
++ * stripping them (see `extension/snapshot.js`), so these are addresses the
++ * markup below no longer contains. Generous, because the gallery harvester
++ * rejects what does not belong to the product and a photo missed here cannot be
++ * recovered without visiting the store again — and bounded, because this is a
++ * list a browser extension puts in a request body.
++ */
++const MAX_IMAGE_CANDIDATES = 300;
++
++/** Longest image address accepted. Past this it is not an address. */
++const MAX_IMAGE_URL = 1_500;
++
++/** Longest rendered price string accepted, e.g. "4 000 ₴". */
++const MAX_PRICE_TEXT = 120;
 +
 +function str(v: unknown): string {
 +  return typeof v === "string" ? v.trim() : "";
@@ -1360,6 +1548,18 @@ index 0000000..888330e
 +    );
 +  }
 +
++  // What the page showed that its stripped markup no longer says. Both are
++  // candidates at the lowest precedence: every structured source wins over
++  // them, and the image list still has to pass the gallery harvester's
++  // host-and-naming tests.
++  const imageCandidates = (Array.isArray(body?.images) ? body.images : [])
++    .filter(
++      (u: unknown): u is string =>
++        typeof u === "string" && u.length <= MAX_IMAGE_URL && /^https?:\/\//.test(u),
++    )
++    .slice(0, MAX_IMAGE_CANDIDATES);
++  const priceText = str(body?.priceText).slice(0, MAX_PRICE_TEXT);
++
 +  const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
 +    getFetchSettings(),
 +    getFetchApiKey(),
@@ -1382,6 +1582,7 @@ index 0000000..888330e
 +      aiSettings,
 +      useAi,
 +      html,
++      evidence: { images: imageCandidates, priceText },
 +    });
 +
 +    const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
@@ -1412,6 +1613,8 @@ index 0000000..888330e
 +            name: product.name,
 +            usedAi,
 +            imagesMirrored: imported.imagesMirrored ?? 0,
++            images: imported.images ?? 0,
++            priceNote: imported.priceNote,
 +          }
 +        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
 +    }
@@ -1444,12 +1647,70 @@ index 0000000..888330e
 +
 +  return NextResponse.json({ ok: true, result });
 +}
+diff --git a/src/app/api/exchange-rates/route.ts b/src/app/api/exchange-rates/route.ts
+index c329278..1af1e83 100644
+--- a/src/app/api/exchange-rates/route.ts
++++ b/src/app/api/exchange-rates/route.ts
+@@ -1,26 +1,33 @@
+ import { NextResponse } from "next/server";
++import { usdRates, FALLBACK_RATES } from "@/lib/server/fx";
+ 
++/**
++ * The rates the currency switcher offers.
++ *
++ * The table itself is fetched and cached by `@/lib/server/fx`, which the
++ * importer uses to state prices in dollars — the same numbers, from one place,
++ * so a product's stored price and the price a shopper sees converted cannot
++ * disagree. This route narrows that table to the currencies the switcher has a
++ * symbol for and hands it to the browser.
++ */
+ const CODES = ["EUR", "GBP", "UAH", "CZK", "JPY", "TRY"];
+-const FALLBACK = { EUR: 0.85, GBP: 0.74, UAH: 44, CZK: 21, JPY: 157, TRY: 45 };
++
++function pick(rates: Record<string, number>): Record<string, number> {
++  return Object.fromEntries(
++    CODES.map((c) => [c, rates[c]]).filter(([, v]) => typeof v === "number"),
++  );
++}
+ 
+ export async function GET() {
+-  try {
+-    const res = await fetch(
+-      "https://open.er-api.com/v6/latest/USD",
+-      { next: { revalidate: 3600 } }
+-    );
+-    if (!res.ok) throw new Error(`${res.status}`);
+-    const data: { result: string; rates: Record<string, number> } = await res.json();
+-    if (data.result !== "success") throw new Error("bad response");
+-    const rates = Object.fromEntries(
+-      CODES.map((c) => [c, data.rates[c]]).filter(([, v]) => v != null)
+-    );
+-    return NextResponse.json(rates, {
+-      headers: { "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=600" },
+-    });
+-  } catch {
+-    return NextResponse.json(FALLBACK, {
+-      headers: { "Cache-Control": "public, s-maxage=300" },
+-    });
+-  }
++  const { rates, live } = await usdRates();
++
++  // A fallback table is cached briefly, so the switcher picks live numbers up
++  // soon after the provider comes back rather than an hour later.
++  return NextResponse.json(pick(live ? rates : FALLBACK_RATES), {
++    headers: {
++      "Cache-Control": live
++        ? "public, s-maxage=3600, stale-while-revalidate=600"
++        : "public, s-maxage=300",
++    },
++  });
+ }
 diff --git a/src/app/goo-studio/parser/collect/page.tsx b/src/app/goo-studio/parser/collect/page.tsx
 new file mode 100644
-index 0000000..8998723
+index 0000000..9bf96e7
 --- /dev/null
 +++ b/src/app/goo-studio/parser/collect/page.tsx
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,443 @@
 +"use client";
 +
 +/**
@@ -1828,6 +2089,14 @@ index 0000000..8998723
 +                      {r.reason}
 +                    </span>
 +                  )}
++                  {!r.reason && detailLine(r) && (
++                    <span
++                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[260px] flex-shrink-0"
++                      title={detailLine(r)}
++                    >
++                      {detailLine(r)}
++                    </span>
++                  )}
 +                  <a
 +                    href={r.url}
 +                    target="_blank"
@@ -1853,6 +2122,22 @@ index 0000000..8998723
 +  );
 +}
 +
++/**
++ * What a finished page has to say for itself beyond "imported".
++ *
++ * Two questions the admin would otherwise have to open the catalogue to answer:
++ * how many photos came across, and what happened to the price. The second one
++ * matters most on a store that does not price in dollars — the catalogue stores
++ * dollars, so the row says which rate turned ₴4,000 into a number, rather than
++ * leaving the admin to wonder whether it did.
++ */
++function detailLine(r: CrawlItemResult): string {
++  const parts: string[] = [];
++  if (r.images) parts.push(`${r.images} photo${r.images === 1 ? "" : "s"}`);
++  if (r.priceNote) parts.push(r.priceNote);
++  return parts.join(" · ");
++}
++
 +function StatusPill({ status }: { status: CrawlItemResult["status"] }) {
 +  const map: Record<CrawlItemResult["status"], { label: string; cls: string }> = {
 +    imported: { label: "new", cls: "text-emerald-500 bg-emerald-500/10" },
@@ -1869,6 +2154,44 @@ index 0000000..8998723
 +    </span>
 +  );
 +}
+diff --git a/src/lib/data/db.ts b/src/lib/data/db.ts
+index 35bcec8..98e4f4f 100644
+--- a/src/lib/data/db.ts
++++ b/src/lib/data/db.ts
+@@ -95,6 +95,10 @@ export function dbToProduct(row: DbProduct): Product {
+     colorGroupIds: row.color_group_ids?.length ? row.color_group_ids : undefined,
+     createdAt: row.created_at,
+     bgColor: row.bg_color ?? undefined,
++    sourcePrice: row.source_price ?? undefined,
++    sourceCurrency: row.source_currency ?? undefined,
++    fxRate: row.fx_rate ?? undefined,
++    fxDate: row.fx_date ?? undefined,
+   };
+ }
+ 
+@@ -132,6 +136,11 @@ export function productToDb(p: Partial<Product>) {
+   if (p.cropData !== undefined)       extras.crop_data = p.cropData ?? null;
+   if (p.colorGroupIds !== undefined)  extras.color_group_ids = p.colorGroupIds ?? [];
+   if (p.bgColor !== undefined)        extras.bg_color = p.bgColor ?? null;
++  // The store's own price, kept beside the catalogue's converted one.
++  if (p.sourcePrice !== undefined)    extras.source_price = p.sourcePrice ?? null;
++  if (p.sourceCurrency !== undefined) extras.source_currency = p.sourceCurrency || null;
++  if (p.fxRate !== undefined)         extras.fx_rate = p.fxRate ?? null;
++  if (p.fxDate !== undefined)         extras.fx_date = p.fxDate || null;
+   return { ...base, ...extras };
+ }
+ 
+@@ -148,6 +157,10 @@ const OPTIONAL_COLUMNS = [
+   "color_hex",
+   "is_group_primary",
+   "bg_color",
++  "source_price",
++  "source_currency",
++  "fx_rate",
++  "fx_date",
+ ];
+ 
+ /**
 diff --git a/src/lib/server/audit.ts b/src/lib/server/audit.ts
 index 3f2bb65..fbba421 100644
 --- a/src/lib/server/audit.ts
@@ -1881,6 +2204,477 @@ index 3f2bb65..fbba421 100644
    | "categories.updated"
    | "products.recategorized"
    | "products.recategorize_undone"
+diff --git a/src/lib/server/fx.ts b/src/lib/server/fx.ts
+new file mode 100644
+index 0000000..e8c1a26
+--- /dev/null
++++ b/src/lib/server/fx.ts
+@@ -0,0 +1,146 @@
++/**
++ * Exchange rates on the server, for one job: state every catalogue price in
++ * the same currency.
++ *
++ * The catalogue's prices are numbers in a column, and everything downstream
++ * reads them as dollars — the browse filter, the stylist's budget and the
++ * search RPCs all compare `price_min` against `max_price_usd` directly. A
++ * product imported from a store that prices in hryvnia therefore arrived as
++ * four thousand *dollars*, and nothing downstream had any way to tell. So the
++ * conversion belongs at import, before the number is written, rather than in
++ * the page that displays it.
++ *
++ * Rates are quoted the way `open.er-api.com` quotes them — how many units of a
++ * currency one dollar buys, so `rates.UAH = 41` means $1 = ₴41 and a hryvnia
++ * price is divided by it. The whole table is kept rather than the handful the
++ * currency switcher offers: a store can price in złoty or won whether or not a
++ * shopper can ask to *see* złoty, and refusing to convert what we cannot
++ * display is how a wrong number gets into the catalogue.
++ *
++ * `src/lib/context/currency-context.tsx` keeps its own copy of the fallback
++ * numbers. That is deliberate rather than a duplicate to clean up: it is a
++ * browser file, offline when this route is what it cannot reach.
++ */
++
++/** How long a fetched table is reused before asking again. */
++const TTL_MS = 3_600_000;
++
++/** Rates to fall back on, USD base, when the provider is unreachable. */
++export const FALLBACK_RATES: Record<string, number> = {
++  EUR: 0.85, GBP: 0.74, UAH: 41, CZK: 21, JPY: 157, TRY: 45,
++  PLN: 3.6, SEK: 9.5, NOK: 10.2, DKK: 6.4, CHF: 0.8, CAD: 1.37,
++  AUD: 1.5, NZD: 1.65, RUB: 80, INR: 88, CNY: 7.1, KRW: 1380,
++  HKD: 7.8, SGD: 1.28, AED: 3.67, BRL: 5.4, MXN: 18.5, ILS: 3.3,
++  RON: 4.3, HUF: 335, BGN: 1.66, ZAR: 17.5, THB: 32, TWD: 30,
++};
++
++export interface UsdRates {
++  /** Units of the currency per 1 USD. */
++  rates: Record<string, number>;
++  /** The day the provider last updated the table, `YYYY-MM-DD`. */
++  asOf: string;
++  /** False when these are the fallback numbers rather than the provider's. */
++  live: boolean;
++}
++
++let cache: { at: number; value: UsdRates } | null = null;
++/** In-flight request, so a burst of imports makes one call rather than twenty. */
++let inFlight: Promise<UsdRates> | null = null;
++
++function today(): string {
++  return new Date().toISOString().slice(0, 10);
++}
++
++function fallback(): UsdRates {
++  return { rates: FALLBACK_RATES, asOf: today(), live: false };
++}
++
++async function fetchRates(): Promise<UsdRates> {
++  try {
++    const res = await fetch("https://open.er-api.com/v6/latest/USD", {
++      next: { revalidate: 3600 },
++    });
++    if (!res.ok) throw new Error(String(res.status));
++    const data = (await res.json()) as {
++      result?: string;
++      rates?: Record<string, number>;
++      time_last_update_utc?: string;
++    };
++    if (data.result !== "success" || !data.rates) throw new Error("bad response");
++
++    // Keep only the numbers that can divide a price. A zero or a NaN in the
++    // table would turn one product's price into Infinity, which is worse than
++    // not converting it at all.
++    const rates: Record<string, number> = {};
++    for (const [code, value] of Object.entries(data.rates)) {
++      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
++        rates[code.toUpperCase()] = value;
++      }
++    }
++    if (!rates.EUR) throw new Error("table looks empty");
++
++    const stamp = data.time_last_update_utc ? new Date(data.time_last_update_utc) : new Date();
++    const asOf = Number.isNaN(stamp.getTime()) ? today() : stamp.toISOString().slice(0, 10);
++    return { rates, asOf, live: true };
++  } catch {
++    return fallback();
++  }
++}
++
++/**
++ * The rate table, cached for an hour.
++ *
++ * A failed fetch is cached too, and on purpose: a provider that is down stays
++ * down for more than one product, and an import run should not spend a network
++ * timeout per page discovering that again.
++ */
++export async function usdRates(): Promise<UsdRates> {
++  if (cache && Date.now() - cache.at < TTL_MS) return cache.value;
++  if (inFlight) return inFlight;
++
++  inFlight = fetchRates()
++    .then((value) => {
++      cache = { at: Date.now(), value };
++      return value;
++    })
++    .finally(() => {
++      inFlight = null;
++    });
++
++  return inFlight;
++}
++
++export interface Converted {
++  /** The amount in dollars, to the cent. */
++  usd: number;
++  /** The rate used — units of the source currency per 1 USD. */
++  rate: number;
++  /** The day that rate is from, `YYYY-MM-DD`. */
++  asOf: string;
++  /** False when the rate came from the fallback table. */
++  live: boolean;
++}
++
++/**
++ * One amount, in dollars.
++ *
++ * Returns null rather than a guess when the currency is unknown to the
++ * provider — an unconvertible price is a price to leave alone and say so
++ * about, not one to quietly relabel.
++ */
++export async function toUsd(amount: number, currency: string): Promise<Converted | null> {
++  const code = (currency ?? "").trim().toUpperCase();
++  if (!code || !Number.isFinite(amount)) return null;
++
++  const { rates, asOf, live } = await usdRates();
++  if (code === "USD") return { usd: round2(amount), rate: 1, asOf, live };
++
++  const rate = rates[code];
++  if (!rate || rate <= 0) return null;
++
++  return { usd: round2(amount / rate), rate, asOf, live };
++}
++
++function round2(n: number): number {
++  return Math.round(n * 100) / 100;
++}
+diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
+index 448a612..bd9d6d7 100644
+--- a/src/lib/server/parser/extract.ts
++++ b/src/lib/server/parser/extract.ts
+@@ -9,9 +9,9 @@
+  *
+  * No DOM library — pure regex/JSON parsing so it runs in any serverless route.
+  */
+-import type { ParserSiteConfig, RawExtract, ParserRuleField } from "./types";
++import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
+ import { harvestGalleryImages } from "./gallery";
+-import { canonicalColor } from "@/lib/server/product-fields";
++import { canonicalColor, extractCurrencyFromDisplay } from "@/lib/server/product-fields";
+ 
+ // ── HTML entity decoding (the handful that show up in product copy) ───────────
+ 
+@@ -473,6 +473,7 @@ export function extractProduct(
+   html: string,
+   config?: ParserSiteConfig | null,
+   baseUrl?: string,
++  evidence?: PageEvidence,
+ ): RawExtract {
+   const strategies: string[] = [];
+   const jsonld = fromJsonLd(html);
+@@ -509,16 +510,28 @@ export function extractProduct(
+   if (baseUrl) {
+     const anchor = image ? [image, ...images] : images;
+     const productName = pick(ruleVal("name"), jsonld.name, meta.name, micro.name) ?? "";
+-    galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName);
++    galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName, evidence?.images ?? []);
+     if (galleryImages.length) strategies.push("gallery");
+   }
+ 
+   return {
+     name: pick(ruleVal("name"), jsonld.name, meta.name, micro.name),
+     brand: pick(ruleVal("brand"), jsonld.brand, meta.brand, micro.brand),
+-    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price),
++    // The rendered price is the last resort for both fields, and for opposite
++    // reasons. For the amount it is a rescue: a page whose markup states no
++    // price at all would otherwise be skipped entirely. For the currency it is
++    // the common case rather than the exception — plenty of stores put a bare
++    // number in their markup and leave the symbol to the text a shopper reads,
++    // and assuming dollars there is how a hryvnia price became a dollar one.
++    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price, evidence?.priceText),
+     priceOriginal: jsonld.priceOriginal,
+-    currency: pick(ruleVal("currency"), jsonld.currency, meta.currency, micro.currency),
++    currency: pick(
++      ruleVal("currency"),
++      jsonld.currency,
++      meta.currency,
++      micro.currency,
++      evidence?.priceText ? extractCurrencyFromDisplay(evidence.priceText) : undefined,
++    ),
+     image,
+     images: [
+       ...(image && !images.includes(image) ? [image, ...images] : images),
+diff --git a/src/lib/server/parser/gallery.ts b/src/lib/server/parser/gallery.ts
+index 89e9657..afdb8b5 100644
+--- a/src/lib/server/parser/gallery.ts
++++ b/src/lib/server/parser/gallery.ts
+@@ -305,7 +305,15 @@ function collectCandidates(html: string): string[] {
+ 
+   // Inline JSON blobs (Shopify/Next hydration payloads) reference the gallery
+   // as escaped URLs the tag scanners above never see.
+-  const jsonUrlRe = /(?:https?:)?\\?\/\\?\/[^"'\s\\)>]+?\.(?:jpe?g|png|webp|avif)(?:\?[^"'\s\\)>]*)?/gi;
++  //
++  // `\/` has to be allowed for every segment, not just the two after the
++  // scheme. A payload that has been JSON-encoded twice — which is how Shopify
++  // writes one into a script tag — spells a photo
++  // `https:\/\/cdn.shopify.com\/s\/files\/1\/photo.jpg`, and a pattern that
++  // stops at the first backslash never reaches the extension that identifies it
++  // as an image. It matched the scheme and then quietly found nothing.
++  const jsonUrlRe =
++    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
+   while ((m = jsonUrlRe.exec(html))) out.push(m[0].replace(/\\\//g, "/"));
+ 
+   return out;
+@@ -318,12 +326,21 @@ function collectCandidates(html: string): string[] {
+  * search, and are also what a candidate must resemble to be accepted. Returns
+  * only the NEW images, in document order; the caller keeps the trusted ones
+  * first so the primary photo never changes.
++ *
++ * `extra` is for candidates the markup does not contain. The collect extension
++ * reads the rendered page, so it sees what a virtualised carousel mounted, what
++ * a lazy `<img>` finally resolved to, and the URLs inside the hydration payload
++ * it strips before sending — none of which survive into the HTML this function
++ * is given. They are candidates and nothing more: every one of them goes
++ * through the same host and naming tests below, because a page's script data
++ * names the recommendations carousel too.
+  */
+ export function harvestGalleryImages(
+   html: string,
+   baseUrl: string,
+   trusted: string[],
+   productName = "",
++  extra: string[] = [],
+ ): string[] {
+   const trustedUrls = trusted
+     .map((u) => upgradeImageUrl(u, baseUrl))
+@@ -346,7 +363,7 @@ export function harvestGalleryImages(
+   const seen = new Set(trustedUrls.map(imageKey));
+   const out: string[] = [];
+ 
+-  const candidates = collectCandidates(html)
++  const candidates = [...collectCandidates(html), ...extra]
+     .map((raw) => upgradeImageUrl(raw, baseUrl))
+     .filter((u): u is string => !!u);
+ 
+diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
+index 70f8911..62653ee 100644
+--- a/src/lib/server/parser/import-product.ts
++++ b/src/lib/server/parser/import-product.ts
+@@ -11,7 +11,8 @@
+  */
+ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+ import { productToDb, writeProductRow } from "@/lib/data/db";
+-import { colorToHex, colorGroupNamesFor } from "@/lib/server/product-fields";
++import { colorToHex, colorGroupNamesFor, MAX_PRODUCT_IMAGES } from "@/lib/server/product-fields";
++import { toUsd } from "@/lib/server/fx";
+ import { loadRetailerRules, resolveRetailer } from "@/lib/server/retailer-domains";
+ import { mirrorProductImages } from "@/lib/server/storage/product-images";
+ import { storeBackgroundColor } from "@/lib/server/bg-color";
+@@ -81,6 +82,10 @@ export interface ImportResult {
+   imagesMirrored?: number;
+   /** Photos we failed to mirror (kept as original URLs). */
+   imagesFailed?: number;
++  /** Photos stored on the product, mirrored or not. */
++  images?: number;
++  /** The conversion that was applied to the price, or why none was. */
++  priceNote?: string;
+ }
+ 
+ export async function importParsedProduct(
+@@ -104,11 +109,50 @@ export async function importParsedProduct(
+     ? (p.gender as Gender)
+     : undefined;
+ 
+-  const price = Math.max(0, Number(p.price) || 0);
+-  const priceOriginal = Math.max(0, Number(p.priceOriginal) || 0);
+-  const currency = String(p.currency ?? "USD").trim().toUpperCase().slice(0, 3) || "USD";
++  // ── Price, in one currency ──────────────────────────────────────────────────
++  // The catalogue is read as dollars by everything downstream: the browse
++  // filter, the stylist's budget and the search RPCs all compare `price_min`
++  // against a dollar figure without ever consulting the currency column. So a
++  // price arrives here in whatever the store charges and is written in dollars,
++  // with the store's own number kept beside it — on the retailer entry, which
++  // is what a shopper clicking through will actually be asked to pay, and in
++  // the source columns, so a wrong rate can be traced instead of guessed at.
++  const sourcePrice = Math.max(0, Number(p.price) || 0);
++  const sourcePriceOriginal = Math.max(0, Number(p.priceOriginal) || 0);
++  const sourceCurrency = String(p.currency ?? "").trim().toUpperCase().slice(0, 3);
+ 
+-  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, 12);
++  let price = sourcePrice;
++  let priceOriginal = sourcePriceOriginal;
++  let currency = sourceCurrency || "USD";
++  let fxRate: number | null = null;
++  let fxDate: string | null = null;
++  let priceNote: string | undefined;
++
++  if (sourcePrice && sourceCurrency && sourceCurrency !== "USD") {
++    const converted = await toUsd(sourcePrice, sourceCurrency);
++    if (converted) {
++      price = converted.usd;
++      // The same rate for both, rather than a second lookup: an original price
++      // and a sale price converted at rates an hour apart would show a discount
++      // the store never offered.
++      priceOriginal = sourcePriceOriginal
++        ? Math.round((sourcePriceOriginal / converted.rate) * 100) / 100
++        : 0;
++      currency = "USD";
++      fxRate = converted.rate;
++      fxDate = converted.asOf;
++      priceNote = `${sourcePrice} ${sourceCurrency} → $${price}${converted.live ? "" : " (fallback rate)"}`;
++    } else {
++      // A currency with no rate is left exactly as the store stated it. It will
++      // read wrong in a dollar filter, and that is the lesser wrong: relabelling
++      // it as dollars would make it read wrong everywhere, silently.
++      priceNote = `no rate for ${sourceCurrency} — price kept as ${sourcePrice} ${sourceCurrency}`;
++    }
++  } else if (sourcePrice && !sourceCurrency) {
++    priceNote = "the page never stated a currency — price taken as dollars";
++  }
++
++  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
+   let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
+ 
+   // Mirror photos to our storage before writing the row, so the catalog only
+@@ -147,8 +191,10 @@ export async function importParsedProduct(
+     ? [{
+         name: resolved.name,
+         url: sourceUrl,
+-        price,
+-        currency,
++        // What this store charges, in what it charges — the catalogue's price
++        // is a conversion, this is the thing itself.
++        price: sourcePrice || price,
++        currency: sourceCurrency || currency,
+         availability: "in stock",
+         isOfficial: resolved.isOfficial,
+       }]
+@@ -169,6 +215,14 @@ export async function importParsedProduct(
+     priceMin: price,
+     priceMax: priceOriginal > price ? priceOriginal : price,
+     currency,
++    ...(sourceCurrency && sourceCurrency !== "USD"
++      ? {
++          sourcePrice,
++          sourceCurrency,
++          fxRate: fxRate ?? undefined,
++          fxDate: fxDate ?? undefined,
++        }
++      : {}),
+     isNew: true,
+     isSaved: false,
+     gender,
+@@ -243,5 +297,13 @@ export async function importParsedProduct(
+     } catch { /* import_jobs not migrated — non-critical */ }
+   }
+ 
+-  return { ok: true, productId, updated, imagesMirrored, imagesFailed };
++  return {
++    ok: true,
++    productId,
++    updated,
++    imagesMirrored,
++    imagesFailed,
++    images: images.length,
++    priceNote,
++  };
+ }
+diff --git a/src/lib/server/parser/normalize.ts b/src/lib/server/parser/normalize.ts
+index 5e23814..b7cadca 100644
+--- a/src/lib/server/parser/normalize.ts
++++ b/src/lib/server/parser/normalize.ts
+@@ -7,6 +7,7 @@ import {
+   cleanName,
+   parsePrice,
+   extractCurrencyFromDisplay,
++  MAX_PRODUCT_IMAGES,
+   matchCategory,
+   inferGenderFromText,
+   canonicalColor,
+@@ -25,10 +26,20 @@ function absoluteUrl(src: string, base: string): string | null {
+   }
+ }
+ 
++/**
++ * The currency this price is in, or "" when the page never said.
++ *
++ * Returning "" rather than "USD" is the point. The importer converts what it
++ * can into dollars, and a currency it merely assumed would be converted by a
++ * rate that has nothing to do with the price — or, worse, left alone and
++ * counted as dollars, which is how a ₴4,000 coat arrived in the catalogue
++ * priced like a designer one. An empty answer is a fact the caller can act on;
++ * a defaulted one is a guess wearing a fact's clothes.
++ */
+ function normalizeCurrency(rawCurrency: string | undefined, rawPrice: string | undefined): string {
+   const c = (rawCurrency ?? "").trim().toUpperCase();
+   if (/^[A-Z]{3}$/.test(c)) return c;
+-  return (extractCurrencyFromDisplay(rawCurrency ?? "") || extractCurrencyFromDisplay(rawPrice ?? "") || "USD").toUpperCase();
++  return (extractCurrencyFromDisplay(rawCurrency ?? "") || extractCurrencyFromDisplay(rawPrice ?? "")).toUpperCase();
+ }
+ 
+ export function normalizeExtract(
+@@ -48,6 +59,7 @@ export function normalizeExtract(
+   const priceOriginal = parsePrice(raw.priceOriginal ?? "");
+ 
+   const currency = normalizeCurrency(raw.currency, raw.price);
++  if (price && !currency) issues.push("currency not stated");
+ 
+   // Category: explicit override → product name/description → URL path hint.
+   // Prefer the name-based guess; only fall back to the URL path when the name
+@@ -84,7 +96,7 @@ export function normalizeExtract(
+     const key = imageKey(full);
+     if (!byPhoto.has(key)) byPhoto.set(key, full);
+   }
+-  const images = [...byPhoto.values()].slice(0, 12);
++  const images = [...byPhoto.values()].slice(0, MAX_PRODUCT_IMAGES);
+ 
+   const rawAbs = raw.image && absoluteUrl(raw.image, sourceUrl);
+   const rawPrimary = rawAbs ? (upgradeImageUrl(rawAbs, sourceUrl) ?? rawAbs) : null;
+diff --git a/src/lib/server/parser/parse-page.ts b/src/lib/server/parser/parse-page.ts
+index aacafb0..6cb8ad4 100644
+--- a/src/lib/server/parser/parse-page.ts
++++ b/src/lib/server/parser/parse-page.ts
+@@ -18,6 +18,7 @@ import { fetchStorefrontProduct } from "./storefront";
+ import { aiExtract, mergeAiIntoRaw, shouldUseAi } from "./ai-extract";
+ import { matchSiteConfig, effectiveFetchSettings } from "./configs";
+ import type {
++  PageEvidence,
+   ParsedProduct,
+   ParserAiSettings,
+   ParserFetchSettings,
+@@ -68,6 +69,15 @@ export interface ParsePageOptions {
+    * extractor, gallery harvester, colour reading and import run on it.
+    */
+   html?: string;
++  /**
++   * What the browser saw that its markup no longer says.
++   *
++   * Sent with `html` by the collect extension and by nothing else: a server
++   * fetch has no rendered page to read, and a pasted page is markup alone. The
++   * fields are candidates, not answers — they enter the same extractor at the
++   * lowest precedence, behind every structured source.
++   */
++  evidence?: PageEvidence;
+ }
+ 
+ function resolveUrl(href: string, base: string): string {
+@@ -170,7 +180,7 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
+   const single = async (): Promise<ParsedProduct[]> => {
+     // pageUrl lets the extractor harvest the gallery out of the markup —
+     // relative and protocol-relative image URLs need a base to resolve against.
+-    let raw = extractProduct(fetched.html, matched, pageUrl);
++    let raw = extractProduct(fetched.html, matched, pageUrl, opts.evidence);
+ 
+     const aiAllowed = opts.useAi ?? opts.aiSettings.enabled;
+     const aiWanted = aiAllowed && (opts.aiSettings.mode === "always" || shouldUseAi(raw));
 diff --git a/src/lib/server/parser/plan-collection.ts b/src/lib/server/parser/plan-collection.ts
 new file mode 100644
 index 0000000..9004d57
@@ -2434,3 +3228,309 @@ index 61b81ca..c236f7e 100644
  }
  
  export interface SitemapOptions {
+diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
+index b2f84ec..c8afedd 100644
+--- a/src/lib/server/parser/types.ts
++++ b/src/lib/server/parser/types.ts
+@@ -78,6 +78,28 @@ export interface ParserSiteConfig {
+   notes?: string;
+ }
+ 
++/**
++ * What the collect extension saw on the rendered page, beyond its markup.
++ *
++ * The extension strips scripts and styles before sending a page — a retail
++ * page is megabytes of them — and a single-page storefront keeps half of what
++ * we want in exactly that discarded payload. Rather than send it all back,
++ * the extension reads the page while it still has it and sends the findings:
++ * small, already-resolved, and still only evidence. The server decides what to
++ * do with it, the same way it decides about the markup.
++ */
++export interface PageEvidence {
++  /** Image URLs from the live DOM and the page's own data payloads. */
++  images?: string[];
++  /**
++   * The price as the shopper reads it, e.g. "4 000 ₴".
++   *
++   * On plenty of stores this is the only place the currency is stated at all:
++   * the markup carries a bare number and the symbol lives in the rendered text.
++   */
++  priceText?: string;
++}
++
+ /** Raw string fields pulled out of a page before normalisation. */
+ export interface RawExtract {
+   name?: string;
+@@ -149,6 +171,10 @@ export interface CrawlItemResult {
+   reason?: string;
+   usedAi?: boolean;
+   imagesMirrored?: number;
++  /** How many photos the page yielded, before the mirror ran. */
++  images?: number;
++  /** What happened to the price: the conversion applied, or why none was. */
++  priceNote?: string;
+ }
+ 
+ export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {
+diff --git a/src/lib/server/product-fields.ts b/src/lib/server/product-fields.ts
+index 2981d38..60d6a93 100644
+--- a/src/lib/server/product-fields.ts
++++ b/src/lib/server/product-fields.ts
+@@ -48,28 +48,103 @@ export function parsePrice(raw: string): number {
+ }
+ 
+ // ── Extract ISO currency code from a display price string ─────────────────────
+-// Handles: "£49.99", "GBP89.00", "€39,00", "USD 29.99"
++// Handles: "£49.99", "GBP89.00", "€39,00", "USD 29.99", "4 000 ₴", "12 990 руб".
++//
++// Two audiences, one function: the CSV feeds, which write a tidy price string,
++// and the collect extension, which sends the price as the shopper sees it —
++// spaced, localised, sometimes with a word after it. That second case is why
++// the symbol table covers more than the currencies the switcher displays and
++// why there is a loose ISO pass at the end: a store that prices in złoty is a
++// store whose prices we still have to convert correctly.
++
++/** Symbols and words that name a currency outright, most specific first. */
++const CURRENCY_MARKERS: [RegExp, string][] = [
++  // Dollar signs that are not the US dollar. These come before the bare "$"
++  // test, which would otherwise claim every one of them for USD — and each is
++  // guarded by a lookbehind so the "S$" inside "US$" cannot be read as the
++  // Singapore dollar.
++  [/(?<![A-Za-z])US\s?\$/i, "USD"],
++  [/(?<![A-Za-z])CA?\s?\$/i, "CAD"],
++  [/(?<![A-Za-z])AU?\s?\$/i, "AUD"],
++  [/(?<![A-Za-z])NZ\s?\$/i, "NZD"],
++  [/(?<![A-Za-z])HK\s?\$/i, "HKD"],
++  [/(?<![A-Za-z])SG?\s?\$/i, "SGD"],
++  [/(?<![A-Za-z])R\s?\$/, "BRL"],
++  // Symbols.
++  [/£/, "GBP"],
++  [/€/, "EUR"],
++  [/₴/, "UAH"],
++  [/₽/, "RUB"],
++  [/₺/, "TRY"],
++  [/₹/, "INR"],
++  [/₩/, "KRW"],
++  [/₪/, "ILS"],
++  [/(?:CN|RM)\s?¥|元/i, "CNY"],
++  [/¥/, "JPY"],
++  [/zł/, "PLN"],
++  [/Kč/, "CZK"],
++  [/CHF/i, "CHF"],
++  // Words. A price the shopper reads often names its currency in the local
++  // language rather than in ISO, and "грн" is what a Ukrainian store writes.
++  [/грн/i, "UAH"],
++  [/руб/i, "RUB"],
++  [/лв/i, "BGN"],
++  [/kr/, "SEK"],
++  [/\$/, "USD"],
++];
++
++/** Codes the loose pass will accept, so "SALE" cannot become a currency. */
++const ISO_CODES = new Set([
++  "USD", "EUR", "GBP", "UAH", "RUB", "PLN", "CZK", "SEK", "NOK", "DKK", "CHF",
++  "CAD", "AUD", "NZD", "JPY", "CNY", "TRY", "INR", "KRW", "HKD", "SGD", "AED",
++  "BRL", "MXN", "ILS", "RON", "HUF", "BGN", "ZAR", "THB", "TWD",
++]);
+ 
+ export function extractCurrencyFromDisplay(raw: string): string {
+   if (!raw) return "";
+-  if (raw.includes("£")) return "GBP";
+-  if (raw.includes("€")) return "EUR";
+-  if (raw.includes("zł")) return "PLN";
+-  if (raw.includes("₺")) return "TRY";
+-  if (raw.includes("¥")) return "JPY";
+-  if (raw.includes("₴")) return "UAH";
+-  if (raw.includes("Kč")) return "CZK";
+-  if (raw.includes("kr")) return "SEK";
+-  if (raw.includes("$")) return "USD";
++
++  for (const [pattern, code] of CURRENCY_MARKERS) {
++    if (pattern.test(raw)) return code;
++  }
++
++  // A known code standing next to the number: "Price 4 000 UAH incl. VAT".
++  //
++  // This runs before the anchored tests below, and both halves of the condition
++  // earn their place. Without the known-code list, "incl. VAT" at the end of a
++  // line reads as a currency — the anchored suffix test accepts any three
++  // capitals after a full stop. Without the adjacent digit, "Try it on" makes
++  // the Turkish lira out of an English sentence. Together they only fire on a
++  // code that is actually pricing something.
++  const upper = raw.toUpperCase();
++  for (const m of upper.matchAll(/\b[A-Z]{3}\b/g)) {
++    const code = m[0];
++    if (!ISO_CODES.has(code)) continue;
++    const index = m.index ?? 0;
++    const around = upper.slice(Math.max(0, index - 8), index + code.length + 8);
++    if (/\d/.test(around)) return code;
++  }
++
+   // ISO code prefix without space: "GBP89.00"
+   const prefixMatch = raw.match(/^([A-Z]{3})\s*[\d.,]/);
+   if (prefixMatch) return prefixMatch[1];
+-  // ISO code suffix: "29.99 GBP"
++  // ISO code suffix: "29.99 GBP". Last, and deliberately unrestricted: a CSV
++  // feed may quote a currency this file has never heard of, and at the end of a
++  // tidy price string three capitals are what they look like.
+   const suffixMatch = raw.match(/[\d.,]\s*([A-Z]{3})$/);
+   if (suffixMatch) return suffixMatch[1];
+   return "";
+ }
+ 
++// ── How many photos one product keeps ─────────────────────────────────────────
++// A fashion product page carries four to a dozen shots — front, back, detail,
++// on-model, flat-lay — and the catalogue wants the set, not a sample of it.
++// The number is a ceiling on storage and on mirror downloads per import rather
++// than a target, and it is shared so the parser, the importer and the mirror
++// cannot disagree about it: a cap that differs between them shows up as photos
++// that are extracted, stored as URLs, and then never downloaded.
++
++export const MAX_PRODUCT_IMAGES = 20;
++
+ // ── Shared category keyword table ─────────────────────────────────────────────
+ // One ordered rule list, used by BOTH retail-category parsing and product-name
+ // inference, so a garment is classified the same way whichever field it comes
+diff --git a/src/lib/server/storage/product-images.ts b/src/lib/server/storage/product-images.ts
+index 79fb337..8fbeba4 100644
+--- a/src/lib/server/storage/product-images.ts
++++ b/src/lib/server/storage/product-images.ts
+@@ -11,6 +11,7 @@
+  * background-removal tool (`/api/admin/image-tools`) reuses them too.
+  */
+ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
++import { MAX_PRODUCT_IMAGES } from "@/lib/server/product-fields";
+ 
+ export const PRODUCT_IMAGES_BUCKET = "product-images";
+ 
+@@ -150,7 +151,11 @@ export async function mirrorProductImages(input: {
+ }): Promise<MirrorResult> {
+   const imageUrl = (input.imageUrl ?? "").trim();
+   const gallery = (input.images ?? []).map((u) => (u ?? "").trim()).filter(Boolean);
+-  const max = Math.max(1, Math.min(input.max ?? 12, 12));
++  // Shared with the extractor and the importer. A mirror ceiling below theirs
++  // is the quiet kind of bug: the photos are found, stored as URLs, and then
++  // simply never downloaded, so the product looks complete until the retailer
++  // CDN stops serving it.
++  const max = Math.max(1, Math.min(input.max ?? MAX_PRODUCT_IMAGES, MAX_PRODUCT_IMAGES));
+ 
+   if (!isSupabaseConfigured || !supabase) {
+     return { imageUrl, images: gallery, mirrored: 0, failed: 0, attempted: false };
+diff --git a/src/lib/supabase.ts b/src/lib/supabase.ts
+index 67d73f5..3b80900 100644
+--- a/src/lib/supabase.ts
++++ b/src/lib/supabase.ts
+@@ -142,4 +142,9 @@ export type DbProduct = {
+   color_group_ids?: number[] | null;
+   // Backdrop colour sampled from the photo's corners (migration 015)
+   bg_color?: string | null;
++  // What the store charged, before the importer converted it (migration 019)
++  source_price?: number | null;
++  source_currency?: string | null;
++  fx_rate?: number | null;
++  fx_date?: string | null;
+ };
+diff --git a/src/lib/types.ts b/src/lib/types.ts
+index c671fc0..0652a7d 100644
+--- a/src/lib/types.ts
++++ b/src/lib/types.ts
+@@ -162,6 +162,19 @@ export interface Product {
+   priceMin: number;
+   priceMax: number;
+   currency: string;
++  /**
++   * What the store charged, before the importer stated it in dollars.
++   *
++   * `priceMin`/`priceMax` are the catalogue's own figures and are compared
++   * across products, so they are one currency. These three say where a
++   * converted figure came from: the amount, its currency, and the rate and day
++   * used — enough to re-check a price that looks wrong without re-visiting the
++   * store. Absent on products that were priced in dollars to begin with.
++   */
++  sourcePrice?: number;
++  sourceCurrency?: string;
++  fxRate?: number;
++  fxDate?: string;
+   isNew: boolean;
+   isSaved: boolean;
+   styleKeywords: StyleKeyword[];
+diff --git a/supabase/migrations/019_product_source_price.sql b/supabase/migrations/019_product_source_price.sql
+new file mode 100644
+index 0000000..f7ee10b
+--- /dev/null
++++ b/supabase/migrations/019_product_source_price.sql
+@@ -0,0 +1,74 @@
++-- Migration 019: Remember what the store charged, before we said it in dollars.
++--
++-- The catalogue's prices are compared, not just displayed. `price_min` is what
++-- the browse filter sorts on, what the stylist reads as a budget, and what the
++-- search functions in migration 014 test against their `max_price_usd`
++-- argument — which, as the name says, they take to be dollars. Nothing in that
++-- path ever consults `products.currency`.
++--
++-- So a coat imported from a store that prices in hryvnia arrived as four
++-- thousand dollars. The number was right and the unit was invented, and no
++-- query downstream had any way to notice. The importer now converts at import
++-- and writes dollars, which is what those readers already assumed they had.
++--
++-- A conversion is a claim about a moment, though, and these four columns are
++-- what makes it checkable afterwards:
++--
++--   source_price      the amount the store showed
++--   source_currency   the currency it showed it in, ISO 4217
++--   fx_rate           units of that currency per 1 USD, the rate used
++--   fx_date           the day that rate is from
++--
++-- All four are NULL on a product that was priced in dollars to begin with:
++-- there was no conversion, so there is nothing to record. Together they mean a
++-- price that looks wrong can be re-checked — was the rate wrong, or was the
++-- extraction? — without going back to the store to ask.
++
++alter table public.products
++  add column if not exists source_price numeric;
++
++alter table public.products
++  add column if not exists source_currency text;
++
++alter table public.products
++  add column if not exists fx_rate numeric;
++
++alter table public.products
++  add column if not exists fx_date date;
++
++-- The currency is written into a retailer entry and read back as a code, so
++-- its shape is guarded here as well as in the importer. Three letters or
++-- nothing: a symbol or a stray word in this column would be a conversion no
++-- one can reproduce.
++alter table public.products
++  drop constraint if exists products_source_currency_shape;
++
++alter table public.products
++  add constraint products_source_currency_shape
++  check (source_currency is null or source_currency ~ '^[A-Z]{3}$');
++
++-- A rate divides a price, so zero and negative are not merely odd values, they
++-- are an infinity waiting to be written into someone's catalogue.
++alter table public.products
++  drop constraint if exists products_fx_rate_positive;
++
++alter table public.products
++  add constraint products_fx_rate_positive
++  check (fx_rate is null or fx_rate > 0);
++
++comment on column public.products.source_price is
++  'Amount the store charged, in source_currency, before the importer converted it to the dollars held in price_min and price_max. NULL when the store priced in dollars.';
++
++comment on column public.products.source_currency is
++  'ISO 4217 code the store priced in, e.g. UAH or GBP. NULL when the store priced in dollars.';
++
++comment on column public.products.fx_rate is
++  'Units of source_currency per 1 USD used for the conversion, so price_min times fx_rate returns the amount the store showed.';
++
++comment on column public.products.fx_date is
++  'Day the fx_rate is from, so a price that looks wrong can be checked against the rate that produced it.';
++
++-- Without this PostgREST keeps serving from a schema cache that has never heard
++-- of the columns, and the API answers "column products.source_price does not
++-- exist" while the columns plainly exist.
++notify pgrst, 'reload schema';

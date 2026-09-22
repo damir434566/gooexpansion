@@ -5,6 +5,9 @@
  *   normal — 5 products, Crawl-delay 2, one product disallowed by robots.txt
  *   refuse — every product answers 403
  *   many   — 21 products, no Crawl-delay (so the 1.5s floor applies)
+ *   spa    — two pages built the way a single-page storefront builds them:
+ *            the gallery lives in a hydration payload rather than in markup,
+ *            and one of them never states its currency outside rendered text
  *
  * Records every request with a timestamp so the test can assert on pacing.
  */
@@ -17,23 +20,131 @@ const ORIGIN = `http://${HOST}:${PORT}`;
 let mode = "normal";
 let log = [];
 
+/**
+ * The two pages of the `spa` mode, addressed the way the sites they stand in
+ * for address theirs: a Farfetch-shaped `…-item-<code>.aspx`, and an ordinary
+ * product path on a store that prices in hryvnia.
+ */
+const SPA_PATHS = [
+  "/shopping/women/wool-blend-bomber-jacket-item-28530033.aspx",
+  "/product/kurtka-bomber",
+];
+
 function products() {
   if (mode === "many") return Array.from({ length: 21 }, (_, i) => `p${i + 1}`);
   return ["alpha", "beta", "gamma", "delta", "secret-hidden"];
+}
+
+/** The gallery this product has, all of it. Six shots the markup never names. */
+const SPA_GALLERY = [
+  "28530033_54830862_1000.jpg",
+  "28530033_54830863_1000.jpg",
+  "28530033_54830864_1000.jpg",
+  "28530033_54830865_1000.jpg",
+  "28530033_54830866_1000.jpg",
+  "28530033_54830867_1000.jpg",
+];
+
+/** Another product's photos, on the same CDN, in a recommendations rail. */
+const SPA_OTHER = ["31224455_49999901_1000.jpg", "31224455_49999902_1000.jpg"];
+
+/**
+ * A page shaped like a single-page storefront's.
+ *
+ * Everything that matters about it is where the photos are. Structured data
+ * advertises one. The carousel has mounted two, because that is what it had
+ * scrolled past. The remaining six exist only inside `__NEXT_DATA__` — which is
+ * a `<script>`, which is precisely what the content script deletes before
+ * sending the page. Half of them are written with escaped slashes, the way a
+ * JSON payload actually carries a URL.
+ */
+function spaProductPage() {
+  const hero = `${ORIGIN}/cdn/28530033_54830861_1000.jpg`;
+  const ld = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "Wool-blend bomber jacket",
+    brand: { "@type": "Brand", name: "Fixture Atelier" },
+    image: hero,
+    color: "Charcoal",
+    offers: { "@type": "Offer", price: "1290", priceCurrency: "EUR" },
+  });
+
+  // Written by hand rather than with JSON.stringify, because the escaping is
+  // the point: half these URLs carry `\/` for every slash, which is how a
+  // payload that has been JSON-encoded twice spells an address, and is the form
+  // the harvester has to unescape. JSON.stringify would leave slashes plain and
+  // quietly test nothing.
+  const plain = SPA_GALLERY.slice(0, 3).map((f) => `"${ORIGIN}/cdn/${f}"`);
+  const escaped = SPA_GALLERY.slice(3).map(
+    (f) => `"${`${ORIGIN}/cdn/${f}`.replace(/\//g, "\\/")}"`,
+  );
+  const others = SPA_OTHER.map((f) => `{"image":"${ORIGIN}/cdn/${f}"}`);
+  const payload =
+    `{"props":{"pageProps":{"product":{"id":28530033,"images":[` +
+    `${[...plain, ...escaped].join(",")}]},` +
+    `"recommendations":[${others.join(",")}]}}}`;
+
+  const bulk = "/* padding */ var x = '" + "z".repeat(400_000) + "';";
+  return `<!doctype html><html><head>
+<title>Wool-blend bomber jacket | Fixture</title>
+<script type="application/ld+json">${ld}</script>
+<script id="__NEXT_DATA__" type="application/json">${payload}</script>
+<script>${bulk}</script>
+<style>.a{color:#fff}${".b{}".repeat(50_000)}</style>
+</head><body>
+<h1>Wool-blend bomber jacket</h1>
+<div class="carousel">
+  <img src="${hero}" alt="">
+  <img src="${ORIGIN}/cdn/${SPA_GALLERY[0]}" alt="">
+</div>
+<div class="price-area"><span class="price">€1,290</span></div>
+<div class="recommendations">
+  <h2>You may also like</h2>
+  <img src="${ORIGIN}/cdn/${SPA_OTHER[0]}" alt="">
+</div>
+</body></html>`;
+}
+
+/**
+ * A store that prices in hryvnia and says so nowhere a parser can read.
+ *
+ * Its structured data carries a bare `4000` with no `priceCurrency`, which is
+ * common and is exactly the case that used to import as four thousand dollars.
+ * The symbol is in the rendered text, where only a browser can see it.
+ */
+function uahProductPage() {
+  const ld = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "Куртка бомбер",
+    brand: { "@type": "Brand", name: "Fixture UA" },
+    image: `${ORIGIN}/cdn/bomber-ua-1.jpg`,
+    offers: { "@type": "Offer", price: "4000" },
+  });
+  return `<!doctype html><html><head>
+<title>Куртка бомбер</title>
+<script type="application/ld+json">${ld}</script>
+</head><body>
+<h1>Куртка бомбер</h1>
+<div class="product-price"><span class="price">4 000 ₴</span></div>
+<img src="${ORIGIN}/cdn/bomber-ua-1.jpg" alt="">
+<img src="${ORIGIN}/cdn/bomber-ua-2.jpg" alt="">
+</body></html>`;
 }
 
 function robots() {
   const lines = ["User-agent: Googlebot", "Disallow:", "", "User-agent: *"];
   // A path the run must never open. If it does, the test fails loudly.
   lines.push("Disallow: /product/secret-");
-  if (mode !== "many") lines.push("Crawl-delay: 2");
+  if (mode !== "many" && mode !== "spa") lines.push("Crawl-delay: 2");
   lines.push("", `Sitemap: ${ORIGIN}/sitemap.xml`);
   return lines.join("\n") + "\n";
 }
 
 function sitemap() {
-  const locs = products()
-    .map((slug) => `  <url><loc>${ORIGIN}/product/${slug}</loc></url>`)
+  const locs = (mode === "spa" ? SPA_PATHS : products().map((slug) => `/product/${slug}`))
+    .map((pathname) => `  <url><loc>${ORIGIN}${pathname}</loc></url>`)
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${locs}\n  <url><loc>${ORIGIN}/about</loc></url>\n</urlset>\n`;
 }
@@ -82,8 +193,8 @@ function productPage(slug) {
 }
 
 function categoryPage() {
-  const links = products()
-    .map((s) => `<a href="/product/${s}">${s}</a>`)
+  const links = (mode === "spa" ? SPA_PATHS : products().map((s) => `/product/${s}`))
+    .map((href) => `<a href="${href}">${href}</a>`)
     .join("\n");
   return `<!doctype html><html><head><title>All</title></head><body>
 <h1>Everything</h1>${links}
@@ -117,13 +228,23 @@ const server = http.createServer((req, res) => {
   log.push({ path: p, at: Date.now() });
 
   const send = (code, type, body) => {
-    res.writeHead(code, { "content-type": type });
+    // Charset declared, because a page that does not declare one is decoded as
+    // latin-1 by the browser and "Куртка бомбер" arrives as mojibake — which
+    // would have this fixture testing the harness's own encoding bug rather
+    // than the store it stands in for.
+    const withCharset = /^text\//.test(type) ? `${type}; charset=utf-8` : type;
+    res.writeHead(code, { "content-type": withCharset });
     res.end(body);
   };
 
   if (p === "/robots.txt") return send(200, "text/plain", robots());
   if (p === "/sitemap.xml") return send(200, "application/xml", sitemap());
   if (p === "/collections/all" || p === "/") return send(200, "text/html", categoryPage());
+
+  if (mode === "spa") {
+    if (p === SPA_PATHS[0]) return send(200, "text/html", spaProductPage());
+    if (p === SPA_PATHS[1]) return send(200, "text/html", uahProductPage());
+  }
 
   if (p.startsWith("/product/")) {
     if (mode === "refuse") return send(403, "text/html", "<html><body>Go away</body></html>");
@@ -133,7 +254,9 @@ const server = http.createServer((req, res) => {
   }
 
   if (p === "/about") return send(200, "text/html", "<html><body>About</body></html>");
-  if (p.startsWith("/img/")) return send(200, "image/gif", Buffer.from("R0lGODlhAQABAAAAACw=", "base64"));
+  if (p.startsWith("/img/") || p.startsWith("/cdn/")) {
+    return send(200, "image/gif", Buffer.from("R0lGODlhAQABAAAAACw=", "base64"));
+  }
   if (p === "/style.css") return send(200, "text/css", "body{margin:0}");
   return send(404, "text/html", "<html>no</html>");
 });
