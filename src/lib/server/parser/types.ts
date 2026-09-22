@@ -108,6 +108,26 @@ export interface PageEvidence {
    * and is filtered by `pickSizes` on the way in.
    */
   sizes?: string[];
+  /**
+   * The colour this page is showing, in the store's own word for it.
+   *
+   * Stores state it in the swatch a shopper has selected — an `aria-label`, a
+   * `title`, the alt text of a tiny image — or in a line reading "Colour:
+   * Charcoal". None of that is structured data, and the colour is what the
+   * swatch, the colour filter and half the stylist's vocabulary are built from.
+   */
+  colorText?: string;
+  /**
+   * Addresses of the same piece in other colours, as the colour row links them.
+   *
+   * This is the catalogue's variant grouping problem stated by the page itself:
+   * a colour row is usually a row of links, and each link is this product in
+   * another colourway. An address either matches a row we already have or it
+   * does not — no guessing about names. Whatever else shares that row (a care
+   * link, a size guide) is dropped on the way in by the same test the planner
+   * uses to recognise a product address.
+   */
+  variantUrls?: string[];
 }
 
 /** Raw string fields pulled out of a page before normalisation. */
@@ -125,6 +145,8 @@ export interface RawExtract {
   description?: string;
   /** Per-product URL (set when extracting from a listing/ItemList). */
   url?: string;
+  /** Same piece, other colours — the addresses the page's colour row links to. */
+  variantUrls?: string[];
   /** Which strategies contributed at least one field (diagnostics). */
   strategies: string[];
 }
@@ -145,6 +167,8 @@ export interface ParsedProduct {
   priceOriginal: number;
   currency: string;
   sourceUrl: string;
+  /** Same piece, other colours, for the importer to group this row with. */
+  variantUrls: string[];
   /** Diagnostics for the admin UI. */
   strategies: string[];
   issues: string[];
@@ -185,6 +209,8 @@ export interface CrawlItemResult {
   images?: number;
   /** What happened to the price: the conversion applied, or why none was. */
   priceNote?: string;
+  /** Colour siblings this row was grouped with, if any. */
+  variantsLinked?: number;
 }
 
 export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {

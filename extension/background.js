@@ -290,6 +290,8 @@ async function snapshotPage(url) {
       images: Array.isArray(result.images) ? result.images : [],
       priceText: typeof result.priceText === "string" ? result.priceText : "",
       sizes: Array.isArray(result.sizes) ? result.sizes : [],
+      colorText: typeof result.colorText === "string" ? result.colorText : "",
+      variantUrls: Array.isArray(result.variantUrls) ? result.variantUrls : [],
       status,
     };
   } catch (err) {
@@ -434,6 +436,8 @@ async function run({ storeUrl, limit }) {
         images: snap.images,
         priceText: snap.priceText,
         sizes: snap.sizes,
+        colorText: snap.colorText,
+        variantUrls: snap.variantUrls,
       });
       collected++;
       state.done = collected;

@@ -66,7 +66,6 @@ function spaProductPage() {
     name: "Wool-blend bomber jacket",
     brand: { "@type": "Brand", name: "Fixture Atelier" },
     image: hero,
-    color: "Charcoal",
     offers: { "@type": "Offer", price: "1290", priceCurrency: "EUR" },
   });
 
@@ -99,6 +98,13 @@ function spaProductPage() {
   <img src="${ORIGIN}/cdn/${SPA_GALLERY[0]}" alt="">
 </div>
 <div class="price-area"><span class="price">€1,290</span></div>
+<div class="colour-selector" data-testid="colour-picker">
+  <span class="colour-label">Colour: Charcoal</span>
+  <button class="swatch selected" aria-checked="true" aria-label="Charcoal"></button>
+  <a class="swatch" href="/shopping/women/wool-blend-bomber-jacket-item-28530034.aspx" aria-label="Sand"></a>
+  <a class="swatch" href="/shopping/women/wool-blend-bomber-jacket-item-28530035.aspx" aria-label="Navy"></a>
+  <a class="care-link" href="/care">Care instructions</a>
+</div>
 <div class="size-selector" data-testid="size-picker">
   <label class="size-label">Select size</label>
   <button data-size="XS">XS</button>

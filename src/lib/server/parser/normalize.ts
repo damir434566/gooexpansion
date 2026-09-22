@@ -14,6 +14,7 @@ import {
 } from "@/lib/server/product-fields";
 import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
 import { upgradeImageUrl, imageKey } from "./gallery";
+import { looksLikeProductPath, isNonProductPath } from "./extract";
 
 /** Resolve a possibly-relative image URL against the page URL. */
 function absoluteUrl(src: string, base: string): string | null {
@@ -114,6 +115,35 @@ export function normalizeExtract(
   const colors = [colorFrom(raw.color, name, sourceUrl)].filter(Boolean) as string[];
   const sizes = raw.sizes ?? [];
 
+  // Same piece, other colours. Resolved and de-duplicated here so the importer
+  // receives addresses it can compare against `source_url` directly, and never
+  // this page's own address — a product is not a variant of itself.
+  //
+  // A colour row holds more than colourways: a care-instructions anchor, a
+  // size-guide link, a "more colours" page. They are dropped with the same test
+  // the collect planner uses to decide what is a product address at all, rather
+  // than left to fail a lookup later — an address that reaches the importer is
+  // one it will compare against every row it has.
+  const variantUrls = [
+    ...new Set(
+      (raw.variantUrls ?? [])
+        .map((u) => absoluteUrl(u, sourceUrl))
+        .filter((u): u is string => !!u && u !== sourceUrl)
+        .filter((u) => {
+          try {
+            const candidate = new URL(u);
+            // Same store only. The same piece on another retailer's site is not
+            // a colourway of this one — it is the same thing sold twice, which
+            // belongs in the retailer list, not in a swatch row.
+            if (candidate.host !== new URL(sourceUrl).host) return false;
+            return looksLikeProductPath(candidate.pathname) && !isNonProductPath(candidate.pathname);
+          } catch {
+            return false;
+          }
+        }),
+    ),
+  ].slice(0, 20);
+
   return {
     name,
     brand,
@@ -124,6 +154,7 @@ export function normalizeExtract(
     images: images.length ? images : (imageUrl ? [imageUrl] : []),
     colors,
     sizes,
+    variantUrls,
     material: raw.material ?? "",
     price,
     priceOriginal,

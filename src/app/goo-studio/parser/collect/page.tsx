@@ -422,6 +422,9 @@ function detailLine(r: CrawlItemResult): string {
   const parts: string[] = [];
   if (r.images) parts.push(`${r.images} photo${r.images === 1 ? "" : "s"}`);
   if (r.priceNote) parts.push(r.priceNote);
+  if (r.variantsLinked) {
+    parts.push(`grouped with ${r.variantsLinked} colour${r.variantsLinked === 1 ? "" : "s"}`);
+  }
   return parts.join(" · ");
 }
 

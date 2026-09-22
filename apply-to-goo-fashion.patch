@@ -13,10 +13,10 @@ index 021ad7d..be51000 100644
  
 diff --git a/extension/background.js b/extension/background.js
 new file mode 100644
-index 0000000..2cb85a8
+index 0000000..a69a244
 --- /dev/null
 +++ b/extension/background.js
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,529 @@
 +/**
 + * The hands of the operation.
 + *
@@ -309,6 +309,8 @@ index 0000000..2cb85a8
 +      images: Array.isArray(result.images) ? result.images : [],
 +      priceText: typeof result.priceText === "string" ? result.priceText : "",
 +      sizes: Array.isArray(result.sizes) ? result.sizes : [],
++      colorText: typeof result.colorText === "string" ? result.colorText : "",
++      variantUrls: Array.isArray(result.variantUrls) ? result.variantUrls : [],
 +      status,
 +    };
 +  } catch (err) {
@@ -453,6 +455,8 @@ index 0000000..2cb85a8
 +        images: snap.images,
 +        priceText: snap.priceText,
 +        sizes: snap.sizes,
++        colorText: snap.colorText,
++        variantUrls: snap.variantUrls,
 +      });
 +      collected++;
 +      state.done = collected;
@@ -1174,15 +1178,17 @@ index 0000000..cd405fd
 +init().catch((err) => note(err?.message ?? "Could not read this tab."));
 diff --git a/extension/snapshot.js b/extension/snapshot.js
 new file mode 100644
-index 0000000..2c44794
+index 0000000..a0285a9
 --- /dev/null
 +++ b/extension/snapshot.js
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,457 @@
 +/**
 + * Take the rendered page and hand back what the server needs to read it.
 + *
-+ * Four things come out of here: the stripped markup, the photos the page
-+ * actually shows, the price as a shopper reads it, and the sizes it offers.
++ * Out of here comes the stripped markup, and then what the strip destroys:
++ * the photos the page actually shows, the price as a shopper reads it, the
++ * sizes it offers, the colour it is showing and the addresses of the same piece
++ * in other colours.
 + *
 + * ── The markup ───────────────────────────────────────────────────────────────
 + * This is the bookmarklet in `src/lib/parser-bookmarklet.ts`, with the clicking
@@ -1243,6 +1249,12 @@ index 0000000..2c44794
 +
 +  /** Attribute text that marks a corner of the page as being about size. */
 +  const SIZE_HINT = /size|talla|taille|gr[oö]sse|größe|taglia|розмір|размер/i;
++
++  /** The same, for colour. */
++  const COLOR_HINT = /colou?r|farbe|couleur|colore|barva|kolor|cvet|цвет|колір/i;
++
++  /** Most sibling colourway addresses one page can contribute. */
++  const MAX_VARIANTS = 20;
 +
 +  /**
 +   * Image URLs as they appear in a JSON payload, escaped slashes and all.
@@ -1426,6 +1438,135 @@ index 0000000..2c44794
 +    return found;
 +  }
 +
++  /** Elements whose own attributes say they are the colour control. */
++  function colorContainers() {
++    const out = [];
++    const all = document.querySelectorAll(
++      '[class*="colo" i],[id*="colo" i],[data-testid*="colo" i],[aria-label*="colo" i],[class*="swatch" i],[data-option*="colo" i]',
++    );
++    for (const el of all) {
++      const attrs = [
++        typeof el.className === "string" ? el.className : "",
++        el.id || "",
++        el.getAttribute("aria-label") || "",
++        el.getAttribute("data-testid") || "",
++        el.getAttribute("data-option") || "",
++      ].join(" ");
++      if (COLOR_HINT.test(attrs) || /swatch/i.test(attrs)) out.push(el);
++      if (out.length >= 40) break;
++    }
++    return out;
++  }
++
++  /** A colour name has to be a word, not a placeholder or a number. */
++  function usableColor(raw) {
++    const value = String(raw || "").trim().replace(/\s+/g, " ");
++    if (value.length < 2 || value.length > 40) return "";
++    if (/^\d+$/.test(value)) return "";
++    if (/^(?:select|choose|pick|colou?r|цвет|колір)\b/i.test(value)) return "";
++    return value;
++  }
++
++  /**
++   * The colour this page is showing, in the store's own word for it.
++   *
++   * The catalogue builds the swatch, the colour filter and a good part of the
++   * stylist's vocabulary out of this one string, and a store almost never puts
++   * it in structured data. It puts it in the swatch the shopper has selected —
++   * an aria-label, a title, a tiny image's alt text — or in a line that reads
++   * "Colour: Charcoal". All three are asked, in that order: a selected swatch
++   * is the page pointing at its own answer.
++   */
++  function collectColorText() {
++    const containers = colorContainers();
++    const selected = [
++      '[aria-checked="true"]',
++      '[aria-selected="true"]',
++      '[aria-pressed="true"]',
++      '[data-selected="true"]',
++      ".selected",
++      ".active",
++      ".is-selected",
++      ".is-active",
++    ];
++
++    for (const container of containers) {
++      for (const selector of selected) {
++        let el = null;
++        try {
++          el = container.matches(selector) ? container : container.querySelector(selector);
++        } catch {
++          el = null;
++        }
++        if (!el) continue;
++        const img = el.querySelector && el.querySelector("img");
++        const name = usableColor(
++          el.getAttribute("aria-label") ||
++            el.getAttribute("title") ||
++            el.getAttribute("data-color") ||
++            el.getAttribute("data-colour") ||
++            el.getAttribute("data-color-name") ||
++            (img && img.getAttribute("alt")) ||
++            el.innerText ||
++            el.textContent,
++        );
++        if (name) return name;
++      }
++    }
++
++    for (const attr of ["data-selected-color", "data-selected-colour", "data-color-name"]) {
++      const el = document.querySelector(`[${attr}]`);
++      const name = el && usableColor(el.getAttribute(attr));
++      if (name) return name;
++    }
++
++    // "Colour: Charcoal" — the label and its value in one line of text.
++    for (const container of containers) {
++      const text = (container.innerText || container.textContent || "").trim();
++      if (!text || text.length > 200) continue;
++      const match = text.match(
++        /(?:colou?r|farbe|couleur|colore|цвет|колір)\s*[:：]\s*([^\n,;]{2,40})/i,
++      );
++      const name = match && usableColor(match[1]);
++      if (name) return name;
++    }
++
++    return "";
++  }
++
++  /**
++   * The same piece in other colours, as the colour row links it.
++   *
++   * This is the catalogue's variant grouping stated by the page itself, and it
++   * is worth far more than guessing from names: an address either matches a row
++   * we already have or it does not. Junk that happens to live in the colour row
++   * — a size-guide link, a care-instructions anchor — is left in: the server
++   * drops it with the same test the collect planner uses to recognise a product
++   * address, so this side does not need a second opinion about what a product
++   * URL looks like.
++   */
++  function collectVariantUrls() {
++    const out = new Set();
++    const here = location.href.split("#")[0];
++    for (const container of colorContainers()) {
++      if (out.size >= MAX_VARIANTS) break;
++      for (const anchor of container.querySelectorAll("a[href]")) {
++        if (out.size >= MAX_VARIANTS) break;
++        const url = absolute(anchor.getAttribute("href"));
++        if (!url) continue;
++        const clean = url.split("#")[0];
++        if (clean === here) continue;
++        try {
++          if (new URL(clean).origin !== location.origin) continue;
++        } catch {
++          continue;
++        }
++        out.add(clean);
++      }
++    }
++    return [...out];
++  }
++
 +  /**
 +   * The price as the page states it, symbol included.
 +   *
@@ -1474,6 +1615,8 @@ index 0000000..2c44794
 +    const images = collectImages();
 +    const priceText = collectPriceText();
 +    const sizes = collectSizes();
++    const colorText = collectColorText();
++    const variantUrls = collectVariantUrls();
 +
 +    const root = document.documentElement.cloneNode(true);
 +    root.querySelectorAll(DROP).forEach((n) => n.remove());
@@ -1489,6 +1632,8 @@ index 0000000..2c44794
 +      images,
 +      priceText,
 +      sizes,
++      colorText,
++      variantUrls,
 +    };
 +  } catch (err) {
 +    return { ok: false, error: err && err.message ? err.message : String(err) };
@@ -1496,10 +1641,10 @@ index 0000000..2c44794
 +})();
 diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
 new file mode 100644
-index 0000000..d2a51b1
+index 0000000..ab4c7b1
 --- /dev/null
 +++ b/src/app/api/admin/parser/collect/route.ts
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,289 @@
 +/**
 + * Catalogue collection driven from the admin's own browser.
 + *
@@ -1593,6 +1738,17 @@ index 0000000..d2a51b1
 +/** Longest size label accepted. "One size" is nine characters. */
 +const MAX_SIZE_LABEL = 24;
 +
++/** Longest colour name accepted, e.g. "Charcoal marl". */
++const MAX_COLOR_TEXT = 80;
++
++/**
++ * Sibling colourway addresses one page may name.
++ *
++ * Each is looked up against `source_url` exactly, so a junk link that happened
++ * to sit in the colour row matches nothing and costs nothing.
++ */
++const MAX_VARIANT_URLS = 20;
++
 +function str(v: unknown): string {
 +  return typeof v === "string" ? v.trim() : "";
 +}
@@ -1676,6 +1832,13 @@ index 0000000..d2a51b1
 +  const sizeCandidates = (Array.isArray(body?.sizes) ? body.sizes : [])
 +    .filter((v: unknown): v is string => typeof v === "string" && v.length <= MAX_SIZE_LABEL)
 +    .slice(0, MAX_SIZE_CANDIDATES);
++  const colorText = str(body?.colorText).slice(0, MAX_COLOR_TEXT);
++  const variantUrls = (Array.isArray(body?.variantUrls) ? body.variantUrls : [])
++    .filter(
++      (u: unknown): u is string =>
++        typeof u === "string" && u.length <= MAX_IMAGE_URL && /^https?:\/\//.test(u),
++    )
++    .slice(0, MAX_VARIANT_URLS);
 +
 +  const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
 +    getFetchSettings(),
@@ -1699,7 +1862,13 @@ index 0000000..d2a51b1
 +      aiSettings,
 +      useAi,
 +      html,
-+      evidence: { images: imageCandidates, priceText, sizes: sizeCandidates },
++      evidence: {
++        images: imageCandidates,
++        priceText,
++        sizes: sizeCandidates,
++        colorText,
++        variantUrls,
++      },
 +    });
 +
 +    const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
@@ -1732,6 +1901,7 @@ index 0000000..d2a51b1
 +            imagesMirrored: imported.imagesMirrored ?? 0,
 +            images: imported.images ?? 0,
 +            priceNote: imported.priceNote,
++            variantsLinked: imported.variantsLinked ?? 0,
 +          }
 +        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
 +    }
@@ -1824,10 +1994,10 @@ index c329278..1af1e83 100644
  }
 diff --git a/src/app/goo-studio/parser/collect/page.tsx b/src/app/goo-studio/parser/collect/page.tsx
 new file mode 100644
-index 0000000..9bf96e7
+index 0000000..ff2b2a2
 --- /dev/null
 +++ b/src/app/goo-studio/parser/collect/page.tsx
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,446 @@
 +"use client";
 +
 +/**
@@ -2252,6 +2422,9 @@ index 0000000..9bf96e7
 +  const parts: string[] = [];
 +  if (r.images) parts.push(`${r.images} photo${r.images === 1 ? "" : "s"}`);
 +  if (r.priceNote) parts.push(r.priceNote);
++  if (r.variantsLinked) {
++    parts.push(`grouped with ${r.variantsLinked} colour${r.variantsLinked === 1 ? "" : "s"}`);
++  }
 +  return parts.join(" · ");
 +}
 +
@@ -2474,7 +2647,7 @@ index 0000000..e8c1a26
 +  return Math.round(n * 100) / 100;
 +}
 diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
-index 448a612..0fe7ee4 100644
+index 448a612..86ff4a1 100644
 --- a/src/lib/server/parser/extract.ts
 +++ b/src/lib/server/parser/extract.ts
 @@ -9,9 +9,9 @@
@@ -2644,6 +2817,29 @@ index 448a612..0fe7ee4 100644
      image,
      images: [
        ...(image && !images.includes(image) ? [image, ...images] : images),
+@@ -528,9 +617,21 @@ export function extractProduct(
+     // Colour is worth chasing through every layer: it is what the swatch, the
+     // colour filter and half the stylist's vocabulary are built from, and a
+     // page that says "Black" anywhere means it.
+-    color: pick(ruleVal("color"), jsonld.color, meta.color, micro.color, colorFromHtml(html)),
++    // Colour, in order of how directly the page said it. The rendered swatch
++    // comes before the markup scan because it is what the shopper is looking
++    // at: `colorFromHtml` mines attributes and inline JSON, which on a page
++    // with several colourways can name any of them.
++    color: pick(
++      ruleVal("color"),
++      jsonld.color,
++      meta.color,
++      micro.color,
++      evidence?.colorText,
++      colorFromHtml(html),
++    ),
+     material: pick(ruleVal("material"), jsonld.material, micro.material),
+     description: pick(ruleVal("description"), jsonld.description, meta.description),
++    variantUrls: evidence?.variantUrls ?? [],
+     strategies,
+   };
+ }
 diff --git a/src/lib/server/parser/gallery.ts b/src/lib/server/parser/gallery.ts
 index 89e9657..afdb8b5 100644
 --- a/src/lib/server/parser/gallery.ts
@@ -2697,20 +2893,146 @@ index 89e9657..afdb8b5 100644
      .filter((u): u is string => !!u);
  
 diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
-index 70f8911..62653ee 100644
+index 70f8911..c301aa4 100644
 --- a/src/lib/server/parser/import-product.ts
 +++ b/src/lib/server/parser/import-product.ts
-@@ -11,7 +11,8 @@
+@@ -11,7 +11,15 @@
   */
  import { supabase, isSupabaseConfigured } from "@/lib/supabase";
  import { productToDb, writeProductRow } from "@/lib/data/db";
 -import { colorToHex, colorGroupNamesFor } from "@/lib/server/product-fields";
 +import { colorToHex, colorGroupNamesFor, MAX_PRODUCT_IMAGES } from "@/lib/server/product-fields";
 +import { toUsd } from "@/lib/server/fx";
++import {
++  chooseGroup,
++  isColorSiblingByName,
++  variantBaseName,
++  MIN_BASE_NAME,
++  type VariantCandidate,
++} from "./variant-group";
  import { loadRetailerRules, resolveRetailer } from "@/lib/server/retailer-domains";
  import { mirrorProductImages } from "@/lib/server/storage/product-images";
  import { storeBackgroundColor } from "@/lib/server/bg-color";
-@@ -81,6 +82,10 @@ export interface ImportResult {
+@@ -67,6 +75,118 @@ async function colorGroupIdsFor(colors: string[]): Promise<number[] | undefined>
+   return ids.length ? [...new Set(ids)] : undefined;
+ }
+ 
++// ── Colour variants ───────────────────────────────────────────────────────────
++// One colourway per page is how a store sells; one card per piece is how the
++// catalogue shows. The CSV importer forms those groups inside a batch, but a
++// collect run imports one page at a time, so grouping has to happen against the
++// rows already in the table. Two signals, judged in `variant-group.ts`: the
++// addresses the page's own colour row links to, and — only when the store
++// switches colours with script instead of links — brand and base name.
++
++interface VariantRow {
++  id: string;
++  name: string | null;
++  colors: string[] | null;
++  variant_group_id: string | null;
++  is_group_primary: boolean | null;
++}
++
++function toCandidate(row: VariantRow): VariantCandidate {
++  return {
++    id: row.id,
++    name: row.name ?? "",
++    colors: row.colors ?? [],
++    variantGroupId: row.variant_group_id,
++    isGroupPrimary: row.is_group_primary,
++  };
++}
++
++const VARIANT_COLUMNS = "id, name, colors, variant_group_id, is_group_primary";
++
++/** PostgREST pattern metacharacters, so a product named "50% Wool" cannot match everything. */
++function escapeLike(value: string): string {
++  return value.replace(/[%_]/g, (c) => `\\${c}`);
++}
++
++/**
++ * Put this row in a colour group with the siblings it belongs to, and answer how
++ * many it found.
++ *
++ * Runs after the write because it needs our own row id, and returns 0 rather
++ * than throwing: a database without the variant columns, or a group that cannot
++ * be formed, is a missing swatch row — not a reason to fail an import that has
++ * already stored the product.
++ */
++async function linkColorVariants(input: {
++  productId: string;
++  brand: string;
++  name: string;
++  colors: string[];
++  variantUrls: string[];
++  sourceUrl: string | null;
++}): Promise<number> {
++  const siblings = new Map<string, VariantCandidate>();
++
++  try {
++    if (input.variantUrls.length) {
++      const { data } = await supabase!
++        .from("products")
++        .select(VARIANT_COLUMNS)
++        .in("source_url", input.variantUrls.slice(0, 20));
++      for (const row of (data ?? []) as VariantRow[]) {
++        if (row.id !== input.productId) siblings.set(row.id, toCandidate(row));
++      }
++    }
++
++    // Only when the page named no siblings: a store that links its colourways
++    // has already given the exact answer, and the name test is the guess.
++    if (!siblings.size && input.brand) {
++      const base = variantBaseName(input.name);
++      if (base.length >= MIN_BASE_NAME) {
++        const { data } = await supabase!
++          .from("products")
++          .select(VARIANT_COLUMNS)
++          .eq("brand", input.brand)
++          .ilike("name", `${escapeLike(base)}%`)
++          .limit(25);
++        const ours = { brand: input.brand, name: input.name, colors: input.colors };
++        for (const row of (data ?? []) as VariantRow[]) {
++          if (row.id === input.productId) continue;
++          const candidate = toCandidate(row);
++          if (isColorSiblingByName(ours, candidate)) siblings.set(row.id, candidate);
++        }
++      }
++    }
++
++    // A group of one is not a group. When the page links colourways we have not
++    // collected yet, nothing is written now: whichever of them is imported next
++    // will find this row by its address and form the group then.
++    if (!siblings.size) return 0;
++
++    const list = [...siblings.values()];
++    const { groupId, hasPrimary } = chooseGroup(list);
++    const group = groupId ?? crypto.randomUUID();
++
++    const orphans = list.filter((s) => !s.variantGroupId).map((s) => s.id);
++    if (orphans.length) {
++      await supabase!
++        .from("products")
++        .update({ variant_group_id: group })
++        .in("id", orphans.slice(0, 20));
++    }
++
++    const { error } = await supabase!
++      .from("products")
++      .update({ variant_group_id: group, is_group_primary: !hasPrimary })
++      .eq("id", input.productId);
++    if (error) return 0;
++
++    return list.length;
++  } catch {
++    return 0;
++  }
++}
++
+ export interface ImportOptions {
+   /** Download photos into Supabase Storage and store our URLs instead. */
+   mirrorImages?: boolean;
+@@ -81,6 +201,12 @@ export interface ImportResult {
    imagesMirrored?: number;
    /** Photos we failed to mirror (kept as original URLs). */
    imagesFailed?: number;
@@ -2718,10 +3040,12 @@ index 70f8911..62653ee 100644
 +  images?: number;
 +  /** The conversion that was applied to the price, or why none was. */
 +  priceNote?: string;
++  /** How many colour siblings this row was grouped with, if any. */
++  variantsLinked?: number;
  }
  
  export async function importParsedProduct(
-@@ -104,11 +109,50 @@ export async function importParsedProduct(
+@@ -104,11 +230,50 @@ export async function importParsedProduct(
      ? (p.gender as Gender)
      : undefined;
  
@@ -2776,7 +3100,7 @@ index 70f8911..62653ee 100644
    let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
  
    // Mirror photos to our storage before writing the row, so the catalog only
-@@ -147,8 +191,10 @@ export async function importParsedProduct(
+@@ -147,8 +312,10 @@ export async function importParsedProduct(
      ? [{
          name: resolved.name,
          url: sourceUrl,
@@ -2789,7 +3113,7 @@ index 70f8911..62653ee 100644
          availability: "in stock",
          isOfficial: resolved.isOfficial,
        }]
-@@ -169,6 +215,14 @@ export async function importParsedProduct(
+@@ -169,6 +336,14 @@ export async function importParsedProduct(
      priceMin: price,
      priceMax: priceOriginal > price ? priceOriginal : price,
      currency,
@@ -2804,7 +3128,29 @@ index 70f8911..62653ee 100644
      isNew: true,
      isSaved: false,
      gender,
-@@ -243,5 +297,13 @@ export async function importParsedProduct(
+@@ -232,6 +407,21 @@ export async function importParsedProduct(
+     await storeBackgroundColor(productId, imageUrl);
+   }
+ 
++  // Group this colourway with the ones already in the table.
++  let variantsLinked = 0;
++  if (productId) {
++    variantsLinked = await linkColorVariants({
++      productId,
++      brand,
++      name,
++      colors,
++      variantUrls: (Array.isArray(p.variantUrls) ? p.variantUrls : [])
++        .map((u: unknown) => httpUrl(u))
++        .filter(Boolean),
++      sourceUrl,
++    });
++  }
++
+   // Record an import job (best-effort — table is optional, ignore if absent).
+   if (sourceUrl) {
+     try {
+@@ -243,5 +433,14 @@ export async function importParsedProduct(
      } catch { /* import_jobs not migrated — non-critical */ }
    }
  
@@ -2817,13 +3163,14 @@ index 70f8911..62653ee 100644
 +    imagesFailed,
 +    images: images.length,
 +    priceNote,
++    variantsLinked,
 +  };
  }
 diff --git a/src/lib/server/parser/normalize.ts b/src/lib/server/parser/normalize.ts
-index 5e23814..b7cadca 100644
+index 5e23814..a34ab4a 100644
 --- a/src/lib/server/parser/normalize.ts
 +++ b/src/lib/server/parser/normalize.ts
-@@ -7,6 +7,7 @@ import {
+@@ -7,12 +7,14 @@ import {
    cleanName,
    parsePrice,
    extractCurrencyFromDisplay,
@@ -2831,7 +3178,14 @@ index 5e23814..b7cadca 100644
    matchCategory,
    inferGenderFromText,
    canonicalColor,
-@@ -25,10 +26,20 @@ function absoluteUrl(src: string, base: string): string | null {
+ } from "@/lib/server/product-fields";
+ import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
+ import { upgradeImageUrl, imageKey } from "./gallery";
++import { looksLikeProductPath, isNonProductPath } from "./extract";
+ 
+ /** Resolve a possibly-relative image URL against the page URL. */
+ function absoluteUrl(src: string, base: string): string | null {
+@@ -25,10 +27,20 @@ function absoluteUrl(src: string, base: string): string | null {
    }
  }
  
@@ -2853,7 +3207,7 @@ index 5e23814..b7cadca 100644
  }
  
  export function normalizeExtract(
-@@ -48,6 +59,7 @@ export function normalizeExtract(
+@@ -48,6 +60,7 @@ export function normalizeExtract(
    const priceOriginal = parsePrice(raw.priceOriginal ?? "");
  
    const currency = normalizeCurrency(raw.currency, raw.price);
@@ -2861,7 +3215,7 @@ index 5e23814..b7cadca 100644
  
    // Category: explicit override → product name/description → URL path hint.
    // Prefer the name-based guess; only fall back to the URL path when the name
-@@ -84,7 +96,7 @@ export function normalizeExtract(
+@@ -84,7 +97,7 @@ export function normalizeExtract(
      const key = imageKey(full);
      if (!byPhoto.has(key)) byPhoto.set(key, full);
    }
@@ -2870,6 +3224,50 @@ index 5e23814..b7cadca 100644
  
    const rawAbs = raw.image && absoluteUrl(raw.image, sourceUrl);
    const rawPrimary = rawAbs ? (upgradeImageUrl(rawAbs, sourceUrl) ?? rawAbs) : null;
+@@ -102,6 +115,35 @@ export function normalizeExtract(
+   const colors = [colorFrom(raw.color, name, sourceUrl)].filter(Boolean) as string[];
+   const sizes = raw.sizes ?? [];
+ 
++  // Same piece, other colours. Resolved and de-duplicated here so the importer
++  // receives addresses it can compare against `source_url` directly, and never
++  // this page's own address — a product is not a variant of itself.
++  //
++  // A colour row holds more than colourways: a care-instructions anchor, a
++  // size-guide link, a "more colours" page. They are dropped with the same test
++  // the collect planner uses to decide what is a product address at all, rather
++  // than left to fail a lookup later — an address that reaches the importer is
++  // one it will compare against every row it has.
++  const variantUrls = [
++    ...new Set(
++      (raw.variantUrls ?? [])
++        .map((u) => absoluteUrl(u, sourceUrl))
++        .filter((u): u is string => !!u && u !== sourceUrl)
++        .filter((u) => {
++          try {
++            const candidate = new URL(u);
++            // Same store only. The same piece on another retailer's site is not
++            // a colourway of this one — it is the same thing sold twice, which
++            // belongs in the retailer list, not in a swatch row.
++            if (candidate.host !== new URL(sourceUrl).host) return false;
++            return looksLikeProductPath(candidate.pathname) && !isNonProductPath(candidate.pathname);
++          } catch {
++            return false;
++          }
++        }),
++    ),
++  ].slice(0, 20);
++
+   return {
+     name,
+     brand,
+@@ -112,6 +154,7 @@ export function normalizeExtract(
+     images: images.length ? images : (imageUrl ? [imageUrl] : []),
+     colors,
+     sizes,
++    variantUrls,
+     material: raw.material ?? "",
+     price,
+     priceOriginal,
 diff --git a/src/lib/server/parser/parse-page.ts b/src/lib/server/parser/parse-page.ts
 index aacafb0..6cb8ad4 100644
 --- a/src/lib/server/parser/parse-page.ts
@@ -3461,10 +3859,10 @@ index 61b81ca..c236f7e 100644
  
  export interface SitemapOptions {
 diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
-index b2f84ec..1161a9b 100644
+index b2f84ec..1509fcd 100644
 --- a/src/lib/server/parser/types.ts
 +++ b/src/lib/server/parser/types.ts
-@@ -78,6 +78,38 @@ export interface ParserSiteConfig {
+@@ -78,6 +78,58 @@ export interface ParserSiteConfig {
    notes?: string;
  }
  
@@ -3498,12 +3896,50 @@ index b2f84ec..1161a9b 100644
 +   * and is filtered by `pickSizes` on the way in.
 +   */
 +  sizes?: string[];
++  /**
++   * The colour this page is showing, in the store's own word for it.
++   *
++   * Stores state it in the swatch a shopper has selected — an `aria-label`, a
++   * `title`, the alt text of a tiny image — or in a line reading "Colour:
++   * Charcoal". None of that is structured data, and the colour is what the
++   * swatch, the colour filter and half the stylist's vocabulary are built from.
++   */
++  colorText?: string;
++  /**
++   * Addresses of the same piece in other colours, as the colour row links them.
++   *
++   * This is the catalogue's variant grouping problem stated by the page itself:
++   * a colour row is usually a row of links, and each link is this product in
++   * another colourway. An address either matches a row we already have or it
++   * does not — no guessing about names. Whatever else shares that row (a care
++   * link, a size guide) is dropped on the way in by the same test the planner
++   * uses to recognise a product address.
++   */
++  variantUrls?: string[];
 +}
 +
  /** Raw string fields pulled out of a page before normalisation. */
  export interface RawExtract {
    name?: string;
-@@ -149,6 +181,10 @@ export interface CrawlItemResult {
+@@ -93,6 +145,8 @@ export interface RawExtract {
+   description?: string;
+   /** Per-product URL (set when extracting from a listing/ItemList). */
+   url?: string;
++  /** Same piece, other colours — the addresses the page's colour row links to. */
++  variantUrls?: string[];
+   /** Which strategies contributed at least one field (diagnostics). */
+   strategies: string[];
+ }
+@@ -113,6 +167,8 @@ export interface ParsedProduct {
+   priceOriginal: number;
+   currency: string;
+   sourceUrl: string;
++  /** Same piece, other colours, for the importer to group this row with. */
++  variantUrls: string[];
+   /** Diagnostics for the admin UI. */
+   strategies: string[];
+   issues: string[];
+@@ -149,6 +205,12 @@ export interface CrawlItemResult {
    reason?: string;
    usedAi?: boolean;
    imagesMirrored?: number;
@@ -3511,9 +3947,109 @@ index b2f84ec..1161a9b 100644
 +  images?: number;
 +  /** What happened to the price: the conversion applied, or why none was. */
 +  priceNote?: string;
++  /** Colour siblings this row was grouped with, if any. */
++  variantsLinked?: number;
  }
  
  export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {
+diff --git a/src/lib/server/parser/variant-group.ts b/src/lib/server/parser/variant-group.ts
+new file mode 100644
+index 0000000..3f3d93c
+--- /dev/null
++++ b/src/lib/server/parser/variant-group.ts
+@@ -0,0 +1,92 @@
++/**
++ * Deciding whether two rows are the same piece in another colour.
++ *
++ * The catalogue already knows how to show colour variants: rows sharing a
++ * `variant_group_id` collapse into one card with a swatch row, and the CSV
++ * importer forms those groups inside a batch. What had no answer was the URL
++ * importer — a store collected one page at a time, so every colourway arrived
++ * as its own product and the swatch row stayed empty.
++ *
++ * Two signals, and they are not equal:
++ *
++ *   The page's own links.  A colour row is usually a row of links, one per
++ *   colourway, so the page states outright which addresses are the same piece.
++ *   An address either matches a row we have or it does not; there is nothing to
++ *   judge, and this is the signal to trust.
++ *
++ *   Brand and name.  What is left when the store switches colours with script
++ *   instead of links. Here the judgement has to be conservative, because the
++ *   cost of a wrong answer is not a missing swatch — it is two different coats
++ *   shown to a shopper as one coat in two colours.
++ *
++ * So the name test below insists on an exact base-name match rather than a
++ * prefix one. "Wool Coat" and "Wool Coat Long" share a prefix and are two
++ * products; a database query can only ask for the prefix, so this function
++ * throws back what the query over-fetched.
++ *
++ * It also insists the colours differ. Two rows of the same piece in the same
++ * colour are not variants of each other — they are the same thing twice, which
++ * is a different problem with a different fix (the retailer list).
++ */
++import { cleanName, getBaseProductName } from "@/lib/server/product-fields";
++
++export interface VariantCandidate {
++  id: string;
++  name: string;
++  colors: string[];
++  variantGroupId?: string | null;
++  isGroupPrimary?: boolean | null;
++}
++
++/** The name a variant group is keyed on: no size suffix, no colour suffix. */
++export function variantBaseName(name: string): string {
++  return getBaseProductName(cleanName(name ?? "")).trim().toLowerCase();
++}
++
++/**
++ * Shortest base name worth matching on.
++ *
++ * Below this a name is a word, not an identity: "Tee" or "Bag" would group a
++ * brand's whole catalogue into one card.
++ */
++export const MIN_BASE_NAME = 8;
++
++/** True when `candidate` is our piece in a different colour, by name alone. */
++export function isColorSiblingByName(
++  ours: { brand: string; name: string; colors: string[] },
++  candidate: VariantCandidate,
++): boolean {
++  const brand = (ours.brand ?? "").trim();
++  if (!brand) return false;
++
++  const base = variantBaseName(ours.name);
++  if (base.length < MIN_BASE_NAME) return false;
++  if (variantBaseName(candidate.name) !== base) return false;
++
++  const ourColor = (ours.colors[0] ?? "").trim().toLowerCase();
++  const theirColor = (candidate.colors[0] ?? "").trim().toLowerCase();
++  // An unknown colour on either side is not evidence of sameness, but it is not
++  // evidence against it either: the piece is still the same piece, and a group
++  // whose colours are half-known is better than no group at all.
++  if (ourColor && theirColor && ourColor === theirColor) return false;
++
++  return true;
++}
++
++/**
++ * The group these siblings already belong to, if any, and whether anyone has
++ * claimed to be its primary.
++ *
++ * A group with two primaries renders twice in the catalogue, so a row only
++ * claims it when nobody else has.
++ */
++export function chooseGroup(siblings: VariantCandidate[]): {
++  groupId?: string;
++  hasPrimary: boolean;
++} {
++  const groupId = siblings.find((s) => !!s.variantGroupId)?.variantGroupId ?? undefined;
++  const hasPrimary = siblings.some(
++    (s) => s.isGroupPrimary === true && (!groupId || s.variantGroupId === groupId),
++  );
++  return { groupId: groupId ?? undefined, hasPrimary };
++}
 diff --git a/src/lib/server/product-fields.ts b/src/lib/server/product-fields.ts
 index 2981d38..4847022 100644
 --- a/src/lib/server/product-fields.ts

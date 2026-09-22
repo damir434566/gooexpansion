@@ -1,8 +1,10 @@
 /**
  * Take the rendered page and hand back what the server needs to read it.
  *
- * Four things come out of here: the stripped markup, the photos the page
- * actually shows, the price as a shopper reads it, and the sizes it offers.
+ * Out of here comes the stripped markup, and then what the strip destroys:
+ * the photos the page actually shows, the price as a shopper reads it, the
+ * sizes it offers, the colour it is showing and the addresses of the same piece
+ * in other colours.
  *
  * ── The markup ───────────────────────────────────────────────────────────────
  * This is the bookmarklet in `src/lib/parser-bookmarklet.ts`, with the clicking
@@ -63,6 +65,12 @@
 
   /** Attribute text that marks a corner of the page as being about size. */
   const SIZE_HINT = /size|talla|taille|gr[oö]sse|größe|taglia|розмір|размер/i;
+
+  /** The same, for colour. */
+  const COLOR_HINT = /colou?r|farbe|couleur|colore|barva|kolor|cvet|цвет|колір/i;
+
+  /** Most sibling colourway addresses one page can contribute. */
+  const MAX_VARIANTS = 20;
 
   /**
    * Image URLs as they appear in a JSON payload, escaped slashes and all.
@@ -246,6 +254,135 @@
     return found;
   }
 
+  /** Elements whose own attributes say they are the colour control. */
+  function colorContainers() {
+    const out = [];
+    const all = document.querySelectorAll(
+      '[class*="colo" i],[id*="colo" i],[data-testid*="colo" i],[aria-label*="colo" i],[class*="swatch" i],[data-option*="colo" i]',
+    );
+    for (const el of all) {
+      const attrs = [
+        typeof el.className === "string" ? el.className : "",
+        el.id || "",
+        el.getAttribute("aria-label") || "",
+        el.getAttribute("data-testid") || "",
+        el.getAttribute("data-option") || "",
+      ].join(" ");
+      if (COLOR_HINT.test(attrs) || /swatch/i.test(attrs)) out.push(el);
+      if (out.length >= 40) break;
+    }
+    return out;
+  }
+
+  /** A colour name has to be a word, not a placeholder or a number. */
+  function usableColor(raw) {
+    const value = String(raw || "").trim().replace(/\s+/g, " ");
+    if (value.length < 2 || value.length > 40) return "";
+    if (/^\d+$/.test(value)) return "";
+    if (/^(?:select|choose|pick|colou?r|цвет|колір)\b/i.test(value)) return "";
+    return value;
+  }
+
+  /**
+   * The colour this page is showing, in the store's own word for it.
+   *
+   * The catalogue builds the swatch, the colour filter and a good part of the
+   * stylist's vocabulary out of this one string, and a store almost never puts
+   * it in structured data. It puts it in the swatch the shopper has selected —
+   * an aria-label, a title, a tiny image's alt text — or in a line that reads
+   * "Colour: Charcoal". All three are asked, in that order: a selected swatch
+   * is the page pointing at its own answer.
+   */
+  function collectColorText() {
+    const containers = colorContainers();
+    const selected = [
+      '[aria-checked="true"]',
+      '[aria-selected="true"]',
+      '[aria-pressed="true"]',
+      '[data-selected="true"]',
+      ".selected",
+      ".active",
+      ".is-selected",
+      ".is-active",
+    ];
+
+    for (const container of containers) {
+      for (const selector of selected) {
+        let el = null;
+        try {
+          el = container.matches(selector) ? container : container.querySelector(selector);
+        } catch {
+          el = null;
+        }
+        if (!el) continue;
+        const img = el.querySelector && el.querySelector("img");
+        const name = usableColor(
+          el.getAttribute("aria-label") ||
+            el.getAttribute("title") ||
+            el.getAttribute("data-color") ||
+            el.getAttribute("data-colour") ||
+            el.getAttribute("data-color-name") ||
+            (img && img.getAttribute("alt")) ||
+            el.innerText ||
+            el.textContent,
+        );
+        if (name) return name;
+      }
+    }
+
+    for (const attr of ["data-selected-color", "data-selected-colour", "data-color-name"]) {
+      const el = document.querySelector(`[${attr}]`);
+      const name = el && usableColor(el.getAttribute(attr));
+      if (name) return name;
+    }
+
+    // "Colour: Charcoal" — the label and its value in one line of text.
+    for (const container of containers) {
+      const text = (container.innerText || container.textContent || "").trim();
+      if (!text || text.length > 200) continue;
+      const match = text.match(
+        /(?:colou?r|farbe|couleur|colore|цвет|колір)\s*[:：]\s*([^\n,;]{2,40})/i,
+      );
+      const name = match && usableColor(match[1]);
+      if (name) return name;
+    }
+
+    return "";
+  }
+
+  /**
+   * The same piece in other colours, as the colour row links it.
+   *
+   * This is the catalogue's variant grouping stated by the page itself, and it
+   * is worth far more than guessing from names: an address either matches a row
+   * we already have or it does not. Junk that happens to live in the colour row
+   * — a size-guide link, a care-instructions anchor — is left in: the server
+   * drops it with the same test the collect planner uses to recognise a product
+   * address, so this side does not need a second opinion about what a product
+   * URL looks like.
+   */
+  function collectVariantUrls() {
+    const out = new Set();
+    const here = location.href.split("#")[0];
+    for (const container of colorContainers()) {
+      if (out.size >= MAX_VARIANTS) break;
+      for (const anchor of container.querySelectorAll("a[href]")) {
+        if (out.size >= MAX_VARIANTS) break;
+        const url = absolute(anchor.getAttribute("href"));
+        if (!url) continue;
+        const clean = url.split("#")[0];
+        if (clean === here) continue;
+        try {
+          if (new URL(clean).origin !== location.origin) continue;
+        } catch {
+          continue;
+        }
+        out.add(clean);
+      }
+    }
+    return [...out];
+  }
+
   /**
    * The price as the page states it, symbol included.
    *
@@ -294,6 +431,8 @@
     const images = collectImages();
     const priceText = collectPriceText();
     const sizes = collectSizes();
+    const colorText = collectColorText();
+    const variantUrls = collectVariantUrls();
 
     const root = document.documentElement.cloneNode(true);
     root.querySelectorAll(DROP).forEach((n) => n.remove());
@@ -309,6 +448,8 @@
       images,
       priceText,
       sizes,
+      colorText,
+      variantUrls,
     };
   } catch (err) {
     return { ok: false, error: err && err.message ? err.message : String(err) };

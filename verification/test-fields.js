@@ -7,6 +7,7 @@
  * adds its section here, against the real modules out of `verification/compiled`.
  *
  *   Part 1 — sizes
+ *   Part 2 — colour, the colour filter, and grouping colourways
  */
 const path = require("path");
 const Module = require("module");
@@ -21,8 +22,11 @@ Module._resolveFilename = function (request, ...rest) {
 const PARSER = path.join(COMPILED, "lib", "server", "parser");
 const { extractProduct } = require(path.join(PARSER, "extract.js"));
 const { normalizeExtract } = require(path.join(PARSER, "normalize.js"));
-const { looksLikeSize, pickSizes } = require(
+const { looksLikeSize, pickSizes, colorGroupNamesFor } = require(
   path.join(COMPILED, "lib", "server", "product-fields.js"),
+);
+const { isColorSiblingByName, chooseGroup, variantBaseName } = require(
+  path.join(PARSER, "variant-group.js"),
 );
 
 let pass = 0;
@@ -206,6 +210,136 @@ const ruled = normalizeExtract(
   null,
 );
 check("and a recipe rule beats the data", ruled.sizes, ["S", "M", "L"]);
+
+// ── Part 2: colour, the filter, and colourway grouping ───────────────────────
+
+console.log("— the colour the page is showing —");
+
+// A store that states its colour as data is believed first.
+check(
+  "structured data wins",
+  normalizeExtract(
+    extractProduct(page({ ...BASE, color: "Charcoal" }), null, PAGE, { colorText: "Sand" }),
+    PAGE,
+    null,
+  ).colors,
+  ["Charcoal"],
+);
+// Most do not, and then the selected swatch is the only statement there is.
+check(
+  "the swatch the shopper selected",
+  normalizeExtract(extractProduct(page(BASE), null, PAGE, { colorText: "Charcoal" }), PAGE, null)
+    .colors,
+  ["Charcoal"],
+);
+// And it beats the markup scan, which on a page with six colourways can name
+// any of them.
+check(
+  "the swatch beats a scan of the markup",
+  normalizeExtract(
+    extractProduct(page(BASE, '<div data-color="Sand"></div>'), null, PAGE, {
+      colorText: "Charcoal",
+    }),
+    PAGE,
+    null,
+  ).colors,
+  ["Charcoal"],
+);
+check(
+  "a page that says nothing about colour",
+  normalizeExtract(extractProduct(page(BASE), null, PAGE), PAGE, null).colors,
+  [],
+);
+
+console.log("— the colour filter —");
+
+// The filter is built from the colour name, which is why the name mattered.
+check("a store's shade word files under a filter group", colorGroupNamesFor("Charcoal"), ["Grey"]);
+check("two colours file under both, and multicolour", colorGroupNamesFor("Black/White"), [
+  "Black",
+  "White",
+  "Multicolor",
+]);
+check("a two-word colourway is one colour", colorGroupNamesFor("Natural Black"), ["Black"]);
+check("a word that names no colour files nowhere", colorGroupNamesFor("Limited Edition"), []);
+
+console.log("— the addresses of the other colourways —");
+
+const linked = normalizeExtract(
+  extractProduct(page(BASE), null, PAGE, {
+    variantUrls: [
+      "/product/wool-coat-sand",
+      "https://shop.example.com/product/wool-coat-navy",
+      "/product/wool-coat-sand",
+      PAGE,
+      // What else lives in a colour row.
+      "/care",
+      "/size-guide",
+      "/cart",
+      "https://other-shop.example/product/wool-coat-sand",
+    ],
+  }),
+  PAGE,
+  null,
+);
+check("resolved, de-duplicated, and this page is not its own variant", linked.variantUrls, [
+  "https://shop.example.com/product/wool-coat-sand",
+  "https://shop.example.com/product/wool-coat-navy",
+]);
+
+console.log("— deciding that two rows are one piece in two colours —");
+
+const ours = { brand: "Fixture Atelier", name: "Wool Blend Coat - Charcoal", colors: ["Charcoal"] };
+const row = (id, name, colors, extra = {}) => ({ id, name, colors, ...extra });
+
+check("base name drops the colour suffix", variantBaseName("Wool Blend Coat - Charcoal"), "wool blend coat");
+ok(
+  "same base name, different colour → variants",
+  isColorSiblingByName(ours, row("b", "Wool Blend Coat - Sand", ["Sand"])),
+);
+ok(
+  "a longer name that merely starts the same → NOT variants",
+  !isColorSiblingByName(ours, row("b", "Wool Blend Coat Long - Sand", ["Sand"])),
+  "this is what a prefix query over-fetches, and why the exact test exists",
+);
+ok(
+  "same colour → not a colourway of itself",
+  !isColorSiblingByName(ours, row("b", "Wool Blend Coat - Charcoal", ["Charcoal"])),
+);
+ok(
+  "no brand → no grouping by name at all",
+  !isColorSiblingByName({ ...ours, brand: "" }, row("b", "Wool Blend Coat - Sand", ["Sand"])),
+);
+ok(
+  "a name too short to identify anything",
+  !isColorSiblingByName(
+    { brand: "Fixture Atelier", name: "Tee - Black", colors: ["Black"] },
+    row("b", "Tee - White", ["White"]),
+  ),
+);
+ok(
+  "an unknown colour on one side still groups",
+  isColorSiblingByName(ours, row("b", "Wool Blend Coat", [])),
+);
+
+check(
+  "an existing group is joined rather than replaced",
+  chooseGroup([
+    row("b", "Wool Blend Coat - Sand", ["Sand"], { variantGroupId: "g1", isGroupPrimary: true }),
+    row("c", "Wool Blend Coat - Navy", ["Navy"], { variantGroupId: "g1" }),
+  ]),
+  { groupId: "g1", hasPrimary: true },
+);
+check(
+  "siblings with no group yet: a new one, and this row may lead it",
+  chooseGroup([row("b", "Wool Blend Coat - Sand", ["Sand"])]),
+  { groupId: undefined, hasPrimary: false },
+);
+check(
+  "a group whose primary is missing is led by whoever arrives",
+  chooseGroup([row("b", "Wool Blend Coat - Sand", ["Sand"], { variantGroupId: "g2" })]),
+  { groupId: "g2", hasPrimary: false },
+);
 
 console.log("");
 for (const f of failures) console.log(`  ✗ ${f}`);

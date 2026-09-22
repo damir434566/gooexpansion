@@ -617,9 +617,21 @@ export function extractProduct(
     // Colour is worth chasing through every layer: it is what the swatch, the
     // colour filter and half the stylist's vocabulary are built from, and a
     // page that says "Black" anywhere means it.
-    color: pick(ruleVal("color"), jsonld.color, meta.color, micro.color, colorFromHtml(html)),
+    // Colour, in order of how directly the page said it. The rendered swatch
+    // comes before the markup scan because it is what the shopper is looking
+    // at: `colorFromHtml` mines attributes and inline JSON, which on a page
+    // with several colourways can name any of them.
+    color: pick(
+      ruleVal("color"),
+      jsonld.color,
+      meta.color,
+      micro.color,
+      evidence?.colorText,
+      colorFromHtml(html),
+    ),
     material: pick(ruleVal("material"), jsonld.material, micro.material),
     description: pick(ruleVal("description"), jsonld.description, meta.description),
+    variantUrls: evidence?.variantUrls ?? [],
     strategies,
   };
 }

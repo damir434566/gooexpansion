@@ -91,6 +91,17 @@ const MAX_SIZE_CANDIDATES = 60;
 /** Longest size label accepted. "One size" is nine characters. */
 const MAX_SIZE_LABEL = 24;
 
+/** Longest colour name accepted, e.g. "Charcoal marl". */
+const MAX_COLOR_TEXT = 80;
+
+/**
+ * Sibling colourway addresses one page may name.
+ *
+ * Each is looked up against `source_url` exactly, so a junk link that happened
+ * to sit in the colour row matches nothing and costs nothing.
+ */
+const MAX_VARIANT_URLS = 20;
+
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
@@ -174,6 +185,13 @@ export async function POST(req: Request) {
   const sizeCandidates = (Array.isArray(body?.sizes) ? body.sizes : [])
     .filter((v: unknown): v is string => typeof v === "string" && v.length <= MAX_SIZE_LABEL)
     .slice(0, MAX_SIZE_CANDIDATES);
+  const colorText = str(body?.colorText).slice(0, MAX_COLOR_TEXT);
+  const variantUrls = (Array.isArray(body?.variantUrls) ? body.variantUrls : [])
+    .filter(
+      (u: unknown): u is string =>
+        typeof u === "string" && u.length <= MAX_IMAGE_URL && /^https?:\/\//.test(u),
+    )
+    .slice(0, MAX_VARIANT_URLS);
 
   const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
     getFetchSettings(),
@@ -197,7 +215,13 @@ export async function POST(req: Request) {
       aiSettings,
       useAi,
       html,
-      evidence: { images: imageCandidates, priceText, sizes: sizeCandidates },
+      evidence: {
+        images: imageCandidates,
+        priceText,
+        sizes: sizeCandidates,
+        colorText,
+        variantUrls,
+      },
     });
 
     const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
@@ -230,6 +254,7 @@ export async function POST(req: Request) {
             imagesMirrored: imported.imagesMirrored ?? 0,
             images: imported.images ?? 0,
             priceNote: imported.priceNote,
+            variantsLinked: imported.variantsLinked ?? 0,
           }
         : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
     }

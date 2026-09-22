@@ -522,6 +522,27 @@ async function main() {
     uah && JSON.stringify(uah.sizes),
   );
 
+  // Colour and colourways. This page states its colour nowhere but in the
+  // swatch a shopper has selected — no `color` in its structured data, as on
+  // the site it stands for.
+  check(
+    "the colour came off the selected swatch",
+    !!bomber && JSON.stringify(bomber.colors) === JSON.stringify(["Charcoal"]),
+    bomber && JSON.stringify(bomber.colors),
+  );
+  check(
+    "the other colourways were taken from the colour row's links",
+    !!bomber &&
+      bomber.variantUrls.length === 2 &&
+      bomber.variantUrls.every((u) => /item-2853003[45]\.aspx$/.test(u)),
+    bomber && JSON.stringify(bomber.variantUrls),
+  );
+  check(
+    "and the care link that shares that row is not one of them",
+    !!bomber && !bomber.variantUrls.some((u) => u.includes("/care")),
+    bomber && JSON.stringify(bomber.variantUrls),
+  );
+
   collect.close(); popup.close();
 
   console.log(`\n  ${pass} passed, ${failures.length} failed\n`);

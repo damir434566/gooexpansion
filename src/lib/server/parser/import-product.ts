@@ -13,6 +13,13 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { productToDb, writeProductRow } from "@/lib/data/db";
 import { colorToHex, colorGroupNamesFor, MAX_PRODUCT_IMAGES } from "@/lib/server/product-fields";
 import { toUsd } from "@/lib/server/fx";
+import {
+  chooseGroup,
+  isColorSiblingByName,
+  variantBaseName,
+  MIN_BASE_NAME,
+  type VariantCandidate,
+} from "./variant-group";
 import { loadRetailerRules, resolveRetailer } from "@/lib/server/retailer-domains";
 import { mirrorProductImages } from "@/lib/server/storage/product-images";
 import { storeBackgroundColor } from "@/lib/server/bg-color";
@@ -68,6 +75,118 @@ async function colorGroupIdsFor(colors: string[]): Promise<number[] | undefined>
   return ids.length ? [...new Set(ids)] : undefined;
 }
 
+// ── Colour variants ───────────────────────────────────────────────────────────
+// One colourway per page is how a store sells; one card per piece is how the
+// catalogue shows. The CSV importer forms those groups inside a batch, but a
+// collect run imports one page at a time, so grouping has to happen against the
+// rows already in the table. Two signals, judged in `variant-group.ts`: the
+// addresses the page's own colour row links to, and — only when the store
+// switches colours with script instead of links — brand and base name.
+
+interface VariantRow {
+  id: string;
+  name: string | null;
+  colors: string[] | null;
+  variant_group_id: string | null;
+  is_group_primary: boolean | null;
+}
+
+function toCandidate(row: VariantRow): VariantCandidate {
+  return {
+    id: row.id,
+    name: row.name ?? "",
+    colors: row.colors ?? [],
+    variantGroupId: row.variant_group_id,
+    isGroupPrimary: row.is_group_primary,
+  };
+}
+
+const VARIANT_COLUMNS = "id, name, colors, variant_group_id, is_group_primary";
+
+/** PostgREST pattern metacharacters, so a product named "50% Wool" cannot match everything. */
+function escapeLike(value: string): string {
+  return value.replace(/[%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Put this row in a colour group with the siblings it belongs to, and answer how
+ * many it found.
+ *
+ * Runs after the write because it needs our own row id, and returns 0 rather
+ * than throwing: a database without the variant columns, or a group that cannot
+ * be formed, is a missing swatch row — not a reason to fail an import that has
+ * already stored the product.
+ */
+async function linkColorVariants(input: {
+  productId: string;
+  brand: string;
+  name: string;
+  colors: string[];
+  variantUrls: string[];
+  sourceUrl: string | null;
+}): Promise<number> {
+  const siblings = new Map<string, VariantCandidate>();
+
+  try {
+    if (input.variantUrls.length) {
+      const { data } = await supabase!
+        .from("products")
+        .select(VARIANT_COLUMNS)
+        .in("source_url", input.variantUrls.slice(0, 20));
+      for (const row of (data ?? []) as VariantRow[]) {
+        if (row.id !== input.productId) siblings.set(row.id, toCandidate(row));
+      }
+    }
+
+    // Only when the page named no siblings: a store that links its colourways
+    // has already given the exact answer, and the name test is the guess.
+    if (!siblings.size && input.brand) {
+      const base = variantBaseName(input.name);
+      if (base.length >= MIN_BASE_NAME) {
+        const { data } = await supabase!
+          .from("products")
+          .select(VARIANT_COLUMNS)
+          .eq("brand", input.brand)
+          .ilike("name", `${escapeLike(base)}%`)
+          .limit(25);
+        const ours = { brand: input.brand, name: input.name, colors: input.colors };
+        for (const row of (data ?? []) as VariantRow[]) {
+          if (row.id === input.productId) continue;
+          const candidate = toCandidate(row);
+          if (isColorSiblingByName(ours, candidate)) siblings.set(row.id, candidate);
+        }
+      }
+    }
+
+    // A group of one is not a group. When the page links colourways we have not
+    // collected yet, nothing is written now: whichever of them is imported next
+    // will find this row by its address and form the group then.
+    if (!siblings.size) return 0;
+
+    const list = [...siblings.values()];
+    const { groupId, hasPrimary } = chooseGroup(list);
+    const group = groupId ?? crypto.randomUUID();
+
+    const orphans = list.filter((s) => !s.variantGroupId).map((s) => s.id);
+    if (orphans.length) {
+      await supabase!
+        .from("products")
+        .update({ variant_group_id: group })
+        .in("id", orphans.slice(0, 20));
+    }
+
+    const { error } = await supabase!
+      .from("products")
+      .update({ variant_group_id: group, is_group_primary: !hasPrimary })
+      .eq("id", input.productId);
+    if (error) return 0;
+
+    return list.length;
+  } catch {
+    return 0;
+  }
+}
+
 export interface ImportOptions {
   /** Download photos into Supabase Storage and store our URLs instead. */
   mirrorImages?: boolean;
@@ -86,6 +205,8 @@ export interface ImportResult {
   images?: number;
   /** The conversion that was applied to the price, or why none was. */
   priceNote?: string;
+  /** How many colour siblings this row was grouped with, if any. */
+  variantsLinked?: number;
 }
 
 export async function importParsedProduct(
@@ -286,6 +407,21 @@ export async function importParsedProduct(
     await storeBackgroundColor(productId, imageUrl);
   }
 
+  // Group this colourway with the ones already in the table.
+  let variantsLinked = 0;
+  if (productId) {
+    variantsLinked = await linkColorVariants({
+      productId,
+      brand,
+      name,
+      colors,
+      variantUrls: (Array.isArray(p.variantUrls) ? p.variantUrls : [])
+        .map((u: unknown) => httpUrl(u))
+        .filter(Boolean),
+      sourceUrl,
+    });
+  }
+
   // Record an import job (best-effort — table is optional, ignore if absent).
   if (sourceUrl) {
     try {
@@ -305,5 +441,6 @@ export async function importParsedProduct(
     imagesFailed,
     images: images.length,
     priceNote,
+    variantsLinked,
   };
 }
