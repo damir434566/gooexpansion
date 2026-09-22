@@ -151,6 +151,25 @@ export interface PageEvidence {
    * where the material comes from.
    */
   specs?: SpecPair[];
+  /**
+   * The breadcrumb trail, outermost first: ["Women", "Clothing", "Jackets"].
+   *
+   * What it answers is the category and the subcategory. The name classifies
+   * well when a store names its pieces plainly ("Wool bomber jacket") and not at
+   * all when it does not ("Aurelio"), and the trail is the store's own filing of
+   * the same piece. A `BreadcrumbList` in JSON-LD survives the strip and is read
+   * from the markup; this is for the stores that render a trail and describe it
+   * nowhere.
+   */
+  breadcrumbs?: string[];
+  /**
+   * The brand as the page prints it, from a marked element or the designer link.
+   *
+   * Structured data carries it more often than not, which is why brand was only
+   * *sometimes* missing — and when it is missing it is usually because the store
+   * treats the designer as a link rather than as a property.
+   */
+  brandText?: string;
 }
 
 /** Raw string fields pulled out of a page before normalisation. */
@@ -170,6 +189,8 @@ export interface RawExtract {
   url?: string;
   /** Same piece, other colours — the addresses the page's colour row links to. */
   variantUrls?: string[];
+  /** The breadcrumb trail, outermost first, from the markup or the rendered page. */
+  breadcrumbs?: string[];
   /** Which strategies contributed at least one field (diagnostics). */
   strategies: string[];
 }
@@ -179,6 +200,14 @@ export interface ParsedProduct {
   name: string;
   brand: string;
   category: Category;
+  /**
+   * The tree's label for what this piece is — "Bomber Jackets", "Sneakers".
+   *
+   * Absent when nothing in the tree names it. The importer used to write no
+   * subcategory at all, so every product filed under whatever its category
+   * implied.
+   */
+  subcategory?: string;
   gender?: Gender;
   description: string;
   imageUrl: string;

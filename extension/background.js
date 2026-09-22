@@ -294,6 +294,8 @@ async function snapshotPage(url) {
       variantUrls: Array.isArray(result.variantUrls) ? result.variantUrls : [],
       descriptionText: typeof result.descriptionText === "string" ? result.descriptionText : "",
       specs: Array.isArray(result.specs) ? result.specs : [],
+      breadcrumbs: Array.isArray(result.breadcrumbs) ? result.breadcrumbs : [],
+      brandText: typeof result.brandText === "string" ? result.brandText : "",
       status,
     };
   } catch (err) {
@@ -442,6 +444,8 @@ async function run({ storeUrl, limit }) {
         variantUrls: snap.variantUrls,
         descriptionText: snap.descriptionText,
         specs: snap.specs,
+        breadcrumbs: snap.breadcrumbs,
+        brandText: snap.brandText,
       });
       collected++;
       state.done = collected;

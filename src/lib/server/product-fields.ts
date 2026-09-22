@@ -164,6 +164,10 @@ export const MATERIAL_KEYS =
 export const COLOR_KEYS =
   /^(?:colou?r|colourway|colorway|farbe|couleur|colore|kolor|barva|цвет|колір|кольор)(?![\p{L}\p{N}])/iu;
 
+/** Key names that mean the brand, which a spec table often states outright. */
+export const BRAND_KEYS =
+  /^(?:brand|designer|label|maker|manufacturer|marke|marque|marca|бренд|виробник|производитель|торгов\p{L}*\s*марка)(?![\p{L}\p{N}])/iu;
+
 /** Key names that mean the store's own article number. */
 export const CODE_KEYS =
   /^(?:sku|mpn|style\s*(?:code|no|number|#)?|product\s*(?:code|id|number)|item\s*(?:code|no|number)|article\s*(?:code|no|number)?|ref(?:erence)?|артикул|код\s*товару|код\s*товара)(?![\p{L}\p{N}])/iu;

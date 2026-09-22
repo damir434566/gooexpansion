@@ -13,6 +13,12 @@ import {
   canonicalColor,
 } from "@/lib/server/product-fields";
 import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
+import {
+  isBuiltInBucket,
+  matchSubcategoryLabel,
+  resolveSubcategory,
+  subcategoryToValue,
+} from "@/lib/categories";
 import { upgradeImageUrl, imageKey } from "./gallery";
 import { looksLikeProductPath, isNonProductPath } from "./extract";
 
@@ -62,6 +68,26 @@ export function normalizeExtract(
   const currency = normalizeCurrency(raw.currency, raw.price);
   if (price && !currency) issues.push("currency not stated");
 
+  // The store's own filing of this piece, outermost crumb first. Two things are
+  // read out of it, and both used to be guessed from the name alone or not
+  // answered at all: which category the piece belongs to when its name says
+  // nothing ("Aurelio"), and which of that category's labels it is.
+  const trail = (raw.breadcrumbs ?? []).filter(Boolean).join(" > ");
+
+  // The tree's label for what this piece is: from the name first, which is more
+  // specific ("Wool-blend bomber jacket" over a trail's "Jackets"), then from the
+  // trail, which answers for a name that classifies nothing ("Aurelio").
+  const subLabelFromName = matchSubcategoryLabel(name);
+  const subLabelFromTrail = trail ? matchSubcategoryLabel(trail) : undefined;
+  const labelValues = subcategoryToValue();
+  const labelCategory = (label: string | undefined) => {
+    const value = label ? labelValues[label] : undefined;
+    // The admin can point a tree label at a bucket outside the code's own list.
+    // Such a bucket works in the browse filters and is unknown to `Category`, so
+    // a label's bucket is only adopted when the code knows it.
+    return value && isBuiltInBucket(value) ? (value as ParsedProduct["category"]) : undefined;
+  };
+
   // Category: explicit override → product name/description → URL path hint.
   // Prefer the name-based guess; only fall back to the URL path when the name
   // yields nothing, and to "accessories" only when neither signal matches.
@@ -71,8 +97,22 @@ export function normalizeExtract(
     // 92% against 88% when the description is included: descriptions name-drop
     // other garments, and "pairs well with shorts" reads as "is shorts".
     matchCategory(name) ??
+    // A label out of the tree, from the name and then from the trail, before any
+    // more keyword matching. A tree label is the catalogue's own vocabulary
+    // rather than a hint read out of a string, and it carries the category with
+    // it: a trail ending in "Blazers" files the piece under blazers, where a
+    // keyword pass over the same words would stop at the first thing that looks
+    // like outerwear.
+    labelCategory(subLabelFromName) ??
+    labelCategory(subLabelFromTrail) ??
+    matchCategory(trail) ??
     matchCategory(safePath(sourceUrl)) ??
     "accessories";
+
+  // `resolveSubcategory` drops a label the tree does not claim for this
+  // category, so a disagreement — an override that says footwear over a name
+  // that says bomber jacket — resolves rather than persists.
+  const subcategory = resolveSubcategory(category, subLabelFromName ?? subLabelFromTrail);
 
   // Gender: explicit override → URL → name/description
   const gender =
@@ -155,6 +195,7 @@ export function normalizeExtract(
     colors,
     sizes,
     variantUrls,
+    ...(subcategory ? { subcategory } : {}),
     material: raw.material ?? "",
     price,
     priceOriginal,

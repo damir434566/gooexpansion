@@ -105,6 +105,13 @@ const MAX_VARIANT_URLS = 20;
 /** Longest rendered description accepted; the importer stores 5,000 characters. */
 const MAX_DESCRIPTION = 5_000;
 
+/** Breadcrumbs accepted, and the length of one crumb. */
+const MAX_BREADCRUMBS = 12;
+const MAX_CRUMB = 60;
+
+/** Longest brand name accepted. */
+const MAX_BRAND_TEXT = 80;
+
 /** Spec rows accepted, and the size of one row's halves. */
 const MAX_SPECS = 40;
 const MAX_SPEC_KEY = 40;
@@ -208,6 +215,11 @@ export async function POST(req: Request) {
     }))
     .filter((row: { key: string; value: string }) => !!row.key && !!row.value)
     .slice(0, MAX_SPECS);
+  const breadcrumbs = (Array.isArray(body?.breadcrumbs) ? body.breadcrumbs : [])
+    .map((v: unknown) => str(v).slice(0, MAX_CRUMB))
+    .filter(Boolean)
+    .slice(0, MAX_BREADCRUMBS);
+  const brandText = str(body?.brandText).slice(0, MAX_BRAND_TEXT);
 
   const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
     getFetchSettings(),
@@ -239,6 +251,8 @@ export async function POST(req: Request) {
         variantUrls,
         descriptionText,
         specs,
+        breadcrumbs,
+        brandText,
       },
     });
 

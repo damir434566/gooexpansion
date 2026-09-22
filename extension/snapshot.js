@@ -75,6 +75,9 @@
   /** Most spec rows one page can contribute. */
   const MAX_SPECS = 40;
 
+  /** Most breadcrumbs one page can contribute. */
+  const MAX_CRUMBS = 12;
+
   /** Longest description kept. The importer stores five thousand characters. */
   const MAX_DESCRIPTION = 5000;
 
@@ -528,6 +531,75 @@
   }
 
   /**
+   * The breadcrumb trail, outermost crumb first.
+   *
+   * This is the store filing the piece for us, and it is the answer to two
+   * fields the name cannot always give: a product called "Aurelio" says nothing
+   * about being a jacket, and "Women / Clothing / Jackets" says it plainly. A
+   * `BreadcrumbList` in JSON-LD survives the strip and the server reads it from
+   * the markup; this is for the many stores that render a trail and describe it
+   * in no structured form at all.
+   *
+   * The current page's own crumb — the last one, usually the product name, often
+   * not a link — is kept: it costs nothing, and the classifier reads the name
+   * first anyway.
+   */
+  function collectBreadcrumbs() {
+    const containers = [
+      ...document.querySelectorAll(
+        'nav[aria-label*="breadcrumb" i],[class*="breadcrumb" i],[id*="breadcrumb" i],[data-testid*="breadcrumb" i],[itemtype*="BreadcrumbList" i],[class*="крошк" i]',
+      ),
+    ];
+
+    for (const container of containers) {
+      const items = container.querySelectorAll('li,a,[itemprop="name"],span');
+      const crumbs = [];
+      const seen = new Set();
+      for (const item of items) {
+        // A <li> wrapping an <a> would otherwise contribute the same crumb twice.
+        if (item.querySelector && item.querySelector("a,li,span")) continue;
+        const text = squash(textOf(item)).replace(/^[/>·|»–-]\s*|\s*[/>·|»–-]$/g, "");
+        if (!text || text.length > 60) continue;
+        const key = text.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        crumbs.push(text);
+        if (crumbs.length >= MAX_CRUMBS) break;
+      }
+      // One crumb is a link, not a trail — "Home" on its own says nothing.
+      if (crumbs.length >= 2) return crumbs;
+    }
+    return [];
+  }
+
+  /**
+   * The brand, where the page prints it rather than declares it.
+   *
+   * Structured data usually carries the brand, which is why it was only
+   * sometimes missing; when it is missing it is because the store treats the
+   * designer as a link to a designer page instead of as a property of the
+   * product. The spec table answers this too, and the server reads it from
+   * there — this covers the stores with no table either.
+   */
+  function collectBrandText() {
+    const marked = document.querySelector('[itemprop="brand"]');
+    const markedText = squash(textOf(marked));
+    if (markedText && markedText.length <= 60) return markedText;
+
+    const candidates = document.querySelectorAll(
+      '[class*="brand" i],[class*="designer" i],[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]',
+    );
+    for (const el of candidates) {
+      const text = squash(textOf(el));
+      // A brand is a name, not a sentence, and not the word "Brand" alone.
+      if (!text || text.length < 2 || text.length > 60) continue;
+      if (/^(?:brand|designer|бренд|дизайнер)$/i.test(text)) continue;
+      return text;
+    }
+    return "";
+  }
+
+  /**
    * The price as the page states it, symbol included.
    *
    * The symbol is the point. A store that writes `<span>4 000 ₴</span>` and a
@@ -579,6 +651,8 @@
     const variantUrls = collectVariantUrls();
     const descriptionText = collectDescription();
     const specs = collectSpecs();
+    const breadcrumbs = collectBreadcrumbs();
+    const brandText = collectBrandText();
 
     const root = document.documentElement.cloneNode(true);
     root.querySelectorAll(DROP).forEach((n) => n.remove());
@@ -598,6 +672,8 @@
       variantUrls,
       descriptionText,
       specs,
+      breadcrumbs,
+      brandText,
     };
   } catch (err) {
     return { ok: false, error: err && err.message ? err.message : String(err) };

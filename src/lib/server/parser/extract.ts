@@ -19,6 +19,7 @@ import {
   compositionFromText,
   MATERIAL_KEYS,
   COLOR_KEYS,
+  BRAND_KEYS,
 } from "@/lib/server/product-fields";
 
 // ── HTML entity decoding (the handful that show up in product copy) ───────────
@@ -264,6 +265,56 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
   if (min !== Infinity) result.price = String(min);
   if (max > 0 && max > (min === Infinity ? 0 : min)) result.priceOriginal = String(max);
   return result;
+}
+
+/**
+ * The breadcrumb trail out of a `BreadcrumbList`, outermost first.
+ *
+ * Worth reading from the markup even though the extension also sends the
+ * rendered trail: `application/ld+json` survives the content script's strip, so
+ * this works on a pasted page and on a server fetch too, where there is no
+ * rendered page to read.
+ *
+ * The last crumb is usually the product itself and is kept — it costs nothing
+ * for classification, since the name is matched first anyway.
+ */
+function breadcrumbsFromJsonLd(html: string): string[] {
+  for (const block of parseJsonLdBlocks(html)) {
+    const candidates: JsonObject[] = [block];
+    const graph = block["@graph"];
+    if (Array.isArray(graph)) graph.forEach((g) => isObj(g) && candidates.push(g));
+
+    for (const node of candidates) {
+      if (!typeIncludes(node, "BreadcrumbList")) continue;
+      const list = node.itemListElement;
+      if (!Array.isArray(list)) continue;
+
+      const crumbs: { position: number; name: string }[] = [];
+      list.forEach((entry, index) => {
+        if (!isObj(entry)) return;
+        // `item` is either the thing itself or just its URL; only the former
+        // carries a name worth reading.
+        const name =
+          asString(entry.name) ?? (isObj(entry.item) ? asString(entry.item.name) : undefined);
+        if (!name) return;
+        const stated =
+          typeof entry.position === "number" ? entry.position : Number(asString(entry.position));
+        crumbs.push({
+          position: Number.isFinite(stated) ? (stated as number) : index + 1,
+          name: name.trim(),
+        });
+      });
+
+      if (crumbs.length) {
+        return crumbs
+          .sort((a, b) => a.position - b.position)
+          .map((c) => c.name)
+          .filter(Boolean)
+          .slice(0, 12);
+      }
+    }
+  }
+  return [];
 }
 
 /**
@@ -610,7 +661,23 @@ export function extractProduct(
 
   return {
     name: pick(ruleVal("name"), jsonld.name, meta.name, micro.name),
-    brand: pick(ruleVal("brand"), jsonld.brand, meta.brand, micro.brand),
+    // Brand: structured data first, then the two places a store that treats its
+    // designer as a link rather than a property puts it — the spec table, and
+    // whatever the page marks as the brand.
+    brand: pick(
+      ruleVal("brand"),
+      jsonld.brand,
+      meta.brand,
+      micro.brand,
+      specValue(evidence?.specs, BRAND_KEYS),
+      evidence?.brandText,
+    ),
+    // The trail, from the markup and from the rendered page. The markup's own
+    // BreadcrumbList wins: it is data rather than a reading of the layout.
+    breadcrumbs: (() => {
+      const fromMarkup = breadcrumbsFromJsonLd(html);
+      return fromMarkup.length ? fromMarkup : (evidence?.breadcrumbs ?? []).slice(0, 12);
+    })(),
     // The rendered price is the last resort for both fields, and for opposite
     // reasons. For the amount it is a rescue: a page whose markup states no
     // price at all would otherwise be skipped entirely. For the currency it is

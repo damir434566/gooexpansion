@@ -92,6 +92,12 @@ function spaProductPage() {
 <script>${bulk}</script>
 <style>.a{color:#fff}${".b{}".repeat(50_000)}</style>
 </head><body>
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <a href="/women">Women</a>
+  <a href="/women/clothing">Clothing</a>
+  <a href="/women/clothing/jackets">Jackets</a>
+  <span>Wool-blend bomber jacket</span>
+</nav>
 <h1>Wool-blend bomber jacket</h1>
 <div class="carousel">
   <img src="${hero}" alt="">
@@ -149,7 +155,6 @@ function uahProductPage() {
     "@context": "https://schema.org",
     "@type": "Product",
     name: "Куртка бомбер",
-    brand: { "@type": "Brand", name: "Fixture UA" },
     image: `${ORIGIN}/cdn/bomber-ua-1.jpg`,
     offers: { "@type": "Offer", price: "4000" },
     hasVariant: [
@@ -162,6 +167,7 @@ function uahProductPage() {
 <script type="application/ld+json">${ld}</script>
 </head><body>
 <h1>Куртка бомбер</h1>
+<a class="brand-link" href="/brands/fixture-ua">Fixture UA</a>
 <div class="product-price"><span class="price">4 000 ₴</span></div>
 <img src="${ORIGIN}/cdn/bomber-ua-1.jpg" alt="">
 <img src="${ORIGIN}/cdn/bomber-ua-2.jpg" alt="">

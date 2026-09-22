@@ -9,6 +9,7 @@
  *   Part 1 — sizes
  *   Part 2 — colour, the colour filter, and grouping colourways
  *   Part 3 — description and material
+ *   Part 4 — brand, category, subcategory
  */
 const path = require("path");
 const Module = require("module");
@@ -31,7 +32,9 @@ const {
   compositionFromText,
   MATERIAL_KEYS,
   CODE_KEYS,
+  BRAND_KEYS,
 } = require(path.join(COMPILED, "lib", "server", "product-fields.js"));
+const { matchSubcategoryLabel } = require(path.join(COMPILED, "lib", "categories.js"));
 const { isColorSiblingByName, chooseGroup, variantBaseName } = require(
   path.join(PARSER, "variant-group.js"),
 );
@@ -492,6 +495,126 @@ check(
     null,
   ).colors,
   ["Sand"],
+);
+
+// ── Part 4: brand, category, subcategory ────────────────────────────────────
+
+console.log("— what the tree calls this piece —");
+
+check("the most specific label wins", matchSubcategoryLabel("Wool-blend bomber jacket"), "Bomber Jackets");
+check("a trail in the plural", matchSubcategoryLabel("Women > Clothing > Jackets"), "Jackets");
+check("a label that is already plural", matchSubcategoryLabel("Sneakers"), "Sneakers");
+// "dress" is not the plural of "dres": the singulariser must not mangle it.
+check("a midi dress is a Dress", matchSubcategoryLabel("Midi dress"), "Dresses");
+check("a watch is a Watch", matchSubcategoryLabel("Chronograph watch"), "Watches");
+check("a hyphen is a word break", matchSubcategoryLabel("Cotton T-shirt"), "T-Shirts");
+check("either half of a two-name label", matchSubcategoryLabel("Oversized hoodie"), "Hoodies & Sweatshirts");
+check("nothing in the tree names a scarf", matchSubcategoryLabel("Silk scarf"), undefined);
+check("a group name is not a label", matchSubcategoryLabel("Accessories"), undefined);
+
+console.log("— the trail out of the markup —");
+
+const withTrail = (crumbs, ld = BASE, body = "") =>
+  `<html><head><script type="application/ld+json">${JSON.stringify(
+    ld,
+  )}</script><script type="application/ld+json">${JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: crumbs,
+  })}</script></head><body>${body}</body></html>`;
+
+// Positions are honoured, not document order: a store that lists its crumbs out
+// of order still has a trail that reads outermost first.
+const trailOutOfOrder = withTrail([
+  { "@type": "ListItem", position: 3, name: "Jackets" },
+  { "@type": "ListItem", position: 1, name: "Women" },
+  { "@type": "ListItem", position: 2, item: { name: "Clothing" } },
+]);
+check(
+  "sorted by position, and a name on the item counts",
+  extractProduct(trailOutOfOrder, null, PAGE).breadcrumbs,
+  ["Women", "Clothing", "Jackets"],
+);
+check(
+  "the rendered trail is used when the markup has none",
+  extractProduct(page(BASE), null, PAGE, { breadcrumbs: ["Women", "Clothing", "Coats"] }).breadcrumbs,
+  ["Women", "Clothing", "Coats"],
+);
+check(
+  "and the markup's own trail wins over the rendered one",
+  extractProduct(trailOutOfOrder, null, PAGE, { breadcrumbs: ["Men", "Shoes"] }).breadcrumbs,
+  ["Women", "Clothing", "Jackets"],
+);
+
+console.log("— category and subcategory —");
+
+// A name that classifies nothing: the trail is the only signal there is.
+const named = { ...BASE, name: "Aurelio" };
+const fromTrail = normalizeExtract(
+  extractProduct(withTrail([{ "@type": "ListItem", position: 1, name: "Women" }, { "@type": "ListItem", position: 2, name: "Clothing" }, { "@type": "ListItem", position: 3, name: "Blazers" }], named), null, PAGE),
+  PAGE,
+  null,
+);
+check("category out of the trail", fromTrail.category, "blazers");
+check("and the subcategory with it", fromTrail.subcategory, "Blazers");
+
+const fromName = normalizeExtract(
+  extractProduct(page({ ...BASE, name: "Wool-blend bomber jacket" }), null, PAGE),
+  PAGE,
+  null,
+);
+check("the name still classifies first", [fromName.category, fromName.subcategory], [
+  "outerwear",
+  "Bomber Jackets",
+]);
+
+// The tree refuses a label that does not belong to the category, so an override
+// cannot leave a product filed under a contradiction.
+const overridden = normalizeExtract(
+  extractProduct(page({ ...BASE, name: "Wool-blend bomber jacket" }), null, PAGE),
+  PAGE,
+  { id: "r", name: "recipe", domain: "shop.example.com", enabled: true, categoryOverride: "footwear" },
+);
+check("an override drops a label that contradicts it", [overridden.category, overridden.subcategory], [
+  "footwear",
+  undefined,
+]);
+
+check(
+  "a piece the tree cannot name keeps no subcategory",
+  normalizeExtract(extractProduct(page({ ...BASE, name: "Silk scarf" }), null, PAGE), PAGE, null)
+    .subcategory,
+  undefined,
+);
+
+console.log("— brand —");
+
+check("brand keys, including a spec table in Ukrainian", specValue([{ key: "Бренд", value: "Fixture UA" }], BRAND_KEYS), "Fixture UA");
+check(
+  "structured data first",
+  normalizeExtract(
+    extractProduct(page({ ...BASE, brand: { "@type": "Brand", name: "Acne Studios" } }), null, PAGE, {
+      brandText: "Something Else",
+    }),
+    PAGE,
+    null,
+  ).brand,
+  "Acne Studios",
+);
+check(
+  "then the spec table",
+  normalizeExtract(
+    extractProduct(page(BASE), null, PAGE, { specs: [{ key: "Designer", value: "Acne Studios" }] }),
+    PAGE,
+    null,
+  ).brand,
+  "Acne Studios",
+);
+check(
+  "then the designer link the page prints",
+  normalizeExtract(extractProduct(page(BASE), null, PAGE, { brandText: "Acne Studios" }), PAGE, null)
+    .brand,
+  "Acne Studios",
 );
 
 console.log("");

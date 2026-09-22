@@ -567,6 +567,25 @@ async function main() {
     uah && JSON.stringify(uah.material),
   );
 
+  // Brand, category and subcategory. The trail is rendered and described in no
+  // structured form; the other store treats its brand as a link rather than a
+  // property, which is the case where brand used to arrive empty.
+  check(
+    "the extension read the breadcrumb trail",
+    !!bomber && bomber.breadcrumbCount >= 3,
+    bomber && `crumbs: ${bomber.breadcrumbCount}`,
+  );
+  check(
+    "the piece is filed under a category AND a subcategory",
+    !!bomber && bomber.category === "outerwear" && bomber.subcategory === "Bomber Jackets",
+    bomber && JSON.stringify({ category: bomber.category, subcategory: bomber.subcategory }),
+  );
+  check(
+    "the brand came off the designer link, where structured data has none",
+    !!uah && uah.brand === "Fixture UA",
+    uah && JSON.stringify(uah.brand),
+  );
+
   collect.close(); popup.close();
 
   console.log(`\n  ${pass} passed, ${failures.length} failed\n`);

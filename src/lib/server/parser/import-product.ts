@@ -230,6 +230,12 @@ export async function importParsedProduct(
     ? (p.gender as Gender)
     : undefined;
 
+  // The tree's label for what this piece is. The parser resolves it against the
+  // category tree, so whatever arrives here is a label that tree claims — but it
+  // is written only when there is one, because an empty string means "cleared"
+  // to `productToDb` and would erase a label an admin had set by hand.
+  const subcategory = String(p.subcategory ?? "").trim().slice(0, 60);
+
   // ── Price, in one currency ──────────────────────────────────────────────────
   // The catalogue is read as dollars by everything downstream: the browse
   // filter, the stylist's budget and the search RPCs all compare `price_min`
@@ -327,6 +333,7 @@ export async function importParsedProduct(
     name,
     brand: brand as Product["brand"],
     category,
+    ...(subcategory ? { subcategory } : {}),
     description: String(p.description ?? "").slice(0, 5000),
     imageUrl,
     images: images.length ? images : (imageUrl ? [imageUrl] : []),

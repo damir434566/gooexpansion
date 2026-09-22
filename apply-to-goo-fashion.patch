@@ -13,10 +13,10 @@ index 021ad7d..be51000 100644
  
 diff --git a/extension/background.js b/extension/background.js
 new file mode 100644
-index 0000000..5763d44
+index 0000000..880b966
 --- /dev/null
 +++ b/extension/background.js
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,537 @@
 +/**
 + * The hands of the operation.
 + *
@@ -313,6 +313,8 @@ index 0000000..5763d44
 +      variantUrls: Array.isArray(result.variantUrls) ? result.variantUrls : [],
 +      descriptionText: typeof result.descriptionText === "string" ? result.descriptionText : "",
 +      specs: Array.isArray(result.specs) ? result.specs : [],
++      breadcrumbs: Array.isArray(result.breadcrumbs) ? result.breadcrumbs : [],
++      brandText: typeof result.brandText === "string" ? result.brandText : "",
 +      status,
 +    };
 +  } catch (err) {
@@ -461,6 +463,8 @@ index 0000000..5763d44
 +        variantUrls: snap.variantUrls,
 +        descriptionText: snap.descriptionText,
 +        specs: snap.specs,
++        breadcrumbs: snap.breadcrumbs,
++        brandText: snap.brandText,
 +      });
 +      collected++;
 +      state.done = collected;
@@ -1182,10 +1186,10 @@ index 0000000..cd405fd
 +init().catch((err) => note(err?.message ?? "Could not read this tab."));
 diff --git a/extension/snapshot.js b/extension/snapshot.js
 new file mode 100644
-index 0000000..d7b25c1
+index 0000000..896887b
 --- /dev/null
 +++ b/extension/snapshot.js
-@@ -0,0 +1,605 @@
+@@ -0,0 +1,681 @@
 +/**
 + * Take the rendered page and hand back what the server needs to read it.
 + *
@@ -1262,6 +1266,9 @@ index 0000000..d7b25c1
 +
 +  /** Most spec rows one page can contribute. */
 +  const MAX_SPECS = 40;
++
++  /** Most breadcrumbs one page can contribute. */
++  const MAX_CRUMBS = 12;
 +
 +  /** Longest description kept. The importer stores five thousand characters. */
 +  const MAX_DESCRIPTION = 5000;
@@ -1716,6 +1723,75 @@ index 0000000..d7b25c1
 +  }
 +
 +  /**
++   * The breadcrumb trail, outermost crumb first.
++   *
++   * This is the store filing the piece for us, and it is the answer to two
++   * fields the name cannot always give: a product called "Aurelio" says nothing
++   * about being a jacket, and "Women / Clothing / Jackets" says it plainly. A
++   * `BreadcrumbList` in JSON-LD survives the strip and the server reads it from
++   * the markup; this is for the many stores that render a trail and describe it
++   * in no structured form at all.
++   *
++   * The current page's own crumb — the last one, usually the product name, often
++   * not a link — is kept: it costs nothing, and the classifier reads the name
++   * first anyway.
++   */
++  function collectBreadcrumbs() {
++    const containers = [
++      ...document.querySelectorAll(
++        'nav[aria-label*="breadcrumb" i],[class*="breadcrumb" i],[id*="breadcrumb" i],[data-testid*="breadcrumb" i],[itemtype*="BreadcrumbList" i],[class*="крошк" i]',
++      ),
++    ];
++
++    for (const container of containers) {
++      const items = container.querySelectorAll('li,a,[itemprop="name"],span');
++      const crumbs = [];
++      const seen = new Set();
++      for (const item of items) {
++        // A <li> wrapping an <a> would otherwise contribute the same crumb twice.
++        if (item.querySelector && item.querySelector("a,li,span")) continue;
++        const text = squash(textOf(item)).replace(/^[/>·|»–-]\s*|\s*[/>·|»–-]$/g, "");
++        if (!text || text.length > 60) continue;
++        const key = text.toLowerCase();
++        if (seen.has(key)) continue;
++        seen.add(key);
++        crumbs.push(text);
++        if (crumbs.length >= MAX_CRUMBS) break;
++      }
++      // One crumb is a link, not a trail — "Home" on its own says nothing.
++      if (crumbs.length >= 2) return crumbs;
++    }
++    return [];
++  }
++
++  /**
++   * The brand, where the page prints it rather than declares it.
++   *
++   * Structured data usually carries the brand, which is why it was only
++   * sometimes missing; when it is missing it is because the store treats the
++   * designer as a link to a designer page instead of as a property of the
++   * product. The spec table answers this too, and the server reads it from
++   * there — this covers the stores with no table either.
++   */
++  function collectBrandText() {
++    const marked = document.querySelector('[itemprop="brand"]');
++    const markedText = squash(textOf(marked));
++    if (markedText && markedText.length <= 60) return markedText;
++
++    const candidates = document.querySelectorAll(
++      '[class*="brand" i],[class*="designer" i],[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]',
++    );
++    for (const el of candidates) {
++      const text = squash(textOf(el));
++      // A brand is a name, not a sentence, and not the word "Brand" alone.
++      if (!text || text.length < 2 || text.length > 60) continue;
++      if (/^(?:brand|designer|бренд|дизайнер)$/i.test(text)) continue;
++      return text;
++    }
++    return "";
++  }
++
++  /**
 +   * The price as the page states it, symbol included.
 +   *
 +   * The symbol is the point. A store that writes `<span>4 000 ₴</span>` and a
@@ -1767,6 +1843,8 @@ index 0000000..d7b25c1
 +    const variantUrls = collectVariantUrls();
 +    const descriptionText = collectDescription();
 +    const specs = collectSpecs();
++    const breadcrumbs = collectBreadcrumbs();
++    const brandText = collectBrandText();
 +
 +    const root = document.documentElement.cloneNode(true);
 +    root.querySelectorAll(DROP).forEach((n) => n.remove());
@@ -1786,6 +1864,8 @@ index 0000000..d7b25c1
 +      variantUrls,
 +      descriptionText,
 +      specs,
++      breadcrumbs,
++      brandText,
 +    };
 +  } catch (err) {
 +    return { ok: false, error: err && err.message ? err.message : String(err) };
@@ -1793,10 +1873,10 @@ index 0000000..d7b25c1
 +})();
 diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
 new file mode 100644
-index 0000000..114fd24
+index 0000000..eebd7d7
 --- /dev/null
 +++ b/src/app/api/admin/parser/collect/route.ts
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,321 @@
 +/**
 + * Catalogue collection driven from the admin's own browser.
 + *
@@ -1904,6 +1984,13 @@ index 0000000..114fd24
 +/** Longest rendered description accepted; the importer stores 5,000 characters. */
 +const MAX_DESCRIPTION = 5_000;
 +
++/** Breadcrumbs accepted, and the length of one crumb. */
++const MAX_BREADCRUMBS = 12;
++const MAX_CRUMB = 60;
++
++/** Longest brand name accepted. */
++const MAX_BRAND_TEXT = 80;
++
 +/** Spec rows accepted, and the size of one row's halves. */
 +const MAX_SPECS = 40;
 +const MAX_SPEC_KEY = 40;
@@ -2007,6 +2094,11 @@ index 0000000..114fd24
 +    }))
 +    .filter((row: { key: string; value: string }) => !!row.key && !!row.value)
 +    .slice(0, MAX_SPECS);
++  const breadcrumbs = (Array.isArray(body?.breadcrumbs) ? body.breadcrumbs : [])
++    .map((v: unknown) => str(v).slice(0, MAX_CRUMB))
++    .filter(Boolean)
++    .slice(0, MAX_BREADCRUMBS);
++  const brandText = str(body?.brandText).slice(0, MAX_BRAND_TEXT);
 +
 +  const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
 +    getFetchSettings(),
@@ -2038,6 +2130,8 @@ index 0000000..114fd24
 +        variantUrls,
 +        descriptionText,
 +        specs,
++        breadcrumbs,
++        brandText,
 +      },
 +    });
 +
@@ -2614,6 +2708,101 @@ index 0000000..ff2b2a2
 +    </span>
 +  );
 +}
+diff --git a/src/lib/categories.ts b/src/lib/categories.ts
+index 20adf85..9029a0c 100644
+--- a/src/lib/categories.ts
++++ b/src/lib/categories.ts
+@@ -159,6 +159,90 @@ export const DEFAULT_CATEGORY_GROUPS: CategoryGroup[] = [
+   },
+ ];
+ 
++/**
++ * Every form a word might be the plural of, itself included.
++ *
++ * A set rather than one answer, because English plurals in -ies are ambiguous
++ * and the tree contains both kinds: "accessories" is the plural of "accessory",
++ * "hoodies" of "hoodie", and no rule tells them apart without a dictionary. Both
++ * candidates are generated and a match on either counts — cheaper and more
++ * honest than a stemmer that is right most of the time.
++ *
++ * What it must never do is mangle a word that merely ends in s: "dress" is not
++ * the plural of "dres".
++ */
++function wordForms(word: string): string[] {
++  const forms = new Set<string>([word]);
++  if (word.length > 3) {
++    if (word.endsWith("ies")) {
++      forms.add(`${word.slice(0, -3)}y`);
++      forms.add(word.slice(0, -1));
++    } else if (/(?:s|x|z|ch|sh)es$/.test(word)) {
++      forms.add(word.slice(0, -2));
++    } else if (!word.endsWith("ss") && word.endsWith("s")) {
++      forms.add(word.slice(0, -1));
++    }
++  }
++  return [...forms];
++}
++
++/**
++ * The tree's own label for what a piece of text is describing.
++ *
++ * The importer had no answer for subcategory at all — it wrote none, so every
++ * product landed with the field empty and the filter showed it under whatever
++ * its category implied. The label is in the text: a product called "Wool-blend
++ * bomber jacket" is a Bomber Jacket, and a breadcrumb reading "Women / Clothing
++ * / Jackets" says Jackets.
++ *
++ * Matching is by words, not by substring, and the most specific label wins — a
++ * bomber jacket matches both "Jackets" and "Bomber Jackets", and the second is
++ * the answer. Labels that name two things ("Hoodies & Sweatshirts") match on
++ * either half, and a trailing plural is stripped from every word so "Sneakers"
++ * finds a sneaker.
++ *
++ * Returns undefined when nothing in the tree is named, which is the honest
++ * answer for "Silk scarf" in a tree with no scarf label — the caller then falls
++ * back to what the category implies.
++ */
++export function matchSubcategoryLabel(
++  text: string,
++  tree: CategoryGroup[] = DEFAULT_CATEGORY_GROUPS,
++): string | undefined {
++  const words = (value: string) =>
++    value
++      .toLowerCase()
++      .replace(/[^\p{L}\p{N}]+/gu, " ")
++      .trim()
++      .split(" ")
++      .filter(Boolean);
++
++  // Both sides are expanded, not just the label: a page writes "Jackets" where
++  // the tree writes "Jackets" and the product name writes "jacket", and all
++  // three have to meet.
++  const textWords = words(text ?? "");
++  if (textWords.join(" ").length < 3) return undefined;
++  const haystack = new Set(textWords.flatMap(wordForms));
++
++  const hasWord = (word: string) => wordForms(word).some((form) => haystack.has(form));
++
++  let best: { label: string; score: number } | undefined;
++
++  for (const group of tree) {
++    for (const item of group.items) {
++      // "Hoodies & Sweatshirts" is two names for one label.
++      for (const half of item.label.split(/\s*&\s*/)) {
++        const parts = words(half);
++        if (!parts.length) continue;
++        if (!parts.every(hasWord)) continue;
++        if (!best || parts.length > best.score) best = { label: item.label, score: parts.length };
++      }
++    }
++  }
++
++  return best?.label;
++}
++
+ /** Subcategory label → the category value it filters on. */
+ export function subcategoryToValue(
+   tree: CategoryGroup[] = DEFAULT_CATEGORY_GROUPS,
 diff --git a/src/lib/data/db.ts b/src/lib/data/db.ts
 index 35bcec8..98e4f4f 100644
 --- a/src/lib/data/db.ts
@@ -2817,10 +3006,10 @@ index 0000000..e8c1a26
 +  return Math.round(n * 100) / 100;
 +}
 diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
-index 448a612..80af8fe 100644
+index 448a612..00bb8f4 100644
 --- a/src/lib/server/parser/extract.ts
 +++ b/src/lib/server/parser/extract.ts
-@@ -9,9 +9,17 @@
+@@ -9,9 +9,18 @@
   *
   * No DOM library — pure regex/JSON parsing so it runs in any serverless route.
   */
@@ -2836,14 +3025,65 @@ index 448a612..80af8fe 100644
 +  compositionFromText,
 +  MATERIAL_KEYS,
 +  COLOR_KEYS,
++  BRAND_KEYS,
 +} from "@/lib/server/product-fields";
  
  // ── HTML entity decoding (the handful that show up in product copy) ───────────
  
-@@ -258,6 +266,72 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
+@@ -258,6 +267,122 @@ function offerInfo(v: JsonValue | undefined): OfferInfo {
    return result;
  }
  
++/**
++ * The breadcrumb trail out of a `BreadcrumbList`, outermost first.
++ *
++ * Worth reading from the markup even though the extension also sends the
++ * rendered trail: `application/ld+json` survives the content script's strip, so
++ * this works on a pasted page and on a server fetch too, where there is no
++ * rendered page to read.
++ *
++ * The last crumb is usually the product itself and is kept — it costs nothing
++ * for classification, since the name is matched first anyway.
++ */
++function breadcrumbsFromJsonLd(html: string): string[] {
++  for (const block of parseJsonLdBlocks(html)) {
++    const candidates: JsonObject[] = [block];
++    const graph = block["@graph"];
++    if (Array.isArray(graph)) graph.forEach((g) => isObj(g) && candidates.push(g));
++
++    for (const node of candidates) {
++      if (!typeIncludes(node, "BreadcrumbList")) continue;
++      const list = node.itemListElement;
++      if (!Array.isArray(list)) continue;
++
++      const crumbs: { position: number; name: string }[] = [];
++      list.forEach((entry, index) => {
++        if (!isObj(entry)) return;
++        // `item` is either the thing itself or just its URL; only the former
++        // carries a name worth reading.
++        const name =
++          asString(entry.name) ?? (isObj(entry.item) ? asString(entry.item.name) : undefined);
++        if (!name) return;
++        const stated =
++          typeof entry.position === "number" ? entry.position : Number(asString(entry.position));
++        crumbs.push({
++          position: Number.isFinite(stated) ? (stated as number) : index + 1,
++          name: name.trim(),
++        });
++      });
++
++      if (crumbs.length) {
++        return crumbs
++          .sort((a, b) => a.position - b.position)
++          .map((c) => c.name)
++          .filter(Boolean)
++          .slice(0, 12);
++      }
++    }
++  }
++  return [];
++}
++
 +/**
 + * The sizes a Product node states, wherever it states them.
 + *
@@ -2913,7 +3153,7 @@ index 448a612..80af8fe 100644
  /**
   * The colour a Product node states, wherever it states it.
   *
-@@ -319,7 +393,7 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
+@@ -319,7 +444,7 @@ function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: bo
      // descriptions are sometimes HTML — strip tags so the catalog stays clean
      description: description ? stripTags(description) : undefined,
      url: url && /^https?:\/\//.test(url) ? url : undefined,
@@ -2922,7 +3162,7 @@ index 448a612..80af8fe 100644
    };
  }
  
-@@ -334,7 +408,7 @@ function nodeToRaw(node: JsonObject): RawExtract {
+@@ -334,7 +459,7 @@ function nodeToRaw(node: JsonObject): RawExtract {
      currency: r.currency,
      image: r.image,
      images: r.images ?? [],
@@ -2931,7 +3171,7 @@ index 448a612..80af8fe 100644
      color: r.color,
      material: r.material,
      description: r.description,
-@@ -473,6 +547,7 @@ export function extractProduct(
+@@ -473,6 +598,7 @@ export function extractProduct(
    html: string,
    config?: ParserSiteConfig | null,
    baseUrl?: string,
@@ -2939,7 +3179,7 @@ index 448a612..80af8fe 100644
  ): RawExtract {
    const strategies: string[] = [];
    const jsonld = fromJsonLd(html);
-@@ -492,11 +567,31 @@ export function extractProduct(
+@@ -492,11 +618,31 @@ export function extractProduct(
  
    const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
  
@@ -2973,7 +3213,7 @@ index 448a612..80af8fe 100644
  
    const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
  
-@@ -509,16 +604,28 @@ export function extractProduct(
+@@ -509,16 +655,44 @@ export function extractProduct(
    if (baseUrl) {
      const anchor = image ? [image, ...images] : images;
      const productName = pick(ruleVal("name"), jsonld.name, meta.name, micro.name) ?? "";
@@ -2984,8 +3224,25 @@ index 448a612..80af8fe 100644
  
    return {
      name: pick(ruleVal("name"), jsonld.name, meta.name, micro.name),
-     brand: pick(ruleVal("brand"), jsonld.brand, meta.brand, micro.brand),
+-    brand: pick(ruleVal("brand"), jsonld.brand, meta.brand, micro.brand),
 -    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price),
++    // Brand: structured data first, then the two places a store that treats its
++    // designer as a link rather than a property puts it — the spec table, and
++    // whatever the page marks as the brand.
++    brand: pick(
++      ruleVal("brand"),
++      jsonld.brand,
++      meta.brand,
++      micro.brand,
++      specValue(evidence?.specs, BRAND_KEYS),
++      evidence?.brandText,
++    ),
++    // The trail, from the markup and from the rendered page. The markup's own
++    // BreadcrumbList wins: it is data rather than a reading of the layout.
++    breadcrumbs: (() => {
++      const fromMarkup = breadcrumbsFromJsonLd(html);
++      return fromMarkup.length ? fromMarkup : (evidence?.breadcrumbs ?? []).slice(0, 12);
++    })(),
 +    // The rendered price is the last resort for both fields, and for opposite
 +    // reasons. For the amount it is a rescue: a page whose markup states no
 +    // price at all would otherwise be skipped entirely. For the currency it is
@@ -3005,7 +3262,7 @@ index 448a612..80af8fe 100644
      image,
      images: [
        ...(image && !images.includes(image) ? [image, ...images] : images),
-@@ -528,9 +635,39 @@ export function extractProduct(
+@@ -528,9 +702,39 @@ export function extractProduct(
      // Colour is worth chasing through every layer: it is what the swatch, the
      // colour filter and half the stylist's vocabulary are built from, and a
      // page that says "Black" anywhere means it.
@@ -3101,7 +3358,7 @@ index 89e9657..afdb8b5 100644
      .filter((u): u is string => !!u);
  
 diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
-index 70f8911..c301aa4 100644
+index 70f8911..565dfec 100644
 --- a/src/lib/server/parser/import-product.ts
 +++ b/src/lib/server/parser/import-product.ts
 @@ -11,7 +11,15 @@
@@ -3253,13 +3510,19 @@ index 70f8911..c301aa4 100644
  }
  
  export async function importParsedProduct(
-@@ -104,11 +230,50 @@ export async function importParsedProduct(
+@@ -104,11 +230,56 @@ export async function importParsedProduct(
      ? (p.gender as Gender)
      : undefined;
  
 -  const price = Math.max(0, Number(p.price) || 0);
 -  const priceOriginal = Math.max(0, Number(p.priceOriginal) || 0);
 -  const currency = String(p.currency ?? "USD").trim().toUpperCase().slice(0, 3) || "USD";
++  // The tree's label for what this piece is. The parser resolves it against the
++  // category tree, so whatever arrives here is a label that tree claims — but it
++  // is written only when there is one, because an empty string means "cleared"
++  // to `productToDb` and would erase a label an admin had set by hand.
++  const subcategory = String(p.subcategory ?? "").trim().slice(0, 60);
++
 +  // ── Price, in one currency ──────────────────────────────────────────────────
 +  // The catalogue is read as dollars by everything downstream: the browse
 +  // filter, the stylist's budget and the search RPCs all compare `price_min`
@@ -3308,7 +3571,7 @@ index 70f8911..c301aa4 100644
    let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
  
    // Mirror photos to our storage before writing the row, so the catalog only
-@@ -147,8 +312,10 @@ export async function importParsedProduct(
+@@ -147,8 +318,10 @@ export async function importParsedProduct(
      ? [{
          name: resolved.name,
          url: sourceUrl,
@@ -3321,7 +3584,15 @@ index 70f8911..c301aa4 100644
          availability: "in stock",
          isOfficial: resolved.isOfficial,
        }]
-@@ -169,6 +336,14 @@ export async function importParsedProduct(
+@@ -160,6 +333,7 @@ export async function importParsedProduct(
+     name,
+     brand: brand as Product["brand"],
+     category,
++    ...(subcategory ? { subcategory } : {}),
+     description: String(p.description ?? "").slice(0, 5000),
+     imageUrl,
+     images: images.length ? images : (imageUrl ? [imageUrl] : []),
+@@ -169,6 +343,14 @@ export async function importParsedProduct(
      priceMin: price,
      priceMax: priceOriginal > price ? priceOriginal : price,
      currency,
@@ -3336,7 +3607,7 @@ index 70f8911..c301aa4 100644
      isNew: true,
      isSaved: false,
      gender,
-@@ -232,6 +407,21 @@ export async function importParsedProduct(
+@@ -232,6 +414,21 @@ export async function importParsedProduct(
      await storeBackgroundColor(productId, imageUrl);
    }
  
@@ -3358,7 +3629,7 @@ index 70f8911..c301aa4 100644
    // Record an import job (best-effort — table is optional, ignore if absent).
    if (sourceUrl) {
      try {
-@@ -243,5 +433,14 @@ export async function importParsedProduct(
+@@ -243,5 +440,14 @@ export async function importParsedProduct(
      } catch { /* import_jobs not migrated — non-critical */ }
    }
  
@@ -3375,10 +3646,10 @@ index 70f8911..c301aa4 100644
 +  };
  }
 diff --git a/src/lib/server/parser/normalize.ts b/src/lib/server/parser/normalize.ts
-index 5e23814..a34ab4a 100644
+index 5e23814..0d6becf 100644
 --- a/src/lib/server/parser/normalize.ts
 +++ b/src/lib/server/parser/normalize.ts
-@@ -7,12 +7,14 @@ import {
+@@ -7,12 +7,20 @@ import {
    cleanName,
    parsePrice,
    extractCurrencyFromDisplay,
@@ -3388,12 +3659,18 @@ index 5e23814..a34ab4a 100644
    canonicalColor,
  } from "@/lib/server/product-fields";
  import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
++import {
++  isBuiltInBucket,
++  matchSubcategoryLabel,
++  resolveSubcategory,
++  subcategoryToValue,
++} from "@/lib/categories";
  import { upgradeImageUrl, imageKey } from "./gallery";
 +import { looksLikeProductPath, isNonProductPath } from "./extract";
  
  /** Resolve a possibly-relative image URL against the page URL. */
  function absoluteUrl(src: string, base: string): string | null {
-@@ -25,10 +27,20 @@ function absoluteUrl(src: string, base: string): string | null {
+@@ -25,10 +33,20 @@ function absoluteUrl(src: string, base: string): string | null {
    }
  }
  
@@ -3415,15 +3692,59 @@ index 5e23814..a34ab4a 100644
  }
  
  export function normalizeExtract(
-@@ -48,6 +60,7 @@ export function normalizeExtract(
+@@ -48,6 +66,27 @@ export function normalizeExtract(
    const priceOriginal = parsePrice(raw.priceOriginal ?? "");
  
    const currency = normalizeCurrency(raw.currency, raw.price);
 +  if (price && !currency) issues.push("currency not stated");
++
++  // The store's own filing of this piece, outermost crumb first. Two things are
++  // read out of it, and both used to be guessed from the name alone or not
++  // answered at all: which category the piece belongs to when its name says
++  // nothing ("Aurelio"), and which of that category's labels it is.
++  const trail = (raw.breadcrumbs ?? []).filter(Boolean).join(" > ");
++
++  // The tree's label for what this piece is: from the name first, which is more
++  // specific ("Wool-blend bomber jacket" over a trail's "Jackets"), then from the
++  // trail, which answers for a name that classifies nothing ("Aurelio").
++  const subLabelFromName = matchSubcategoryLabel(name);
++  const subLabelFromTrail = trail ? matchSubcategoryLabel(trail) : undefined;
++  const labelValues = subcategoryToValue();
++  const labelCategory = (label: string | undefined) => {
++    const value = label ? labelValues[label] : undefined;
++    // The admin can point a tree label at a bucket outside the code's own list.
++    // Such a bucket works in the browse filters and is unknown to `Category`, so
++    // a label's bucket is only adopted when the code knows it.
++    return value && isBuiltInBucket(value) ? (value as ParsedProduct["category"]) : undefined;
++  };
  
    // Category: explicit override → product name/description → URL path hint.
    // Prefer the name-based guess; only fall back to the URL path when the name
-@@ -84,7 +97,7 @@ export function normalizeExtract(
+@@ -58,9 +97,23 @@ export function normalizeExtract(
+     // 92% against 88% when the description is included: descriptions name-drop
+     // other garments, and "pairs well with shorts" reads as "is shorts".
+     matchCategory(name) ??
++    // A label out of the tree, from the name and then from the trail, before any
++    // more keyword matching. A tree label is the catalogue's own vocabulary
++    // rather than a hint read out of a string, and it carries the category with
++    // it: a trail ending in "Blazers" files the piece under blazers, where a
++    // keyword pass over the same words would stop at the first thing that looks
++    // like outerwear.
++    labelCategory(subLabelFromName) ??
++    labelCategory(subLabelFromTrail) ??
++    matchCategory(trail) ??
+     matchCategory(safePath(sourceUrl)) ??
+     "accessories";
+ 
++  // `resolveSubcategory` drops a label the tree does not claim for this
++  // category, so a disagreement — an override that says footwear over a name
++  // that says bomber jacket — resolves rather than persists.
++  const subcategory = resolveSubcategory(category, subLabelFromName ?? subLabelFromTrail);
++
+   // Gender: explicit override → URL → name/description
+   const gender =
+     config?.genderOverride ??
+@@ -84,7 +137,7 @@ export function normalizeExtract(
      const key = imageKey(full);
      if (!byPhoto.has(key)) byPhoto.set(key, full);
    }
@@ -3432,7 +3753,7 @@ index 5e23814..a34ab4a 100644
  
    const rawAbs = raw.image && absoluteUrl(raw.image, sourceUrl);
    const rawPrimary = rawAbs ? (upgradeImageUrl(rawAbs, sourceUrl) ?? rawAbs) : null;
-@@ -102,6 +115,35 @@ export function normalizeExtract(
+@@ -102,6 +155,35 @@ export function normalizeExtract(
    const colors = [colorFrom(raw.color, name, sourceUrl)].filter(Boolean) as string[];
    const sizes = raw.sizes ?? [];
  
@@ -3468,11 +3789,12 @@ index 5e23814..a34ab4a 100644
    return {
      name,
      brand,
-@@ -112,6 +154,7 @@ export function normalizeExtract(
+@@ -112,6 +194,8 @@ export function normalizeExtract(
      images: images.length ? images : (imageUrl ? [imageUrl] : []),
      colors,
      sizes,
 +    variantUrls,
++    ...(subcategory ? { subcategory } : {}),
      material: raw.material ?? "",
      price,
      priceOriginal,
@@ -4067,7 +4389,7 @@ index 61b81ca..c236f7e 100644
  
  export interface SitemapOptions {
 diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
-index b2f84ec..41b075b 100644
+index b2f84ec..937ff5c 100644
 --- a/src/lib/server/parser/types.ts
 +++ b/src/lib/server/parser/types.ts
 @@ -6,6 +6,12 @@
@@ -4083,7 +4405,7 @@ index b2f84ec..41b075b 100644
  import type { Category, Gender } from "@/lib/types";
  
  /**
-@@ -78,6 +84,75 @@ export interface ParserSiteConfig {
+@@ -78,6 +84,94 @@ export interface ParserSiteConfig {
    notes?: string;
  }
  
@@ -4154,21 +4476,57 @@ index b2f84ec..41b075b 100644
 +   * where the material comes from.
 +   */
 +  specs?: SpecPair[];
++  /**
++   * The breadcrumb trail, outermost first: ["Women", "Clothing", "Jackets"].
++   *
++   * What it answers is the category and the subcategory. The name classifies
++   * well when a store names its pieces plainly ("Wool bomber jacket") and not at
++   * all when it does not ("Aurelio"), and the trail is the store's own filing of
++   * the same piece. A `BreadcrumbList` in JSON-LD survives the strip and is read
++   * from the markup; this is for the stores that render a trail and describe it
++   * nowhere.
++   */
++  breadcrumbs?: string[];
++  /**
++   * The brand as the page prints it, from a marked element or the designer link.
++   *
++   * Structured data carries it more often than not, which is why brand was only
++   * *sometimes* missing — and when it is missing it is usually because the store
++   * treats the designer as a link rather than as a property.
++   */
++  brandText?: string;
 +}
 +
  /** Raw string fields pulled out of a page before normalisation. */
  export interface RawExtract {
    name?: string;
-@@ -93,6 +168,8 @@ export interface RawExtract {
+@@ -93,6 +187,10 @@ export interface RawExtract {
    description?: string;
    /** Per-product URL (set when extracting from a listing/ItemList). */
    url?: string;
 +  /** Same piece, other colours — the addresses the page's colour row links to. */
 +  variantUrls?: string[];
++  /** The breadcrumb trail, outermost first, from the markup or the rendered page. */
++  breadcrumbs?: string[];
    /** Which strategies contributed at least one field (diagnostics). */
    strategies: string[];
  }
-@@ -113,6 +190,8 @@ export interface ParsedProduct {
+@@ -102,6 +200,14 @@ export interface ParsedProduct {
+   name: string;
+   brand: string;
+   category: Category;
++  /**
++   * The tree's label for what this piece is — "Bomber Jackets", "Sneakers".
++   *
++   * Absent when nothing in the tree names it. The importer used to write no
++   * subcategory at all, so every product filed under whatever its category
++   * implied.
++   */
++  subcategory?: string;
+   gender?: Gender;
+   description: string;
+   imageUrl: string;
+@@ -113,6 +219,8 @@ export interface ParsedProduct {
    priceOriginal: number;
    currency: string;
    sourceUrl: string;
@@ -4177,7 +4535,7 @@ index b2f84ec..41b075b 100644
    /** Diagnostics for the admin UI. */
    strategies: string[];
    issues: string[];
-@@ -149,6 +228,12 @@ export interface CrawlItemResult {
+@@ -149,6 +257,12 @@ export interface CrawlItemResult {
    reason?: string;
    usedAi?: boolean;
    imagesMirrored?: number;
@@ -4289,10 +4647,10 @@ index 0000000..3f3d93c
 +  return { groupId: groupId ?? undefined, hasPrimary };
 +}
 diff --git a/src/lib/server/product-fields.ts b/src/lib/server/product-fields.ts
-index 2981d38..1649353 100644
+index 2981d38..b44dd4a 100644
 --- a/src/lib/server/product-fields.ts
 +++ b/src/lib/server/product-fields.ts
-@@ -48,28 +48,270 @@ export function parsePrice(raw: string): number {
+@@ -48,28 +48,274 @@ export function parsePrice(raw: string): number {
  }
  
  // ── Extract ISO currency code from a display price string ─────────────────────
@@ -4422,6 +4780,10 @@ index 2981d38..1649353 100644
 +/** Key names that mean colour. */
 +export const COLOR_KEYS =
 +  /^(?:colou?r|colourway|colorway|farbe|couleur|colore|kolor|barva|цвет|колір|кольор)(?![\p{L}\p{N}])/iu;
++
++/** Key names that mean the brand, which a spec table often states outright. */
++export const BRAND_KEYS =
++  /^(?:brand|designer|label|maker|manufacturer|marke|marque|marca|бренд|виробник|производитель|торгов\p{L}*\s*марка)(?![\p{L}\p{N}])/iu;
 +
 +/** Key names that mean the store's own article number. */
 +export const CODE_KEYS =
