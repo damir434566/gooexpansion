@@ -1,13 +1,14 @@
 diff --git a/AUDIT_PLAN_BRIEF.md b/AUDIT_PLAN_BRIEF.md
-index 021ad7d..be51000 100644
+index 021ad7d..b0bb8ae 100644
 --- a/AUDIT_PLAN_BRIEF.md
 +++ b/AUDIT_PLAN_BRIEF.md
-@@ -157,6 +157,8 @@
+@@ -157,6 +157,9 @@
  | 2026-09-16 | Третья плашка от CEO — снова без кнопки. Собран сквозной прогон «настоящий сервер → настоящий экран» (раньше половинки проверялись порознь): `discoverProductUrls` реально ходит в магазин, отвечающий 403, его ответ сериализуется как в роуте и в таком виде отдаётся настоящему компоненту страницы. На коде **из `master` (#854, то, что на проде)** ответ — `{ok:false, status:403, isSingleProduct:true, error:"Upstream responded 403"}`, и кнопка рисуется. Значит серверная часть на проде здорова, а в браузере крутится клиент старее ответа, который он показывает (вкладка, открытая до выката; service worker в проекте отсутствует, своих cache-заголовков нет — лечится перезагрузкой или приватным окном). Чтобы текст подсказки не отправлял к кнопке, которой на старом бандле нет, обе ветки отказа теперь называют и панель: «Paste page» во вкладке Parse URL | `src/lib/server/parser/crawl.ts` | Знать на будущее: подсказка, ссылающаяся на элемент UI, живёт дольше, чем сборка этого UI |
  | 2026-09-16 | Родство фотографий в галерее не работает на коротких именах файлов: `stem()` оставляет только буквы и цифры, а `isNumberedFrame` требует восьми символов — поэтому `nebula-1.jpg` / `nebula-2.jpg` (7 символов) сиблингами не считаются, и со страницы уезжает одно фото из четырёх. Для магазина, который называет файлы `1.jpg`, `2.jpg`, галерея теряется вся. Порог осознанный (чужое фото в каталоге хуже пропущенного), поэтому не тронут | `src/lib/server/parser/gallery.ts:200` | Низкая: на реальных именах (`nebula-jacket-aurelio-01.jpg`) галерея собирается полностью — проверено |
  | 2026-09-20 | **Жук доставал не весь каталог, а его верхушку.** Проверено по коду: `sitemap.ts` знал три имени и не умел `.gz` (каталог любого размера отдаёт сайтмап сжатым, `fetchHtml` возвращал бы его декодированной кашей), считал документом и 404-й промах (пять «документов» кончались на трёх неверных догадках), открывал максимум три дочерних сайтмапа и читал `<loc>` только без `CDATA` — у WordPress и Magento сайтмап поэтому читался пустым; `looksLikeProductPath` требовал сегмента `/product(s)/` или цифрового кода, поэтому магазин со slug-адресами (`/shop/nebula-jacket-aurelio`) давал «сайтмап читается, товаров 0»; сайтмап вообще читался только при полностью пустом обходе, а не при коротком; потолки — 500 товаров в `crawl.ts`, 60 якорей на страницу в `extractProductLinks`, 40 товаров и 1 страница по умолчанию на экране; в `direct` не было cookie-jar, то есть каждый запрос к мягкой стене был тем самым первым, который она и отклоняет. **Сделано по прямому указанию CEO** (блок «добыча», шаги 2–4 бесплатного плана; деньги не задействованы, провайдер по решению CEO не берём): семь имён сайтмапа + три `.gz` через новый `fetchBinary` с распознаванием по магическим байтам (только `direct` — провайдер отдаёт текст), `CDATA` в `<loc>`, раздельные бюджеты (18 запросов / 12 прочитанных документов / 10 детей), файл, который магазин сам назвал `product-*`, считается его собственным словом — его URL минуют тест формы адреса, но не плоские отказы (`/cart`); четвёртая форма товарного адреса (секция магазина + слаг из трёх слов, с отсечкой листинговых слов и родителей вида `/collections/<slug>`); сайтмап теперь добирает недобранное, а не только спасает пустое; потолки 2 000 товаров, вся сетка со страницы листинга, по умолчанию 100/3 страницы; cookie-jar на хост (10 минут, `direct`), стук во входную дверь на молчаливом 403 — один раз на хост и только когда сам отказ куку не выдал. **Доказательство:** 51/51 на пяти фиктивных магазинах через настоящий HTTP и настоящий `direct`-fetch (имена ведут на 127.0.0.1 через `/etc/hosts`, поэтому SSRF-гард видит публичный хост и путь кода не подменён): gzip-сайтмап найден после шести мёртвых имён (3 товара, ≤18 запросов); robots → индекс с `CDATA` → `product-sitemap.xml` даёт 3 вещи, включая короткий слаг `/shop/tee`, `/cart` отброшен, `page-sitemap.xml` не открыт; мягкая стена с кукой в самом отказе — ровно один повтор, во входную дверь не стучались; стена с кукой только на главной — 403, один стук в `/`, повтор с кукой прошёл; вторая страница того же магазина прошла с первого раза одним запросом; каталог 1 500 URL собран целиком (потолок 500 снят), якоря листинга внутри, подсказка говорит «added»; сетка из 120 карточек отдаёт 120 при лимите и 60 по умолчанию; магазин, отказывающий во всём, по-прежнему отвечает 403 с подсказкой про Paste page; вставленная одна вещь в slug-форме опознана как товар и сайтмап не читался. `tsc --noEmit` чист, `eslint` по парсеру, роутам и экрану чист, `npm run build` exit 0 | `src/lib/server/parser/{sitemap,fetch,extract,crawl}.ts`, `src/app/api/admin/parser/crawl/route.ts`, `src/app/goo-studio/parser/page.tsx`, `PARSER.md` | Закрыто. Осталось от бесплатного плана: порядок шифров/JA3 (в Node не воспроизводится — нужен свой curl_cffi, решение за CEO). Блоки B (наличие, SKU, размеры, история цен) и C (очередь, возобновление, расписание) не начаты |
 +| 2026-09-21 | **Каталог с защищённого магазина: руки перенесены в браузер CEO, мозги остались на сервере.** Продолжение блока «добыча» (2026-09-20): последний оставшийся бесплатный шаг — порядок шифров/JA3 — в Node не воспроизводится, поэтому **по прямому указанию CEO** (вне порядка волн, деньги не задействованы) задача обойдена целиком: страницы открывает расширение Chrome на машине CEO (его адрес, его куки, уже пройденная проверка), а что открывать и как быстро — решает сервер. Новое: `robots.ts` — разбор robots.txt строго по группе `*` (Googlebot'ом не представляемся), Allow/Disallow по длиннейшему совпадению с `*` и `$`, Crawl-delay, Sitemap, разбор чистый (сеть не трогает); `plan-collection.ts` — чистая функция «страница + сайтмапы + robots → товарные адреса, пауза, что дочитать следующим кругом» поверх существующих `extractProductLinks`/`looksLikeProductPath`/`isNonProductPath` и хелперов `sitemap.ts` (они для этого экспортированы, ни одной копии не заведено; `fromRobots` переведён на общий разбор, дубль исчез); роут `collect` с действиями `plan` и `ingest` (`ingest` зовёт `parsePage` с готовым html — в магазин не ходит вовсе, без html отвечает 400, а не молча фетчит); экран-приёмник `/goo-studio/parser/collect` — мост postMessage ↔ API обычной сессией Clerk; `extension/` (MV3): popup, service worker с очередью и темпом, content script-санитайзер один в один с букмарклетом, bridge. **Ключей в расширении нет** — оно не умеет звать API, только просить открытую вкладку; доступ к магазину через `optional_host_permissions` + запрос по клику. Вежливость: Disallow соблюдается, пауза `max(Crawl-delay, 1.5 с)` + случайный разброс, ~10 с отдыха каждые 20 страниц, два 403/429 подряд — остановка с объяснением, Stop мгновенный (гасит и текущую паузу, и приёмник перестаёт принимать). **Доказательство:** 39/39 на настоящих модулях `robots.ts`/`plan-collection.ts` (длиннейшее совпадение, ничья в пользу Allow, пустой Disallow, `*` и `$`, слитые группы агентов, robots.txt отданный HTML-страницей, пол и потолок паузы, дедуп по `seen`, индекс → дети) и 27/27 сквозным прогоном настоящего расширения в настоящем Chromium против фиктивного магазина: при установке не выдан ни один хост (`explicit_host: []`, скриптуется только собственный экран приёмника, из API — `activeTab`, `scripting`, `storage`, `webRequest`); robots.txt прочитан первым, сайтмап вторым кругом; запрещённый `/product/secret-*` не открыт ни разу и посчитан как blocked; темп 2 с взят из Crawl-delay магазина, разброс между запросами есть; страница ~430 КБ ужата до <300 КБ, JSON-LD цел, лениво подгруженная галерея приехала отрисованной (2 настоящих фото вместо data-URI), настоящий `parsePage` собрал товар из снятого DOM (имя, бренд Fixture Atelier, 249 EUR) при нуле запросов в магазин с нашей стороны; на 403 прогон встал ровно после второй страницы, не третьей; после Stop ни одного импорта и ни одного запроса в магазин; на 21 товаре без Crawl-delay применён пол 1.5 с и после двадцатой страницы лёг отдых 11 с. `tsc --noEmit` чист, `npm run build` exit 0, `eslint` по новым файлам и по `extension/` чист, база линта не выросла (13 ошибок / 52 предупреждения до и после — все чужие, по моим файлам ноль) | `src/lib/server/parser/{robots,plan-collection,sitemap}.ts`, `src/lib/server/audit.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/*` | Закрыто в коде. **Не проверено мной:** живой магазин и установка в Chrome — из контейнера это серверный IP, то есть ровно тот, от которого уходим; проверку на настоящем магазине делает CEO |
 +| 2026-09-22 | **Все фотографии вещи и цена в одной валюте.** Три правки по прямому указанию CEO (вне порядка волн), все — поверх сбора расширением от 2026-09-21. **Почему Farfetch отдавал меньше фото, чем остальные** — найдено по коду, а не угадано: `collectCandidates` в `gallery.ts` добывает адреса из инлайновых hydration-payload'ов, но `extension/snapshot.js` удаляет все `<script>` кроме `ld+json` **до** отправки, поэтому на Shopify (галерея в разметке) не терялось ничего, а на SPA вроде Farfetch до сервера доезжали только те слайды, что успела смонтировать карусель. Вторая, более широкая дыра рядом: регулярка payload'а разрешала `\/` лишь сразу после схемы, а внутри пути упиралась в обратный слэш — то есть адрес вида `https:\/\/cdn.shopify.com\/s\/files\/1\/photo.jpg` (так payload, закодированный в JSON дважды, пишет любой адрес) не находился вообще: схема совпадала, до расширения файла дело не доходило. **Сделано.** Фото: `snapshot.js` читает страницу, пока она цела (`currentSrc`, `src`, `srcset`/`data-srcset`, зум-атрибуты, `picture>source`, `link[as=image]`, плюс скан содержимого `<script>` на адреса картинок) и отдаёт найденное как кандидатов вместе с видимым текстом цены — сами payload'ы по-прежнему не отправляются, иначе вернулись бы те мегабайты, ради которых strip и существует; кандидаты проходят **тот же** фильтр `harvestGalleryImages` (новый пятый параметр), так что рельс «you may also like» отбрасывается, как и раньше; новый `PageEvidence` в `types.ts` прокинут `route → parsePage → extractProduct`; регулярка экранированных слэшей исправлена в обоих местах (сервер и расширение); потолок фото 12 → 20 одной общей `MAX_PRODUCT_IMAGES` — до этого три места расходились (нормализация 12, импорт 12, зеркало жёстко `min(max, 12)`, то есть найденное сверх 12 хранилось ссылкой и не скачивалось никогда). Валюта: новый `src/lib/server/fx.ts` (таблица курсов с базой USD, кэш на час, кэшируется и неудача — провайдер, который лёг, лежит не для одного товара; фолбэк-таблица на 31 валюту), `/api/exchange-rates` переведён на него и больше не дублирует ни фетч, ни фолбэк; импорт пересчитывает цену в доллары и пишет `price_min/price_max` в долларах с `currency: USD`, а цену магазина сохраняет там, где она и есть правда — в записи ритейлера (по ней человек платит) и в новых колонках `source_price/source_currency/fx_rate/fx_date` (миграция 019, добавлены в `OPTIONAL_COLUMNS`, так что база без миграции всё равно принимает товар, просто без происхождения); `normalizeCurrency` больше **не** подставляет USD молча — пустая строка и issue «currency not stated», потому что молчаливый дефолт и есть та причина, по которой ₴4 000 приехали как $4 000; `extractCurrencyFromDisplay` расширен (₴ ₽ ₹ ₩ ₪ zł Kč CHF 元, слова грн/руб/лв, CA$/A$/NZ$/HK$/S$/R$ через lookbehind — иначе «S$» внутри «US$» читался как сингапурский доллар, и код ISO принимается только рядом с числом, иначе «incl. VAT» становится валютой, а «Try it on» — турецкой лирой); экран приёмника показывает по каждой странице «N photos · 4000 UAH → $97.56». **Доказательство.** 47/47 юнитов на настоящих модулях (`verification/test-price-and-photos.js`: символы и слова валют, обе ловушки с долларами, конвертация и один фетч курсов на весь прогон, фолбэк при недоступном провайдере, `null` на валюту без курса, кандидаты против рельса рекомендаций и чужого CDN, экранированные слэши, потолок 20, `productToDb`/`dbToProduct` и сброс четырёх колонок на базе без миграции 019) и 40/40 сквозным прогоном настоящего расширения в настоящем Chromium — было 27/27, добавлен режим витрины `spa`, устроенный как Farfetch: галерея только в `__NEXT_DATA__`, половина адресов с экранированными слэшами, рядом рельс чужого товара на том же CDN. На нём: до правки со страницы уезжало 2 фото, теперь 7 из 7; рельс не попал в товар; payload не отправлен (strip работает, разметка <300 КБ); гривневая страница, у которой в разметке `price: "4000"` вовсе без `priceCurrency`: валюта прочитана из отрисованного «4 000 ₴», ₴4 000 → $97.56 по курсу 41, issue об отсутствии валюты не выставлен; евро 1290 → $1517.65; прогоны A–D (вежливость, Crawl-delay, 403, Stop, отдых) без регрессий. `tsc --noEmit` чист, `npm run build` exit 0, `eslint` по изменённым файлам и по `extension/` чист, база линта не выросла (13 ошибок / 52 предупреждения до и после) | `src/lib/server/fx.ts`, `src/lib/server/product-fields.ts`, `src/lib/server/parser/{gallery,extract,normalize,parse-page,import-product,types}.ts`, `src/lib/server/storage/product-images.ts`, `src/lib/data/db.ts`, `src/lib/{types,supabase}.ts`, `src/app/api/exchange-rates/route.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/{snapshot,background}.js`, `supabase/migrations/019_product_source_price.sql` | Закрыто в коде. **Требует шага CEO:** миграция 019 (без неё цена всё равно в долларах, но происхождение не пишется). **Не проверено мной:** живой Farfetch и живая база — Supabase в контейнере нет, поэтому запись строки проверена на чистых `productToDb`/`dbToProduct` и на сбросе колонок, а не на реальном insert. **Осталось от прошлого раза:** название товара (og:title тащит имя магазина, `<h1>` парсер не читает вовсе) — CEO перенёс на потом |
++| 2026-09-22 | **Десять пустых полей товара.** По прямому указанию CEO (вне порядка волн), шесть частей, каждая с отдельным доказательством. **Найдено по коду:** размеры — разбор JSON-LD **всегда** возвращал `sizes: []`, единственным источником были per-site правила, то есть размеров почти никогда и не было; подкатегорию импортёр **не писал вообще** (`resolveSubcategory` существовал, URL-импорт его не звал); `styleKeywords: []` прошит в импортёре при живом словаре из 13 стилей; группировку цветов CSV-импорт умеет (`getGroupKeys`), URL-импорт не звал; сопоставления одного товара между магазинами не было нигде, `sku`/`gtin` со страницы не читались; материал брался только из JSON-LD `material`; описание — из `og:description`, то есть обрезанной маркетинговой строки; цвет и бренд — только из структурных данных, которых у половины магазинов нет. **Сделано.** Общий принцип: расширение добывает кандидатов с отрисованной страницы, словари и проверки живут на сервере в одном месте. Размеры — четыре формы структурных данных (`size`, `hasVariant`, `offers`+`itemOffered`, `additionalProperty` на шести языках) плюс отрисованный контрол; `looksLikeSize`/`pickSizes` отсеивают «Select size», ссылку на сетку и счётчик количества; первый непустой источник, не слияние (иначе «40», «EU 40» и «IT 40» станут тремя размерами). Цвет — выбранный свотч и строка таблицы характеристик выше скана разметки; фильтр цвета заработал сам, потому что `colorGroupNamesFor` уже раскладывал «Charcoal» → Grey и ждал только названия. Описание — отрисованный блок через `textContent` (у свёрнутого аккордеона `innerText` пуст), самый **короткий** подходящий контейнер, а не самый длинный (они вложены, внешний тащит доставку и отзывы); `og:description` переехал в конец цепочки. Материал — `specValue` по таблице (шесть языков; `\b` заменён на lookahead с флагом `u`, иначе `^склад\b` не совпадает с «Склад») и `compositionFromText` по тексту: состав обрывается на 100% (дальше подкладка), волокно — одно слово или два, если дальше конец оборота, «Extra 20% off» не волокно. Бренд — плюс таблица и размеченный на странице дизайнер. Крошки — `BreadcrumbList` из разметки (переживает strip, работает и для вставленной страницы) и отрисованная навигация; из них категория и `matchSubcategoryLabel` в `categories.ts` (совпадение по словам, обе стороны разворачиваются в формы: «accessories» → accessory, «hoodies» → hoodie, «dress» не трогается), ярлык дерева важнее совпадения по ключевому слову, `isBuiltInBucket` не даёт принять чужую корзину, `resolveSubcategory` снимает ярлык, противоречащий категории. Стиль — `inferStyleKeywords` по словарю из 13 стилей (имя, описание, материал, ярлык, крошки), не больше трёх, цвет и название вещи в правилах отсутствуют намеренно. Группировка цветов — `variant-group.ts`: сначала точное совпадение по ссылкам цветового ряда (`source_url`), и только если магазин переключает цвет скриптом — бренд + **точное** базовое имя (префиксное совпадение из SQL-запроса отсеивается в коде: «Wool Coat» и «Wool Coat Long» — две вещи), цвета должны различаться, группа из одного не пишется; ссылки ряда фильтруются тем же `looksLikeProductPath`, что у планировщика, и только свой хост. Тот же товар на других сайтах — `same-item.ts` + миграция 020: GTIN с проверкой контрольной цифры GS1, бренд+MPN, **SKU не сшивает магазины** (у разных ритейлеров одна строка означает разные вещи); при совпадении импортёр не вставляет строку, а дописывает магазин в `retailers`, расширяет вилку цены в сторону дешёвого и заполняет **только пустые** поля. Заодно переписан разбор строки характеристик: блок из текстовых узлов рисуется одной строкой, значение съедало следующие строки — теперь значение кончается там, где начинается следующая метка, а ключ отдаётся в одно-, двух- и трёхсловной форме. **Доказательство:** 150/150 юнитов на настоящих модулях (`verification/test-fields.js`) и 56/56 сквозным прогоном настоящего расширения в настоящем Chromium — было 40/40: размеры сняты с кнопок и отдельно из `hasVariant`; цвет — со свотча на странице, где о цвете не сказано нигде; два соседних цвета из ссылок ряда, `Care instructions` из того же ряда отброшен; описание вынуто из свёрнутого аккордеона; материал из `<dl>` и отдельно из одной строки украинского текста; крошки с отрисованной навигации; товар лёг и в категорию, и в подкатегорию («Bomber Jackets»); бренд со ссылки дизайнера там, где JSON-LD бренда не знает; EAN-13 с оффера, артикул с украинской строки; стиль выведен из слов, существовавших только в скрытом описании. `tsc --noEmit` чист, `npm run build` exit 0, база линта не выросла (13/52), `eslint extension` чист | `src/lib/server/product-fields.ts`, `src/lib/categories.ts`, `src/lib/style-keywords.ts`, `src/lib/server/parser/{extract,normalize,types,import-product,variant-group,same-item}.ts`, `src/lib/{types,supabase}.ts`, `src/lib/data/db.ts`, `src/app/api/admin/parser/collect/route.ts`, `src/app/goo-studio/parser/collect/page.tsx`, `extension/{snapshot,background}.js`, `supabase/migrations/020_product_codes.sql` | Закрыто в коде. **Требует шага CEO:** миграции 019 и 020 (без 020 сшивки между магазинами не будет — появится второй товар вместо ссылки). **Не проверено мной:** живая база, поэтому группировка цветов и сшивка товара проверены как чистые функции, а запросы вокруг них нет; живой магазин. **Осталось:** название товара (`og:title` тащит имя магазина, `<h1>` парсер не читает) — по решению CEO отложено |
  
  ---
  
@@ -3477,16 +3478,17 @@ index 89e9657..afdb8b5 100644
      .filter((u): u is string => !!u);
  
 diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
-index 70f8911..516b07b 100644
+index 70f8911..b38e75f 100644
 --- a/src/lib/server/parser/import-product.ts
 +++ b/src/lib/server/parser/import-product.ts
-@@ -11,7 +11,21 @@
+@@ -11,7 +11,22 @@
   */
  import { supabase, isSupabaseConfigured } from "@/lib/supabase";
  import { productToDb, writeProductRow } from "@/lib/data/db";
 -import { colorToHex, colorGroupNamesFor } from "@/lib/server/product-fields";
 +import { colorToHex, colorGroupNamesFor, MAX_PRODUCT_IMAGES } from "@/lib/server/product-fields";
 +import { toUsd } from "@/lib/server/fx";
++import { normalizeStyleKeywords } from "@/lib/style-keywords";
 +import {
 +  chooseGroup,
 +  isColorSiblingByName,
@@ -3503,7 +3505,7 @@ index 70f8911..516b07b 100644
  import { loadRetailerRules, resolveRetailer } from "@/lib/server/retailer-domains";
  import { mirrorProductImages } from "@/lib/server/storage/product-images";
  import { storeBackgroundColor } from "@/lib/server/bg-color";
-@@ -67,6 +81,204 @@ async function colorGroupIdsFor(colors: string[]): Promise<number[] | undefined>
+@@ -67,6 +82,204 @@ async function colorGroupIdsFor(colors: string[]): Promise<number[] | undefined>
    return ids.length ? [...new Set(ids)] : undefined;
  }
  
@@ -3708,7 +3710,7 @@ index 70f8911..516b07b 100644
  export interface ImportOptions {
    /** Download photos into Supabase Storage and store our URLs instead. */
    mirrorImages?: boolean;
-@@ -81,6 +293,16 @@ export interface ImportResult {
+@@ -81,6 +294,16 @@ export interface ImportResult {
    imagesMirrored?: number;
    /** Photos we failed to mirror (kept as original URLs). */
    imagesFailed?: number;
@@ -3725,7 +3727,7 @@ index 70f8911..516b07b 100644
  }
  
  export async function importParsedProduct(
-@@ -104,11 +326,63 @@ export async function importParsedProduct(
+@@ -104,11 +327,63 @@ export async function importParsedProduct(
      ? (p.gender as Gender)
      : undefined;
  
@@ -3793,7 +3795,7 @@ index 70f8911..516b07b 100644
    let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
  
    // Mirror photos to our storage before writing the row, so the catalog only
-@@ -147,8 +421,10 @@ export async function importParsedProduct(
+@@ -147,8 +422,10 @@ export async function importParsedProduct(
      ? [{
          name: resolved.name,
          url: sourceUrl,
@@ -3806,7 +3808,7 @@ index 70f8911..516b07b 100644
          availability: "in stock",
          isOfficial: resolved.isOfficial,
        }]
-@@ -160,6 +436,7 @@ export async function importParsedProduct(
+@@ -160,6 +437,7 @@ export async function importParsedProduct(
      name,
      brand: brand as Product["brand"],
      category,
@@ -3814,7 +3816,7 @@ index 70f8911..516b07b 100644
      description: String(p.description ?? "").slice(0, 5000),
      imageUrl,
      images: images.length ? images : (imageUrl ? [imageUrl] : []),
-@@ -169,6 +446,14 @@ export async function importParsedProduct(
+@@ -169,13 +447,29 @@ export async function importParsedProduct(
      priceMin: price,
      priceMax: priceOriginal > price ? priceOriginal : price,
      currency,
@@ -3829,7 +3831,11 @@ index 70f8911..516b07b 100644
      isNew: true,
      isSaved: false,
      gender,
-@@ -176,6 +461,11 @@ export async function importParsedProduct(
+-    styleKeywords: [],
++    // Filtered through the shared vocabulary rather than trusted: this function
++    // is also called with hand-assembled records, and a tag the pickers do not
++    // offer is a tag nothing can ever match.
++    styleKeywords: normalizeStyleKeywords(p.styleKeywords),
      retailers,
      ...(colors[0] ? { colorHex: colorToHex(colors[0]) } : {}),
      ...(colorGroupIds ? { colorGroupIds } : {}),
@@ -3841,7 +3847,7 @@ index 70f8911..516b07b 100644
    };
  
    const dbRow = { ...productToDb(product), source_url: sourceUrl };
-@@ -208,6 +498,47 @@ export async function importParsedProduct(
+@@ -208,6 +502,47 @@ export async function importParsedProduct(
        productId = data?.id ?? id;
        updated = true;
      } else {
@@ -3889,7 +3895,7 @@ index 70f8911..516b07b 100644
        const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);
        if (error) throw new Error(error.message);
        productId = data?.id ?? null;
-@@ -232,6 +563,21 @@ export async function importParsedProduct(
+@@ -232,6 +567,21 @@ export async function importParsedProduct(
      await storeBackgroundColor(productId, imageUrl);
    }
  
@@ -3911,7 +3917,7 @@ index 70f8911..516b07b 100644
    // Record an import job (best-effort — table is optional, ignore if absent).
    if (sourceUrl) {
      try {
-@@ -243,5 +589,14 @@ export async function importParsedProduct(
+@@ -243,5 +593,14 @@ export async function importParsedProduct(
      } catch { /* import_jobs not migrated — non-critical */ }
    }
  
@@ -3928,10 +3934,10 @@ index 70f8911..516b07b 100644
 +  };
  }
 diff --git a/src/lib/server/parser/normalize.ts b/src/lib/server/parser/normalize.ts
-index 5e23814..5567ffe 100644
+index 5e23814..c187df6 100644
 --- a/src/lib/server/parser/normalize.ts
 +++ b/src/lib/server/parser/normalize.ts
-@@ -7,12 +7,22 @@ import {
+@@ -7,12 +7,23 @@ import {
    cleanName,
    parsePrice,
    extractCurrencyFromDisplay,
@@ -3943,6 +3949,7 @@ index 5e23814..5567ffe 100644
    canonicalColor,
  } from "@/lib/server/product-fields";
  import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
++import { inferStyleKeywords } from "@/lib/style-keywords";
 +import {
 +  isBuiltInBucket,
 +  matchSubcategoryLabel,
@@ -3954,7 +3961,7 @@ index 5e23814..5567ffe 100644
  
  /** Resolve a possibly-relative image URL against the page URL. */
  function absoluteUrl(src: string, base: string): string | null {
-@@ -25,10 +35,20 @@ function absoluteUrl(src: string, base: string): string | null {
+@@ -25,10 +36,20 @@ function absoluteUrl(src: string, base: string): string | null {
    }
  }
  
@@ -3976,7 +3983,7 @@ index 5e23814..5567ffe 100644
  }
  
  export function normalizeExtract(
-@@ -48,6 +68,27 @@ export function normalizeExtract(
+@@ -48,6 +69,27 @@ export function normalizeExtract(
    const priceOriginal = parsePrice(raw.priceOriginal ?? "");
  
    const currency = normalizeCurrency(raw.currency, raw.price);
@@ -4004,7 +4011,7 @@ index 5e23814..5567ffe 100644
  
    // Category: explicit override → product name/description → URL path hint.
    // Prefer the name-based guess; only fall back to the URL path when the name
-@@ -58,9 +99,23 @@ export function normalizeExtract(
+@@ -58,9 +100,30 @@ export function normalizeExtract(
      // 92% against 88% when the description is included: descriptions name-drop
      // other garments, and "pairs well with shorts" reads as "is shorts".
      matchCategory(name) ??
@@ -4025,10 +4032,17 @@ index 5e23814..5567ffe 100644
 +  // that says bomber jacket — resolves rather than persists.
 +  const subcategory = resolveSubcategory(category, subLabelFromName ?? subLabelFromTrail);
 +
++  // Style, from everything the page said about the piece. The description
++  // carries most of it ("a pared-back essential", "utility pockets"), the
++  // material some ("linen"), and the label the tree filed it under the rest.
++  const styleKeywords = inferStyleKeywords(
++    [name, raw.description ?? "", raw.material ?? "", subcategory ?? "", trail].join(" "),
++  );
++
    // Gender: explicit override → URL → name/description
    const gender =
      config?.genderOverride ??
-@@ -84,7 +139,7 @@ export function normalizeExtract(
+@@ -84,7 +147,7 @@ export function normalizeExtract(
      const key = imageKey(full);
      if (!byPhoto.has(key)) byPhoto.set(key, full);
    }
@@ -4037,7 +4051,7 @@ index 5e23814..5567ffe 100644
  
    const rawAbs = raw.image && absoluteUrl(raw.image, sourceUrl);
    const rawPrimary = rawAbs ? (upgradeImageUrl(rawAbs, sourceUrl) ?? rawAbs) : null;
-@@ -102,6 +157,35 @@ export function normalizeExtract(
+@@ -102,6 +165,35 @@ export function normalizeExtract(
    const colors = [colorFrom(raw.color, name, sourceUrl)].filter(Boolean) as string[];
    const sizes = raw.sizes ?? [];
  
@@ -4073,12 +4087,13 @@ index 5e23814..5567ffe 100644
    return {
      name,
      brand,
-@@ -112,6 +196,14 @@ export function normalizeExtract(
+@@ -112,6 +204,15 @@ export function normalizeExtract(
      images: images.length ? images : (imageUrl ? [imageUrl] : []),
      colors,
      sizes,
 +    variantUrls,
 +    ...(subcategory ? { subcategory } : {}),
++    styleKeywords,
 +    // Validated here rather than trusted: a GTIN that fails its check digit is
 +    // a digit string the page happened to carry, and matching products on one
 +    // would link a coat to a phone number's worth of coincidence.
@@ -4842,7 +4857,7 @@ index 61b81ca..c236f7e 100644
  
  export interface SitemapOptions {
 diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
-index b2f84ec..0ef373e 100644
+index b2f84ec..2c87d9e 100644
 --- a/src/lib/server/parser/types.ts
 +++ b/src/lib/server/parser/types.ts
 @@ -6,6 +6,12 @@
@@ -4985,7 +5000,7 @@ index b2f84ec..0ef373e 100644
    gender?: Gender;
    description: string;
    imageUrl: string;
-@@ -113,6 +225,14 @@ export interface ParsedProduct {
+@@ -113,6 +225,22 @@ export interface ParsedProduct {
    priceOriginal: number;
    currency: string;
    sourceUrl: string;
@@ -4997,10 +5012,18 @@ index b2f84ec..0ef373e 100644
 +  mpn?: string;
 +  /** The store's shelf label, for reference. */
 +  sku?: string;
++  /**
++   * The styles the page's own words imply.
++   *
++   * The importer wrote an empty list for every product it created; the stylist
++   * reads this column, so an empty one is a catalogue it cannot reason about
++   * past category and colour.
++   */
++  styleKeywords: string[];
    /** Diagnostics for the admin UI. */
    strategies: string[];
    issues: string[];
-@@ -149,6 +269,16 @@ export interface CrawlItemResult {
+@@ -149,6 +277,16 @@ export interface CrawlItemResult {
    reason?: string;
    usedAi?: boolean;
    imagesMirrored?: number;
@@ -5480,6 +5503,68 @@ index 79fb337..8fbeba4 100644
  
    if (!isSupabaseConfigured || !supabase) {
      return { imageUrl, images: gallery, mirrored: 0, failed: 0, attempted: false };
+diff --git a/src/lib/style-keywords.ts b/src/lib/style-keywords.ts
+index 88c462d..23b09d8 100644
+--- a/src/lib/style-keywords.ts
++++ b/src/lib/style-keywords.ts
+@@ -47,3 +47,57 @@ export function normalizeStyleKeywords(values: unknown): StyleKeyword[] {
+   const wanted = new Set(list.map((v) => String(v).trim()).filter(Boolean));
+   return STYLE_KEYWORD_LIST.filter((k) => wanted.has(k));
+ }
++
++// ── Reading a style off a product ─────────────────────────────────────────────
++// The importer wrote `styleKeywords: []` for every product it has ever created:
++// the vocabulary above existed, the pickers used it, and nothing ever filled it
++// from a page. The stylist reads these tags, so an empty column means a
++// catalogue the stylist cannot reason about beyond category and colour.
++//
++// The rules below are the same shape as the category classifier's: ordered
++// pairs of a pattern and the value it implies, matched against the words a page
++// already gives us — the product's name, its description, its material and the
++// label the tree filed it under.
++//
++// Deliberately narrow. A style tag is a soft signal (a filter, a hint to the
++// stylist), so a missing one costs little and a wrong one teaches the stylist
++// something false about the piece. Words that name a garment rather than a
++// manner — "jacket", "dress" — are not here at all, and neither are colours:
++// black is not a style, and inferring "dark" from it would tag half the
++// catalogue.
++
++const STYLE_RULES: [RegExp, StyleKeyword][] = [
++  [/\bavant[-\s]?garde|deconstructed|asymmetric(?:al)?|sculptural|conceptual\b/i, "avant-garde"],
++  [/\bstreetwear|street\s?style|skate|graffiti|graphic\s?(?:tee|print)|hype\b/i, "streetwear"],
++  [/\butility|utilitarian|workwear|military|combat|tactical|technical|multi[-\s]?pocket\b/i, "utilitarian"],
++  [/\bbohemian|\bboho\b|crochet|fringe[ds]?|paisley|kaftan|caftan|peasant\b/i, "bohemian"],
++  [/\bpreppy|varsity|collegiate|argyle|letterman|pinstripe\b/i, "preppy"],
++  [/\bacademic|academia|tweed|houndstooth|herringbone|corduroy|scholar\b/i, "academic"],
++  [/\bsport|sports|sporty|athletic|performance|running|training|track\s?(?:suit|top|pant)|activewear|gym\b/i, "sporty"],
++  [/\bcoastal|nautical|resort|seersucker|beachwear|vacation|holiday\s?shop|\blinen\b/i, "coastal"],
++  [/\bromantic|feminine|floral|lace|ruffle[ds]?|bow\s?detail|chiffon|broderie\b/i, "romantic"],
++  [/\bmaximalis[mt]|eclectic|statement\s?(?:piece|print)|sequin|leopard|animal\s?print|vibrant\b/i, "maximalist"],
++  [/\bgothic|grunge|punk|darkwear|distressed\b/i, "dark"],
++  [/\bclassic|timeless|heritage|tailor(?:ed|ing)|refined|elegant|trench|loafer\b/i, "classic"],
++  [/\bminimal(?:ist)?|understated|clean\s?line|essential|pared[-\s]?back|sleek\b/i, "minimal"],
++];
++
++/**
++ * The styles a product's own words imply, at most `max` of them.
++ *
++ * Returned in the vocabulary's order rather than the order they were found, so
++ * two products tagged with the same pair read the same way — the same rule
++ * `normalizeStyleKeywords` follows.
++ */
++export function inferStyleKeywords(text: string, max = 3): StyleKeyword[] {
++  const source = (text ?? "").replace(/\s+/g, " ");
++  if (source.length < 3) return [];
++
++  const found = new Set<StyleKeyword>();
++  for (const [pattern, style] of STYLE_RULES) {
++    if (pattern.test(source)) found.add(style);
++  }
++  if (!found.size) return [];
++
++  return STYLE_KEYWORD_LIST.filter((k) => found.has(k)).slice(0, max);
++}
 diff --git a/src/lib/supabase.ts b/src/lib/supabase.ts
 index 67d73f5..b7af566 100644
 --- a/src/lib/supabase.ts

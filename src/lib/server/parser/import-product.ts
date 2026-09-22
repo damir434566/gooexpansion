@@ -13,6 +13,7 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { productToDb, writeProductRow } from "@/lib/data/db";
 import { colorToHex, colorGroupNamesFor, MAX_PRODUCT_IMAGES } from "@/lib/server/product-fields";
 import { toUsd } from "@/lib/server/fx";
+import { normalizeStyleKeywords } from "@/lib/style-keywords";
 import {
   chooseGroup,
   isColorSiblingByName,
@@ -457,7 +458,10 @@ export async function importParsedProduct(
     isNew: true,
     isSaved: false,
     gender,
-    styleKeywords: [],
+    // Filtered through the shared vocabulary rather than trusted: this function
+    // is also called with hand-assembled records, and a tag the pickers do not
+    // offer is a tag nothing can ever match.
+    styleKeywords: normalizeStyleKeywords(p.styleKeywords),
     retailers,
     ...(colors[0] ? { colorHex: colorToHex(colors[0]) } : {}),
     ...(colorGroupIds ? { colorGroupIds } : {}),

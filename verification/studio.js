@@ -250,6 +250,7 @@ const server = http.createServer(async (req, res) => {
           category: product.category,
           subcategory: product.subcategory,
           breadcrumbCount: Array.isArray(body.breadcrumbs) ? body.breadcrumbs.length : 0,
+          styleKeywords: product.styleKeywords,
           gtin: product.gtin,
           mpn: product.mpn,
           sku: product.sku,

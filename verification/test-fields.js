@@ -11,6 +11,7 @@
  *   Part 3 — description and material
  *   Part 4 — brand, category, subcategory
  *   Part 5 — the codes that find the same item on another store
+ *   Part 6 — style
  */
 const path = require("path");
 const Module = require("module");
@@ -38,6 +39,7 @@ const {
   normalizeCode,
 } = require(path.join(COMPILED, "lib", "server", "product-fields.js"));
 const { isSameItem, withRetailer, mergePatch } = require(path.join(PARSER, "same-item.js"));
+const { inferStyleKeywords } = require(path.join(COMPILED, "lib", "style-keywords.js"));
 const { matchSubcategoryLabel } = require(path.join(COMPILED, "lib", "categories.js"));
 const { isColorSiblingByName, chooseGroup, variantBaseName } = require(
   path.join(PARSER, "variant-group.js"),
@@ -759,6 +761,57 @@ ok(
   "the run's row can say what it filled",
   merged.filled.includes("retailer") && merged.filled.includes("colors"),
   JSON.stringify(merged.filled),
+);
+
+// ── Part 6: style ───────────────────────────────────────────────────────────
+
+console.log("— the style a product's own words imply —");
+
+check(
+  "a pared-back essential",
+  inferStyleKeywords("A pared-back essential with clean lines"),
+  ["minimal"],
+);
+check("utility pockets", inferStyleKeywords("Utility jacket with multi-pocket front"), ["utilitarian"]);
+check("a tailored trench", inferStyleKeywords("Timeless tailored trench coat"), ["classic"]);
+check("tweed", inferStyleKeywords("Houndstooth tweed blazer"), ["academic"]);
+check("linen in summer", inferStyleKeywords("Relaxed linen shirt for the coast"), ["coastal"]);
+check("a track top", inferStyleKeywords("Athletic track top for training"), ["sporty"]);
+check("deconstructed", inferStyleKeywords("Deconstructed asymmetric wool coat"), ["avant-garde"]);
+// Order follows the vocabulary, not the text, so two products tagged the same
+// read the same.
+check(
+  "several, in the vocabulary's order",
+  inferStyleKeywords("Utility cargo trousers in a pared-back, timeless cut"),
+  ["minimal", "classic", "utilitarian"],
+);
+check("at most three", inferStyleKeywords("minimal classic utility sporty romantic").length, 3);
+// A garment is not a style, and neither is a colour: black would otherwise tag
+// half the catalogue as "dark".
+check("a plain product name implies nothing", inferStyleKeywords("Wool coat"), []);
+check("a colour is not a style", inferStyleKeywords("Black leather bag"), []);
+check("nothing at all", inferStyleKeywords(""), []);
+
+console.log("— and it reaches the product —");
+
+const styled = normalizeExtract(
+  extractProduct(
+    page({
+      ...BASE,
+      name: "Utility overshirt",
+      description: "A pared-back overshirt with multi-pocket utility front.",
+    }),
+    null,
+    PAGE,
+  ),
+  PAGE,
+  null,
+);
+check("tagged from name and description", styled.styleKeywords, ["minimal", "utilitarian"]);
+check(
+  "a page with nothing to go on stays untagged",
+  normalizeExtract(extractProduct(page(BASE), null, PAGE), PAGE, null).styleKeywords,
+  [],
 );
 
 console.log("");

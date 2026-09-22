@@ -233,6 +233,14 @@ export interface ParsedProduct {
   mpn?: string;
   /** The store's shelf label, for reference. */
   sku?: string;
+  /**
+   * The styles the page's own words imply.
+   *
+   * The importer wrote an empty list for every product it created; the stylist
+   * reads this column, so an empty one is a catalogue it cannot reason about
+   * past category and colour.
+   */
+  styleKeywords: string[];
   /** Diagnostics for the admin UI. */
   strategies: string[];
   issues: string[];

@@ -600,6 +600,15 @@ async function main() {
     uah && JSON.stringify({ gtin: uah.gtin, sku: uah.sku }),
   );
 
+  // Style, read out of the description the accordion was hiding — which is the
+  // whole chain in one assertion: there was nothing to infer from until that
+  // text arrived.
+  check(
+    "the piece is tagged with a style, from words only the rendered page had",
+    !!bomber && JSON.stringify(bomber.styleKeywords) === JSON.stringify(["minimal"]),
+    bomber && JSON.stringify(bomber.styleKeywords),
+  );
+
   collect.close(); popup.close();
 
   console.log(`\n  ${pass} passed, ${failures.length} failed\n`);

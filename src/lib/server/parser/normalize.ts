@@ -15,6 +15,7 @@ import {
   canonicalColor,
 } from "@/lib/server/product-fields";
 import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
+import { inferStyleKeywords } from "@/lib/style-keywords";
 import {
   isBuiltInBucket,
   matchSubcategoryLabel,
@@ -116,6 +117,13 @@ export function normalizeExtract(
   // that says bomber jacket — resolves rather than persists.
   const subcategory = resolveSubcategory(category, subLabelFromName ?? subLabelFromTrail);
 
+  // Style, from everything the page said about the piece. The description
+  // carries most of it ("a pared-back essential", "utility pockets"), the
+  // material some ("linen"), and the label the tree filed it under the rest.
+  const styleKeywords = inferStyleKeywords(
+    [name, raw.description ?? "", raw.material ?? "", subcategory ?? "", trail].join(" "),
+  );
+
   // Gender: explicit override → URL → name/description
   const gender =
     config?.genderOverride ??
@@ -198,6 +206,7 @@ export function normalizeExtract(
     sizes,
     variantUrls,
     ...(subcategory ? { subcategory } : {}),
+    styleKeywords,
     // Validated here rather than trusted: a GTIN that fails its check digit is
     // a digit string the page happened to carry, and matching products on one
     // would link a coat to a phone number's worth of coincidence.

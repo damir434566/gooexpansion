@@ -134,8 +134,8 @@ function spaProductPage() {
   <button class="accordion-head">Details</button>
   <div class="product-description" style="display:none">
     Cut from a wool blend with a boxy shoulder and a cropped hem, this bomber is
-    finished with ribbed trims and a two-way zip. The model is 178cm and wears a
-    size S.
+    a pared-back essential finished with ribbed trims and a two-way zip. The
+    model is 178cm and wears a size S.
   </div>
 </div>
 <div class="product-specs">
