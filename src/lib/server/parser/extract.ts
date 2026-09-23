@@ -124,6 +124,34 @@ function typeIncludes(node: JsonObject, type: string): boolean {
 }
 
 /**
+ * A node that describes a piece a shopper can buy: a `Product`, or the
+ * `ProductGroup` that stands for one piece in several colours and sizes.
+ *
+ * `ProductGroup` is what Google has asked stores for since 2024, and a growing
+ * share of stores emit it: one group carrying the name, brand and description,
+ * and under `hasVariant` one `Product` per colour-and-size. Read as plain
+ * Products, that is twelve products on one page — and a page with twelve
+ * products is a listing, so the piece was never read as a piece at all.
+ */
+function isProductNode(node: JsonObject): boolean {
+  return typeIncludes(node, "Product") || typeIncludes(node, "ProductGroup");
+}
+
+/**
+ * Keys under which a Product names the other parts of ITSELF: its variants,
+ * the group it is a variant of, its model. What sits there is this piece, not
+ * a second one, and is read through the node that owns it.
+ */
+const OWN_PART_KEYS = new Set(["hasVariant", "isVariantOf", "model"]);
+
+/**
+ * Keys under which a Product names a DIFFERENT piece — the "goes well with"
+ * and "similar items" a store may describe in its structured data. They count
+ * as list items: other products the page mentions, never the page's own.
+ */
+const RELATED_KEYS = new Set(["isSimilarTo", "isRelatedTo", "isAccessoryOrSparePartFor", "isConsumableFor"]);
+
+/**
  * Breadth-first search across blocks (incl. @graph and ItemList) collecting
  * every Product node in document order. ItemList → itemListElement → item is
  * expanded so listing/category pages yield one node per card.
@@ -137,7 +165,8 @@ function findAllProductNodes(blocks: JsonObject[]): JsonObject[] {
     if (seen.has(node)) continue;
     seen.add(node);
 
-    if (typeIncludes(node, "Product")) out.push(node);
+    const product = isProductNode(node);
+    if (product) out.push(node);
 
     // ItemList / ItemPage → itemListElement entries (often { item: Product } or { url })
     const els = node.itemListElement;
@@ -151,7 +180,9 @@ function findAllProductNodes(blocks: JsonObject[]): JsonObject[] {
 
     const graph = node["@graph"];
     if (Array.isArray(graph)) graph.forEach((g) => isObj(g) && queue.push(g));
-    for (const v of Object.values(node)) {
+    for (const [k, v] of Object.entries(node)) {
+      // A card's variants are that card, not more cards.
+      if (product && OWN_PART_KEYS.has(k)) continue;
       if (isObj(v)) queue.push(v);
       else if (Array.isArray(v)) v.forEach((x) => isObj(x) && queue.push(x));
     }
@@ -175,7 +206,8 @@ function partitionProductNodes(blocks: JsonObject[]): { standalone: JsonObject[]
     if (seen.has(node)) continue;
     seen.add(node);
 
-    if (typeIncludes(node, "Product")) (underList ? listItems : standalone).push(node);
+    const product = isProductNode(node);
+    if (product) (underList ? listItems : standalone).push(node);
 
     const els = node.itemListElement;
     if (Array.isArray(els)) {
@@ -189,8 +221,14 @@ function partitionProductNodes(blocks: JsonObject[]): { standalone: JsonObject[]
     if (Array.isArray(graph)) graph.forEach((g) => isObj(g) && queue.push({ node: g, underList }));
     for (const [k, v] of Object.entries(node)) {
       if (k === "itemListElement") continue;
-      if (isObj(v)) queue.push({ node: v, underList });
-      else if (Array.isArray(v)) v.forEach((x) => isObj(x) && queue.push({ node: x, underList }));
+      // The piece's own variants are read through the piece. Counted here, a
+      // ProductGroup of twelve colour-and-size variants made a product page a
+      // "listing" of twelve, and the page's photos, sizes, colour and
+      // description were thrown away with the single-product path.
+      if (product && OWN_PART_KEYS.has(k)) continue;
+      const related = underList || (product && RELATED_KEYS.has(k));
+      if (isObj(v)) queue.push({ node: v, underList: related });
+      else if (Array.isArray(v)) v.forEach((x) => isObj(x) && queue.push({ node: x, underList: related }));
     }
   }
   return { standalone, listItems };
@@ -458,8 +496,169 @@ function colorFromNode(node: JsonObject): string | undefined {
   return undefined;
 }
 
-/** Extract raw fields from a single schema.org Product node. */
-function rawFromProductNode(node: JsonObject): Partial<RawExtract> & { found: boolean } {
+function objectsIn(v: JsonValue | undefined): JsonObject[] {
+  if (Array.isArray(v)) return v.filter(isObj);
+  return isObj(v) ? [v] : [];
+}
+
+/** An address reduced to what identifies a page: host, path, and a variant id. */
+function pageKey(u: string | undefined): string {
+  if (!u) return "";
+  try {
+    const url = new URL(u);
+    const variant = url.searchParams.get("variant") ?? "";
+    return `${url.host.replace(/^www\./, "").toLowerCase()}${url.pathname.replace(/\/+$/, "").toLowerCase()}${variant ? `?variant=${variant}` : ""}`;
+  } catch {
+    return "";
+  }
+}
+
+function variantUrl(v: JsonObject): string | undefined {
+  return (
+    asString(v.url) ??
+    asString(v["@id"]) ??
+    objectsIn(v.offers).map((o) => asString(o.url)).find(Boolean)
+  );
+}
+
+/**
+ * The variant of a group that this page is showing.
+ *
+ * A variant whose address is the page's own is the answer. Failing that, one
+ * on the same path — a store that puts `?variant=` on its variants but not on
+ * the link we followed is still showing the first of them. Failing that, the
+ * first variant: stores list the default colourway first.
+ */
+function shownVariant(variants: JsonObject[], pageUrl?: string): JsonObject | undefined {
+  if (!variants.length) return undefined;
+  const page = pageKey(pageUrl);
+  if (page) {
+    const exact = variants.find((v) => pageKey(variantUrl(v)) === page);
+    if (exact) return exact;
+    const path = page.split("?")[0];
+    const samePath = variants.find((v) => pageKey(variantUrl(v)).split("?")[0] === path);
+    if (samePath) return samePath;
+  }
+  return variants[0];
+}
+
+/**
+ * One piece out of a `ProductGroup`: the group says what the piece is, the
+ * variant the page shows says which colourway, and the variants in that
+ * colourway say which sizes and photos.
+ *
+ * Photos and sizes come from the shown colour only. The group's other colours
+ * are separate cards in the catalogue — linked as colourways, not merged into
+ * one gallery with a black coat's photos on the camel one.
+ */
+/** A JSON-LD reading, plus the photos that belong to the piece's other colours. */
+type JsonLdRead = Partial<RawExtract> & { found: boolean; otherColourImages?: string[] };
+
+function rawFromGroup(group: JsonObject, pageUrl?: string): JsonLdRead {
+  const variants = objectsIn(group.hasVariant);
+  const shown = shownVariant(variants, pageUrl);
+  const shownRaw = shown ? rawFromProductNode(shown) : undefined;
+  const color = colorFromNode(shown ?? group) ?? colorFromNode(group);
+  const sameColour = color
+    ? variants.filter((v) => {
+        const c = colorFromNode(v);
+        return !c || c.toLowerCase() === color.toLowerCase();
+      })
+    : variants;
+
+  const groupOffers = offerInfo(group.offers);
+  const offers = groupOffers.price
+    ? groupOffers
+    : offerInfo(sameColour.flatMap((v) => objectsIn(v.offers)) as JsonValue);
+
+  const images = [
+    ...new Set([...imageList(group.image), ...sameColour.flatMap((v) => imageList(v.image))]),
+  ];
+
+  const sizes = [...new Set(sameColour.flatMap((v) => sizesFromNode(v)))];
+  const material = asString(group.material) ?? shownRaw?.material;
+  const description = asString(group.description) ?? shownRaw?.description;
+  const groupCodes = codesFromNode(group);
+  const url = (shown && variantUrl(shown)) ?? asString(group.url);
+
+  // The group's other colours, by address — the colourway links a store that
+  // switches colours with script never renders as links. They go to the same
+  // exact `source_url` lookup as the rendered colour row.
+  const otherColours = color
+    ? variants
+        .filter((v) => {
+          const c = colorFromNode(v);
+          return !!c && c.toLowerCase() !== color.toLowerCase();
+        })
+        .map(variantUrl)
+        .filter((u): u is string => !!u && /^https?:\/\//.test(u))
+    : [];
+
+  // Every variant's photo sits in the JSON-LD text, where the gallery harvester
+  // finds it by the same naming as the shown colour's. Named here so it can be
+  // kept out: the camel coat's photos are the camel card's.
+  const shownImages = new Set(images);
+  const otherColourImages = color
+    ? variants
+        .filter((v) => !sameColour.includes(v))
+        .flatMap((v) => imageList(v.image))
+        .filter((u) => !shownImages.has(u))
+    : [];
+
+  return {
+    found: true,
+    otherColourImages,
+    variantUrls: [...new Set(otherColours)].slice(0, 20),
+    name: asString(group.name) ?? shownRaw?.name,
+    brand: brandName(group.brand) ?? shownRaw?.brand,
+    price: offers.price,
+    priceOriginal: offers.priceOriginal,
+    currency: offers.currency ?? groupOffers.currency,
+    image: images[0],
+    images,
+    color: color ? decodeEntities(color) : undefined,
+    material: material ? decodeEntities(material) : undefined,
+    description: description ? stripTags(description) : undefined,
+    url: url && /^https?:\/\//.test(url) ? url : undefined,
+    sizes: sizes.length ? sizes : sizesFromNode(group),
+    gtin: shownRaw?.gtin || groupCodes.gtin,
+    // A group's `productGroupID` is the maker's style code on most feeds; the
+    // variant's own mpn is more specific when it has one.
+    mpn: shownRaw?.mpn || groupCodes.mpn || normalizeCode(asString(group.productGroupID)),
+    sku: shownRaw?.sku || groupCodes.sku,
+  };
+}
+
+/**
+ * Extract raw fields from a single schema.org Product (or ProductGroup) node.
+ *
+ * `pageUrl` picks the variant a group's page is showing; without it the
+ * group's first variant is taken.
+ */
+function rawFromProductNode(node: JsonObject, pageUrl?: string): JsonLdRead {
+  if (typeIncludes(node, "ProductGroup")) return rawFromGroup(node, pageUrl);
+
+  // A variant page that names its group: what the variant does not say about
+  // itself — usually the brand and the description — the group says for it.
+  const group = isObj(node.isVariantOf) ? node.isVariantOf : undefined;
+  if (group) {
+    const own = rawFromVariant(node);
+    const shared = rawFromVariant(group);
+    return {
+      ...own,
+      name: own.name ?? shared.name,
+      brand: own.brand ?? shared.brand,
+      description: own.description ?? shared.description,
+      material: own.material ?? shared.material,
+      images: own.images?.length ? own.images : shared.images,
+      image: own.image ?? shared.image,
+    };
+  }
+  return rawFromVariant(node);
+}
+
+/** The fields one Product node states about itself. */
+function rawFromVariant(node: JsonObject): Partial<RawExtract> & { found: boolean } {
   const offers = offerInfo(node.offers);
   const images = imageList(node.image);
   const color = colorFromNode(node);
@@ -527,12 +726,57 @@ function dedupeRaw(list: RawExtract[]): RawExtract[] {
   return out;
 }
 
-function fromJsonLd(html: string): Partial<RawExtract> & { found: boolean } {
+/** How much a Product node says, for choosing between two about one piece. */
+function richness(r: Partial<RawExtract>): number {
+  return (
+    (r.price ? 4 : 0) +
+    (r.images?.length ? 2 : 0) +
+    (r.name ? 1 : 0) +
+    (r.brand ? 1 : 0) +
+    (r.description ? 1 : 0) +
+    (r.sizes?.length ? 1 : 0)
+  );
+}
+
+/**
+ * The page's own product out of its JSON-LD.
+ *
+ * A page often states its product twice: once from the theme, with offers and
+ * photos, and once from a reviews app, with a name and a star rating and
+ * nothing else. The fuller statement is taken, and whatever it leaves blank is
+ * filled from the others that name the same piece.
+ *
+ * `allowListFallback` is off when the caller knows it is on a product page (the
+ * extension only ever sends those): there, a page with no product of its own in
+ * JSON-LD must not borrow one from its "you may also like" list, which would
+ * import a stranger's name, price and photos under this page's address.
+ */
+function fromJsonLd(
+  html: string,
+  pageUrl?: string,
+  allowListFallback = true,
+): JsonLdRead {
   const { standalone, listItems } = partitionProductNodes(parseJsonLdBlocks(html));
-  // Prefer the page's own product; fall back to the first list item.
-  const node = standalone[0] ?? listItems[0];
-  if (!node) return { found: false, images: [], sizes: [] };
-  return rawFromProductNode(node);
+  if (!standalone.length) {
+    const node = allowListFallback ? listItems[0] : undefined;
+    if (!node) return { found: false, images: [], sizes: [] };
+    return rawFromProductNode(node, pageUrl);
+  }
+
+  const reads = standalone.map((n) => rawFromProductNode(n, pageUrl));
+  const best = reads.reduce((a, b) => (richness(b) > richness(a) ? b : a));
+  const samePiece = (r: Partial<RawExtract>) =>
+    !r.name || !best.name || r.name.trim().toLowerCase() === best.name.trim().toLowerCase();
+  const merged: JsonLdRead = { ...best };
+  for (const r of reads) {
+    if (r === best || !samePiece(r)) continue;
+    for (const key of ["name", "brand", "price", "priceOriginal", "currency", "image", "color", "material", "description", "url", "gtin", "mpn", "sku"] as const) {
+      if (!merged[key] && r[key]) (merged as Record<string, unknown>)[key] = r[key];
+    }
+    if (!merged.images?.length && r.images?.length) merged.images = r.images;
+    if (!merged.sizes?.length && r.sizes?.length) merged.sizes = r.sizes;
+  }
+  return merged;
 }
 
 function fromMeta(html: string): Partial<RawExtract> {
@@ -648,7 +892,7 @@ export function extractProduct(
   evidence?: PageEvidence,
 ): RawExtract {
   const strategies: string[] = [];
-  const jsonld = fromJsonLd(html);
+  const jsonld = fromJsonLd(html, baseUrl, !evidence);
   if (jsonld.found) strategies.push("json-ld");
   const meta = fromMeta(html);
   if (meta.name || meta.price || (meta.images?.length ?? 0) > 0) strategies.push("opengraph");
@@ -704,6 +948,11 @@ export function extractProduct(
     const productName = pick(ruleVal("name"), jsonld.name, meta.name, micro.name) ?? "";
     galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName, evidence?.images ?? []);
     if (galleryImages.length) strategies.push("gallery");
+  }
+  if (jsonld.otherColourImages?.length) {
+    const photoKey = (u: string) => u.split(/[?#]/)[0];
+    const elsewhere = new Set(jsonld.otherColourImages.map(photoKey));
+    galleryImages = galleryImages.filter((u) => !elsewhere.has(photoKey(u)));
   }
 
   return {
@@ -781,7 +1030,7 @@ export function extractProduct(
       compositionFromText(description ?? ""),
     ),
     description,
-    variantUrls: evidence?.variantUrls ?? [],
+    variantUrls: [...new Set([...(evidence?.variantUrls ?? []), ...(jsonld.variantUrls ?? [])])],
     // Codes, for recognising this item on another store's page. The spec table
     // is the fallback: an article number printed in a table is what a store
     // shows when it declares nothing.

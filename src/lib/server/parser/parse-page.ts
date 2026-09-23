@@ -202,7 +202,17 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
   let products: ParsedProduct[] = [];
   let isListing = false;
 
-  if (standaloneCount === 1) {
+  // One piece stated several times — the theme's Product and a reviews app's
+  // Product under the same name — is still one piece, not a listing of two.
+  const standaloneNames = new Set(
+    standaloneItems.map((n) => (n.name ?? "").trim().toLowerCase()).filter(Boolean),
+  );
+
+  // The extension only ever sends product pages: the plan picked them. Reading
+  // one as a listing takes the first JSON-LD card for the product and discards
+  // everything the page itself showed — its photos, sizes, colour, description
+  // and the currency printed beside the price.
+  if (opts.evidence || standaloneCount === 1 || (standaloneCount >= 2 && standaloneNames.size <= 1)) {
     products = await single();
   } else {
     const items = standaloneCount >= 2 ? standaloneItems : listItems;

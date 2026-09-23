@@ -168,6 +168,8 @@ const OPTIONAL_COLUMNS = [
   "source_currency",
   "fx_rate",
   "fx_date",
+  "price_min_usd",
+  "price_max_usd",
   "gtin",
   "mpn",
   "sku",
