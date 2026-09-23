@@ -472,7 +472,19 @@ export async function importParsedProduct(
     ...(sku ? { sku } : {}),
   };
 
-  const dbRow = { ...productToDb(product), source_url: sourceUrl };
+  // `price_min_usd` is the column migration 019_product_price_usd gave the
+  // search RPCs and the stylist's budget, which read
+  // `coalesce(price_min_usd, price_min)`. Its backfill copied every old
+  // price_min across unconverted, so a re-import that corrects price_min must
+  // correct it too — otherwise the card says $235 and the "under $200" filter
+  // still sees the 200 the store printed in euros. A price left in a currency
+  // with no rate gets NULL, which reads back as price_min exactly as before.
+  const dbRow = {
+    ...productToDb(product),
+    source_url: sourceUrl,
+    price_min_usd: currency === "USD" ? product.priceMin : null,
+    price_max_usd: currency === "USD" ? product.priceMax : null,
+  };
 
   // Written through `writeProductRow` so a database that has not run the
   // colour-filter migration drops that one column and still takes the product,
@@ -526,6 +538,10 @@ export async function importParsedProduct(
 
       if (twin) {
         const { patch, filled } = mergePatch(twin, incoming);
+        // Merged prices are dollars on both sides, so the comparable scale is
+        // the same number.
+        if (patch.price_min !== undefined) patch.price_min_usd = patch.price_min;
+        if (patch.price_max !== undefined) patch.price_max_usd = patch.price_max;
         const { error } = await writeProductRow<{ id: string }>(patch, (row) =>
           supabase!.from("products").update(row).eq("id", twin.id).select("id").maybeSingle(),
         );
