@@ -453,6 +453,10 @@ function detailLine(r: CrawlItemResult): string {
     // Said, because a name match is a judgement where a code match is a fact,
     // and the admin is the one who can undo a wrong one.
     const how = r.mergedBy === "name" ? " (same name and colour)" : "";
+    if (r.linkOnly) {
+      parts.push(`store link added to an existing product${how}, without its photos`);
+      return parts.join(" · ");
+    }
     parts.push(
       filled.length
         ? `added as a store to an existing product${how}, filling ${filled.join(", ")}`

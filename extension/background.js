@@ -329,7 +329,7 @@ function finish() {
   void tellPage("done", {});
 }
 
-async function run({ storeUrl, limit }) {
+async function run({ storeUrl, limit, linkOnly = false }) {
   let origin;
   try {
     origin = new URL(storeUrl).origin;
@@ -441,7 +441,11 @@ async function run({ storeUrl, limit }) {
       const ingested = await askPage("ingest", {
         url,
         html: snap.html,
-        images: snap.images,
+        // A link-only store's photos are what is wrong with it: they are not
+        // sent, and the server adds only this page's link to a piece the
+        // catalogue already has.
+        images: linkOnly ? [] : snap.images,
+        linkOnly,
         priceText: snap.priceText,
         sizes: snap.sizes,
         colorText: snap.colorText,
@@ -527,7 +531,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       const storeUrl = msg.payload?.storeUrl;
       const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, 2_000));
-      run({ storeUrl, limit }).catch((err) => {
+      run({ storeUrl, limit, linkOnly: msg.payload?.linkOnly === true }).catch((err) => {
         halt(err?.message ?? "The run failed unexpectedly.");
       });
       sendResponse({ ok: true });
