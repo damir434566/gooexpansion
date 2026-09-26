@@ -1,0 +1,378 @@
+diff --git a/extension/README.md b/extension/README.md
+index 5904719..73ea722 100644
+--- a/extension/README.md
++++ b/extension/README.md
+@@ -45,6 +45,7 @@
+ | Поле | Что это |
+ |---|---|
+ | **Products to collect** | Сколько товаров собрать за прогон. |
++| **Link only** | Для магазина, где фото нет или они чужие (баннеры, таблицы размеров). Фото не отправляются; сайт только добавляет ссылку на этот магазин к такой же вещи, которая уже есть в каталоге, а новых карточек не создаёт. Запоминается для каждого магазина. |
+ | **Goo Studio** | Адрес сайта. По умолчанию `https://www.goo-fashion.com`. Для локальной разработки — `http://localhost:3000`. |
+ 
+ ---
+diff --git a/extension/background.js b/extension/background.js
+index d5f75ca..5f7528f 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -329,7 +329,7 @@ function finish() {
+   void tellPage("done", {});
+ }
+ 
+-async function run({ storeUrl, limit }) {
++async function run({ storeUrl, limit, linkOnly = false }) {
+   let origin;
+   try {
+     origin = new URL(storeUrl).origin;
+@@ -441,7 +441,11 @@ async function run({ storeUrl, limit }) {
+       const ingested = await askPage("ingest", {
+         url,
+         html: snap.html,
+-        images: snap.images,
++        // A link-only store's photos are what is wrong with it: they are not
++        // sent, and the server adds only this page's link to a piece the
++        // catalogue already has.
++        images: linkOnly ? [] : snap.images,
++        linkOnly,
+         priceText: snap.priceText,
+         sizes: snap.sizes,
+         colorText: snap.colorText,
+@@ -527,7 +531,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+       }
+       const storeUrl = msg.payload?.storeUrl;
+       const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, 2_000));
+-      run({ storeUrl, limit }).catch((err) => {
++      run({ storeUrl, limit, linkOnly: msg.payload?.linkOnly === true }).catch((err) => {
+         halt(err?.message ?? "The run failed unexpectedly.");
+       });
+       sendResponse({ ok: true });
+diff --git a/extension/manifest.json b/extension/manifest.json
+index 4b97895..e469195 100644
+--- a/extension/manifest.json
++++ b/extension/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "Goo Collect",
+-  "version": "1.0.4",
++  "version": "1.0.5",
+   "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
+   "minimum_chrome_version": "116",
+   "permissions": [
+diff --git a/extension/popup.css b/extension/popup.css
+index e8758ee..145da73 100644
+--- a/extension/popup.css
++++ b/extension/popup.css
+@@ -70,6 +70,20 @@ h1 {
+   gap: 8px;
+ }
+ 
++.row.check small {
++  display: block;
++  margin-top: 2px;
++  font-size: 10px;
++  letter-spacing: 0;
++  text-transform: none;
++  color: var(--foreground-subtle);
++}
++
++.row.check input {
++  width: auto;
++  flex: none;
++}
++
+ .row {
+   display: flex;
+   align-items: center;
+diff --git a/extension/popup.html b/extension/popup.html
+index 251c73f..49baf9d 100644
+--- a/extension/popup.html
++++ b/extension/popup.html
+@@ -17,6 +17,14 @@
+         <input id="limit" type="number" min="1" max="2000" value="30" />
+       </label>
+ 
++      <label class="row check" for="linkOnly">
++        <span>
++          Link only
++          <small>Photos here are missing or wrong: only add this store's link to pieces the catalogue already has.</small>
++        </span>
++        <input id="linkOnly" type="checkbox" />
++      </label>
++
+       <label class="row" for="studio">
+         <span>Goo Studio</span>
+         <input id="studio" type="url" spellcheck="false" placeholder="https://www.goo-fashion.com" />
+diff --git a/extension/popup.js b/extension/popup.js
+index cd405fd..2b03e3c 100644
+--- a/extension/popup.js
++++ b/extension/popup.js
+@@ -21,6 +21,7 @@ const COLLECT_PATH = "/goo-studio/parser/collect";
+ const el = {
+   store: document.getElementById("store"),
+   limit: document.getElementById("limit"),
++  linkOnly: document.getElementById("linkOnly"),
+   studio: document.getElementById("studio"),
+   start: document.getElementById("start"),
+   stop: document.getElementById("stop"),
+@@ -36,6 +37,33 @@ const el = {
+ 
+ let activeUrl = "";
+ 
++/**
++ * Link-only is a fact about a store, not about a run: a store whose photos are
++ * wrong today will be wrong next week. So it is remembered per store, on this
++ * machine, and the box is ticked again when the admin comes back to it.
++ */
++const LINK_ONLY_KEY = "linkOnlyStores";
++
++function hostOf(url) {
++  try {
++    return new URL(url).hostname.replace(/^www\./, "");
++  } catch {
++    return "";
++  }
++}
++
++async function linkOnlyStores() {
++  const stored = await chrome.storage.local.get(LINK_ONLY_KEY);
++  return Array.isArray(stored[LINK_ONLY_KEY]) ? stored[LINK_ONLY_KEY] : [];
++}
++
++async function rememberLinkOnly(host, on) {
++  if (!host) return;
++  const list = (await linkOnlyStores()).filter((h) => h !== host);
++  if (on) list.push(host);
++  await chrome.storage.local.set({ [LINK_ONLY_KEY]: list.slice(-500) });
++}
++
+ function note(message) {
+   el.note.textContent = message ?? "";
+   el.note.hidden = !message;
+@@ -57,6 +85,7 @@ async function init() {
+ 
+   if (/^https?:/i.test(activeUrl)) {
+     el.store.textContent = activeUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70);
++    el.linkOnly.checked = (await linkOnlyStores()).includes(hostOf(activeUrl));
+   } else {
+     el.store.textContent = "Open a store page in this tab first.";
+     el.start.disabled = true;
+@@ -104,7 +133,9 @@ async function start() {
+ 
+   const studioOrigin = (el.studio.value || DEFAULT_STUDIO).replace(/\/+$/, "");
+   const limit = Math.max(1, Math.min(Number(el.limit.value) || 30, 2000));
++  const linkOnly = el.linkOnly.checked;
+   await chrome.storage.sync.set({ studioOrigin, limit });
++  await rememberLinkOnly(hostOf(activeUrl), linkOnly);
+ 
+   // Must be inside the click: Chrome refuses a permission prompt without one.
+   let granted = false;
+@@ -129,7 +160,7 @@ async function start() {
+     return;
+   }
+ 
+-  const res = await send("start", { storeUrl: activeUrl, limit });
++  const res = await send("start", { storeUrl: activeUrl, limit, linkOnly });
+   if (res && res.ok === false) {
+     note(res.error ?? "Could not start.");
+     el.start.disabled = false;
+diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
+index 24e0c9a..8bcef89 100644
+--- a/src/app/api/admin/parser/collect/route.ts
++++ b/src/app/api/admin/parser/collect/route.ts
+@@ -280,6 +280,8 @@ export async function POST(req: Request) {
+   const mirrorImages =
+     typeof body?.mirrorImages === "boolean" ? body.mirrorImages : aiSettings.downloadImages;
+   const dryRun = body?.dryRun === true;
++  // Set in the popup for a store whose photos are missing or wrong.
++  const requestedLinkOnly = body?.linkOnly === true;
+ 
+   let result: CrawlItemResult;
+ 
+@@ -324,13 +326,39 @@ export async function POST(req: Request) {
+     } else if (dryRun) {
+       result = { url, status: "skipped", reason: "Dry run", name: product.name, usedAi };
+     } else {
++      // Link-only when the admin said the store's photos are not to be trusted,
++      // and when the page yielded none at all: a card without a photo is not a
++      // card, but its price and address still make a "where to buy" line on the
++      // product we already have.
++      const photoless = !product.imageUrl && !(product.images?.length ?? 0);
++      const linkOnly = requestedLinkOnly || photoless;
+       const imported = await importParsedProduct(
+         product as unknown as Record<string, unknown>,
+         product.sourceUrl || url,
+-        { mirrorImages },
++        { mirrorImages, linkOnly },
+       );
+-      result = imported.ok
++      result = !imported.ok
++        ? { url, status: "failed", reason: imported.error, name: product.name, usedAi }
++        : imported.linkOnly === "no-match"
+         ? {
++            url,
++            status: "skipped",
++            name: product.name,
++            usedAi,
++            reason: requestedLinkOnly
++              ? "Link-only store: no such piece in the catalogue yet, so nothing was added"
++              : "No photos on the page, and no such piece in the catalogue to add the link to",
++          }
++        : imported.linkOnly === "own-row"
++        ? {
++            url,
++            status: "skipped",
++            name: product.name,
++            usedAi,
++            productId: imported.productId ?? undefined,
++            reason: "Already in the catalogue as its own card; left unchanged (link-only)",
++          }
++        : {
+             url,
+             status: imported.updated ? "updated" : "imported",
+             productId: imported.productId ?? undefined,
+@@ -347,8 +375,8 @@ export async function POST(req: Request) {
+             merged: !!imported.mergedInto,
+             mergedBy: imported.mergedBy,
+             mergedFields: imported.mergedFields,
+-          }
+-        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
++            linkOnly: imported.linkOnly === "linked",
++          };
+     }
+   } catch (err) {
+     result = {
+diff --git a/src/app/goo-studio/parser/collect/page.tsx b/src/app/goo-studio/parser/collect/page.tsx
+index ff5abd8..5315b10 100644
+--- a/src/app/goo-studio/parser/collect/page.tsx
++++ b/src/app/goo-studio/parser/collect/page.tsx
+@@ -453,6 +453,10 @@ function detailLine(r: CrawlItemResult): string {
+     // Said, because a name match is a judgement where a code match is a fact,
+     // and the admin is the one who can undo a wrong one.
+     const how = r.mergedBy === "name" ? " (same name and colour)" : "";
++    if (r.linkOnly) {
++      parts.push(`store link added to an existing product${how}, without its photos`);
++      return parts.join(" · ");
++    }
+     parts.push(
+       filled.length
+         ? `added as a store to an existing product${how}, filling ${filled.join(", ")}`
+diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
+index f4d7227..adebe0e 100644
+--- a/src/lib/server/parser/import-product.ts
++++ b/src/lib/server/parser/import-product.ts
+@@ -438,8 +438,27 @@ async function keepOtherStores(
+ export interface ImportOptions {
+   /** Download photos into Supabase Storage and store our URLs instead. */
+   mirrorImages?: boolean;
++  /**
++   * The store's photos are missing or not the product's, so this page may only
++   * add its link to a piece the catalogue already has — never a card of its own.
++   *
++   * A card is a photo first; a card built from a store that shows none, or shows
++   * a banner and a size chart where the product should be, is worse than no
++   * card. But the price and the address are still worth having: they become one
++   * more "where to buy" line on the product we already show.
++   */
++  linkOnly?: boolean;
+ }
+ 
++/** What a link-only page came to. */
++export type LinkOnlyOutcome =
++  /** Its store link was added to the product the catalogue already had. */
++  | "linked"
++  /** The catalogue has no such piece yet, so nothing was written. */
++  | "no-match"
++  /** This very page is already in the catalogue as its own card; left as it is. */
++  | "own-row";
++
+ export interface ImportResult {
+   ok: boolean;
+   productId: string | null;
+@@ -469,6 +488,8 @@ export interface ImportResult {
+   mergedBy?: "code" | "name";
+   /** What the merge filled in on that product. */
+   mergedFields?: string[];
++  /** Set on a link-only import: what it did instead of creating a card. */
++  linkOnly?: LinkOnlyOutcome;
+ }
+ 
+ export async function importParsedProduct(
+@@ -555,8 +576,12 @@ export async function importParsedProduct(
+     priceNote = "the page never stated a currency — price taken as dollars";
+   }
+ 
+-  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
+-  let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
++  // A link-only page's photos are the very thing it cannot be trusted with, so
++  // none of them are kept, mirrored or merged into another product's gallery.
++  let images = opts.linkOnly
++    ? []
++    : (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
++  let imageUrl = opts.linkOnly ? "" : httpUrl(p.imageUrl) || images[0] || "";
+ 
+   // Mirror photos to our storage before writing the row, so the catalog only
+   // ever references URLs we control. A failed download keeps its original URL.
+@@ -761,6 +786,13 @@ export async function importParsedProduct(
+       existingGendered = !!found?.gender;
+     }
+ 
++    if (existingId && opts.linkOnly) {
++      // This page already has its own card, made when its photos were still
++      // trusted. Rewriting it from a page whose photos are not would empty its
++      // gallery; it keeps its link either way, so it is left alone.
++      return { ok: true, productId: existingId, updated: false, priceNote, linkOnly: "own-row" };
++    }
++
+     if (existingId) {
+       const id = existingId;
+       const row = await keepOtherStores(dbRow, existingRetailers, retailers[0], sourceUrl);
+@@ -834,7 +866,17 @@ export async function importParsedProduct(
+         const merged = mergePatch(twin, incoming);
+         const patch = merged.patch;
+         for (const column of unread) delete patch[column];
+-        const filled = merged.filled.filter((f) => !unread.includes(f));
++        // Link-only: the store's link and its price, nothing else. Its
++        // description and sizes are read off the same page as the photos we
++        // just refused, and the product already has its own.
++        if (opts.linkOnly) {
++          for (const column of Object.keys(patch)) {
++            if (!["retailers", "price_min", "price_max"].includes(column)) delete patch[column];
++          }
++        }
++        const filled = merged.filled.filter(
++          (f) => !unread.includes(f) && (!opts.linkOnly || f === "retailer" || f === "price"),
++        );
+         // Merged prices are dollars on both sides, so the comparable scale is
+         // the same number.
+         if (patch.price_min !== undefined) patch.price_min_usd = patch.price_min;
+@@ -858,9 +900,17 @@ export async function importParsedProduct(
+           mergedInto: twinId,
+           mergedBy,
+           mergedFields: filled,
++          ...(opts.linkOnly ? { linkOnly: "linked" as const } : {}),
+         };
+       }
+ 
++      // Link-only and nothing to attach to: no card. The piece gets one when a
++      // store that shows it properly is collected; this store's link joins it
++      // then, on a later run.
++      if (opts.linkOnly) {
++        return { ok: true, productId: null, updated: false, priceNote, linkOnly: "no-match" };
++      }
++
+       const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);
+       if (error) throw new Error(error.message);
+       productId = data?.id ?? null;
+diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
+index b95b391..c00dd5b 100644
+--- a/src/lib/server/parser/types.ts
++++ b/src/lib/server/parser/types.ts
+@@ -337,6 +337,8 @@ export interface CrawlItemResult {
+   mergedBy?: "code" | "name";
+   /** What that merge filled in. */
+   mergedFields?: string[];
++  /** Set when only the store's link was added, without its photos. */
++  linkOnly?: boolean;
+ }
+ 
+ export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {

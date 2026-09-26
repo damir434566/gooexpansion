@@ -280,6 +280,8 @@ export async function POST(req: Request) {
   const mirrorImages =
     typeof body?.mirrorImages === "boolean" ? body.mirrorImages : aiSettings.downloadImages;
   const dryRun = body?.dryRun === true;
+  // Set in the popup for a store whose photos are missing or wrong.
+  const requestedLinkOnly = body?.linkOnly === true;
 
   let result: CrawlItemResult;
 
@@ -324,13 +326,39 @@ export async function POST(req: Request) {
     } else if (dryRun) {
       result = { url, status: "skipped", reason: "Dry run", name: product.name, usedAi };
     } else {
+      // Link-only when the admin said the store's photos are not to be trusted,
+      // and when the page yielded none at all: a card without a photo is not a
+      // card, but its price and address still make a "where to buy" line on the
+      // product we already have.
+      const photoless = !product.imageUrl && !(product.images?.length ?? 0);
+      const linkOnly = requestedLinkOnly || photoless;
       const imported = await importParsedProduct(
         product as unknown as Record<string, unknown>,
         product.sourceUrl || url,
-        { mirrorImages },
+        { mirrorImages, linkOnly },
       );
-      result = imported.ok
+      result = !imported.ok
+        ? { url, status: "failed", reason: imported.error, name: product.name, usedAi }
+        : imported.linkOnly === "no-match"
         ? {
+            url,
+            status: "skipped",
+            name: product.name,
+            usedAi,
+            reason: requestedLinkOnly
+              ? "Link-only store: no such piece in the catalogue yet, so nothing was added"
+              : "No photos on the page, and no such piece in the catalogue to add the link to",
+          }
+        : imported.linkOnly === "own-row"
+        ? {
+            url,
+            status: "skipped",
+            name: product.name,
+            usedAi,
+            productId: imported.productId ?? undefined,
+            reason: "Already in the catalogue as its own card; left unchanged (link-only)",
+          }
+        : {
             url,
             status: imported.updated ? "updated" : "imported",
             productId: imported.productId ?? undefined,
@@ -347,8 +375,8 @@ export async function POST(req: Request) {
             merged: !!imported.mergedInto,
             mergedBy: imported.mergedBy,
             mergedFields: imported.mergedFields,
-          }
-        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
+            linkOnly: imported.linkOnly === "linked",
+          };
     }
   } catch (err) {
     result = {

@@ -70,6 +70,20 @@ h1 {
   gap: 8px;
 }
 
+.row.check small {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--foreground-subtle);
+}
+
+.row.check input {
+  width: auto;
+  flex: none;
+}
+
 .row {
   display: flex;
   align-items: center;

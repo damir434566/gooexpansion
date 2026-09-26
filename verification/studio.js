@@ -139,6 +139,7 @@ window.addEventListener("message", async (event) => {
         url: payload.url,
         htmlLength: (payload.html || "").length,
         candidates: Array.isArray(payload.images) ? payload.images.length : 0,
+        linkOnly: payload.linkOnly === true,
         priceText: payload.priceText || "",
         // The strip has to still be doing its job: a payload that came back
         // whole would pass the photo assertions and blow the 3 MB cap.
