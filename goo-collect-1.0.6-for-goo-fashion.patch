@@ -1,0 +1,798 @@
+diff --git a/extension/README.md b/extension/README.md
+index 5904719..79f7bb1 100644
+--- a/extension/README.md
++++ b/extension/README.md
+@@ -45,6 +45,7 @@
+ | Поле | Что это |
+ |---|---|
+ | **Products to collect** | Сколько товаров собрать за прогон. |
++| **Link only** | Для магазина, где фото нет или они чужие (баннеры, таблицы размеров). Фото не отправляются; сайт только добавляет ссылку на этот магазин к такой же вещи, которая уже есть в каталоге, а новых карточек не создаёт. Запоминается для каждого магазина. |
+ | **Goo Studio** | Адрес сайта. По умолчанию `https://www.goo-fashion.com`. Для локальной разработки — `http://localhost:3000`. |
+ 
+ ---
+@@ -65,6 +66,8 @@
+ | Что видишь | Что делать |
+ |---|---|
+ | **«Waiting for the extension»** и ничего не происходит | Перезагрузи вкладку приёмника (F5). Так бывает, если она была открыта раньше, чем поставили расширение. |
++| **«The collect tab is not reachable»** | С версии 1.0.6 расширение само находит вкладку приёмника и чинит связь, в том числе после обновления расширения. Если сообщение всё же появилось — открой Goo Studio → Parser → Collect, обнови её (F5) и нажми «Collect this store» ещё раз. |
++| **«…usually a sign-in redirect»** | Вкладку приёмника увело на вход. Войди в Goo Studio админом, открой Parser → Collect и запусти снова. |
+ | **«The store refused two pages in a row»** | Магазин отбивается. Прогон остановился сам, чтобы не поймать бан. Попробуй через час. |
+ | **«Could not reach …/goo-studio/parser/collect»** | Приёмник не выкачен на сайт, либо в popup неверный адрес Goo Studio, либо ты не залогинен админом. |
+ | Надо остановить | Кнопка **Stop** в popup или на вкладке приёмника. Срабатывает мгновенно. |
+diff --git a/extension/background.js b/extension/background.js
+index d5f75ca..75834ef 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -134,17 +134,97 @@ async function studioTab() {
+ const NO_TAB =
+   "The collect tab is not reachable. Open Goo Studio → Parser → Collect, reload that tab, and try again.";
+ 
+-/** Ask the collect tab to call the API, and wait for what it got back. */
+-async function askPage(type, payload) {
+-  const tabId = await studioTab();
+-  if (tabId == null) return { ok: false, error: NO_TAB };
++const SIGNED_OUT =
++  "The collect tab left the collect page — usually a sign-in redirect. Sign in to Goo Studio as an admin, open Parser → Collect, and try again.";
++
++/** Where the collect screen lives; the bridge is only injected there. */
++const COLLECT_URLS = [
++  "http://localhost/goo-studio/parser/collect*",
++  "http://127.0.0.1/goo-studio/parser/collect*",
++  "https://goo-fashion.com/goo-studio/parser/collect*",
++  "https://www.goo-fashion.com/goo-studio/parser/collect*",
++];
++
++/** Does this tab have a live bridge in it? */
++async function answers(tabId) {
+   try {
+-    const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
+-    return res ?? { ok: false, error: "The collect tab did not answer" };
++    const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type: "ping" });
++    return !!res?.ok;
+   } catch {
+-    await rememberStudioTab(null);
+-    return { ok: false, error: NO_TAB };
++    return false;
++  }
++}
++
++/**
++ * Find a collect tab that can be talked to, mending one that cannot.
++ *
++ * The worker only learns the collect tab when a bridge announces itself, and
++ * that link breaks quietly: the tab reloads, a sign-in redirect carries it off
++ * the collect page, or the extension is updated — which leaves every open tab
++ * with a bridge that belongs to the old copy and can no longer reach us. Each
++ * of those used to end a run with "not reachable" while the tab sat right
++ * there. So the known tab is tried, then every collect tab, and one whose
++ * bridge is dead gets a fresh one.
++ */
++async function reconnect() {
++  const known = await studioTab();
++  if (known != null && (await answers(known))) return known;
++
++  let tabs = [];
++  try {
++    tabs = await chrome.tabs.query({ url: COLLECT_URLS });
++  } catch {
++    tabs = [];
++  }
++  if (known != null && !tabs.some((t) => t.id === known)) {
++    // The tab we knew is no longer on the collect page: most often Clerk sent
++    // it to sign in. Said as such, because reloading will not help.
++    try {
++      const tab = await chrome.tabs.get(known);
++      if (tab && !tabs.length) {
++        await rememberStudioTab(null);
++        return { error: SIGNED_OUT };
++      }
++    } catch {
++      /* closed */
++    }
+   }
++
++  for (const tab of tabs) {
++    if (await answers(tab.id)) {
++      await rememberStudioTab(tab.id);
++      return tab.id;
++    }
++  }
++  for (const tab of tabs) {
++    try {
++      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["bridge.js"] });
++    } catch {
++      continue;
++    }
++    if (await answers(tab.id)) {
++      await rememberStudioTab(tab.id);
++      return tab.id;
++    }
++  }
++  await rememberStudioTab(null);
++  return { error: NO_TAB };
++}
++
++/** Ask the collect tab to call the API, and wait for what it got back. */
++async function askPage(type, payload) {
++  for (let attempt = 0; attempt < 2; attempt++) {
++    const tabId = attempt === 0 ? await studioTab() : await reconnect();
++    if (tabId != null && typeof tabId === "object") return { ok: false, error: tabId.error };
++    if (tabId == null) continue;
++    try {
++      const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
++      return res ?? { ok: false, error: "The collect tab did not answer" };
++    } catch {
++      /* dead bridge or gone tab: reconnect and try once more */
++    }
++  }
++  return { ok: false, error: NO_TAB };
+ }
+ 
+ /** Tell the collect tab something. Failures here never stop a run. */
+@@ -329,7 +409,7 @@ function finish() {
+   void tellPage("done", {});
+ }
+ 
+-async function run({ storeUrl, limit }) {
++async function run({ storeUrl, limit, linkOnly = false }) {
+   let origin;
+   try {
+     origin = new URL(storeUrl).origin;
+@@ -441,7 +521,11 @@ async function run({ storeUrl, limit }) {
+       const ingested = await askPage("ingest", {
+         url,
+         html: snap.html,
+-        images: snap.images,
++        // A link-only store's photos are what is wrong with it: they are not
++        // sent, and the server adds only this page's link to a piece the
++        // catalogue already has.
++        images: linkOnly ? [] : snap.images,
++        linkOnly,
+         priceText: snap.priceText,
+         sizes: snap.sizes,
+         colorText: snap.colorText,
+@@ -515,6 +599,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+       sendResponse(publicState());
+       return undefined;
+ 
++    case "connect":
++      // The popup asks before starting, so a broken link is mended — or named —
++      // while the admin is still looking, not a minute into the run.
++      reconnect().then((res) =>
++        sendResponse(typeof res === "number" ? { ok: true } : { ok: false, error: res?.error ?? NO_TAB }),
++      );
++      return true;
++
+     case "stop":
+       stop();
+       sendResponse({ ok: true });
+@@ -527,7 +619,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+       }
+       const storeUrl = msg.payload?.storeUrl;
+       const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, 2_000));
+-      run({ storeUrl, limit }).catch((err) => {
++      run({ storeUrl, limit, linkOnly: msg.payload?.linkOnly === true }).catch((err) => {
+         halt(err?.message ?? "The run failed unexpectedly.");
+       });
+       sendResponse({ ok: true });
+diff --git a/extension/bridge.js b/extension/bridge.js
+index 584a9b1..f284f93 100644
+--- a/extension/bridge.js
++++ b/extension/bridge.js
+@@ -17,97 +17,102 @@
+  * the admin's browsing — the collect tab introduces itself.
+  */
+ 
+-const FROM_EXT = "goo-collect/ext";
+-const FROM_PAGE = "goo-collect/page";
++// Wrapped so the worker can inject this file again into a collect tab whose
++// bridge died with an extension update: top-level declarations would collide
++// on a second run in the same page.
++(() => {
++  const FROM_EXT = "goo-collect/ext";
++  const FROM_PAGE = "goo-collect/page";
++
++  /**
++   * The one page this bridge belongs on.
++   *
++   * `matches` in the manifest already narrows injection to this path, but the
++   * guard is repeated here because the consequence of being wrong is specific:
++   * the worker learns which tab to trust from whichever bridge announces itself
++   * first, and a bridge running on some other page of the site would take that
++   * place and send every API call somewhere that cannot answer it.
++   */
++  const COLLECT_PATH = "/goo-studio/parser/collect";
++
++  /** How long to wait for the page before calling a request lost. */
++  const REPLY_TIMEOUT_MS = 120_000;
++
++  let nextId = 1;
++  /** id → resolver, for requests the page has not answered yet. */
++  const pending = new Map();
++
++  window.addEventListener("message", (event) => {
++    // Same window, same origin, our marker. `postMessage` is shoutable by any
++    // script on the page, and this bridge relays to a privileged worker.
++    if (event.source !== window) return;
++    if (event.origin !== window.location.origin) return;
++
++    const msg = event.data;
++    if (!msg || msg.source !== FROM_PAGE) return;
++
++    if (typeof msg.id === "number") {
++      const entry = pending.get(msg.id);
++      if (!entry) return;
++      pending.delete(msg.id);
++      entry(msg.ok ? { ok: true, data: msg.data } : { ok: false, error: msg.error });
++      return;
++    }
++
++    // One-way instructions from the screen. Stop is the one that matters, and it
++    // has to reach the worker whatever it is in the middle of.
++    if (msg.type === "stop") {
++      chrome.runtime.sendMessage({ type: "stop" }).catch(() => {});
++    }
++  });
+ 
+-/**
+- * The one page this bridge belongs on.
+- *
+- * `matches` in the manifest already narrows injection to this path, but the
+- * guard is repeated here because the consequence of being wrong is specific:
+- * the worker learns which tab to trust from whichever bridge announces itself
+- * first, and a bridge running on some other page of the site would take that
+- * place and send every API call somewhere that cannot answer it.
+- */
+-const COLLECT_PATH = "/goo-studio/parser/collect";
+-
+-/** How long to wait for the page before calling a request lost. */
+-const REPLY_TIMEOUT_MS = 120_000;
+-
+-let nextId = 1;
+-/** id → resolver, for requests the page has not answered yet. */
+-const pending = new Map();
+-
+-window.addEventListener("message", (event) => {
+-  // Same window, same origin, our marker. `postMessage` is shoutable by any
+-  // script on the page, and this bridge relays to a privileged worker.
+-  if (event.source !== window) return;
+-  if (event.origin !== window.location.origin) return;
+-
+-  const msg = event.data;
+-  if (!msg || msg.source !== FROM_PAGE) return;
+-
+-  if (typeof msg.id === "number") {
+-    const entry = pending.get(msg.id);
+-    if (!entry) return;
+-    pending.delete(msg.id);
+-    entry(msg.ok ? { ok: true, data: msg.data } : { ok: false, error: msg.error });
+-    return;
++  /** Ask the page something and wait for its answer. */
++  function ask(type, payload) {
++    return new Promise((resolve) => {
++      const id = nextId++;
++      const timer = setTimeout(() => {
++        if (pending.delete(id)) {
++          resolve({ ok: false, error: "The collect tab did not answer in time" });
++        }
++      }, REPLY_TIMEOUT_MS);
++
++      pending.set(id, (value) => {
++        clearTimeout(timer);
++        resolve(value);
++      });
++
++      window.postMessage({ source: FROM_EXT, id, type, payload: payload ?? {} }, window.location.origin);
++    });
+   }
+ 
+-  // One-way instructions from the screen. Stop is the one that matters, and it
+-  // has to reach the worker whatever it is in the middle of.
+-  if (msg.type === "stop") {
+-    chrome.runtime.sendMessage({ type: "stop" }).catch(() => {});
++  /** Tell the page something with no answer expected (progress, run finished). */
++  function tell(type, payload) {
++    window.postMessage({ source: FROM_EXT, type, payload: payload ?? {} }, window.location.origin);
+   }
+-});
+-
+-/** Ask the page something and wait for its answer. */
+-function ask(type, payload) {
+-  return new Promise((resolve) => {
+-    const id = nextId++;
+-    const timer = setTimeout(() => {
+-      if (pending.delete(id)) {
+-        resolve({ ok: false, error: "The collect tab did not answer in time" });
+-      }
+-    }, REPLY_TIMEOUT_MS);
+-
+-    pending.set(id, (value) => {
+-      clearTimeout(timer);
+-      resolve(value);
+-    });
+ 
+-    window.postMessage({ source: FROM_EXT, id, type, payload: payload ?? {} }, window.location.origin);
+-  });
+-}
++  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
++    if (!msg || msg.target !== "bridge") return undefined;
+ 
+-/** Tell the page something with no answer expected (progress, run finished). */
+-function tell(type, payload) {
+-  window.postMessage({ source: FROM_EXT, type, payload: payload ?? {} }, window.location.origin);
+-}
++    if (msg.type === "ping") {
++      sendResponse({ ok: true });
++      return undefined;
++    }
+ 
+-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+-  if (!msg || msg.target !== "bridge") return undefined;
++    // Notices need no reply and must not hold the channel open.
++    if (msg.type === "progress" || msg.type === "done" || msg.type === "error") {
++      tell(msg.type, msg.payload);
++      sendResponse({ ok: true });
++      return undefined;
++    }
+ 
+-  if (msg.type === "ping") {
+-    sendResponse({ ok: true });
+-    return undefined;
+-  }
++    ask(msg.type, msg.payload).then(sendResponse);
++    return true; // keep the channel open for the async reply
++  });
+ 
+-  // Notices need no reply and must not hold the channel open.
+-  if (msg.type === "progress" || msg.type === "done" || msg.type === "error") {
+-    tell(msg.type, msg.payload);
+-    sendResponse({ ok: true });
+-    return undefined;
++  // Introduce this tab to the worker, and greet the page so it can show that the
++  // extension is connected rather than leaving the admin guessing.
++  if (window.location.pathname.startsWith(COLLECT_PATH)) {
++    chrome.runtime.sendMessage({ type: "bridge-ready" }).catch(() => {});
++    ask("hello", {});
+   }
+-
+-  ask(msg.type, msg.payload).then(sendResponse);
+-  return true; // keep the channel open for the async reply
+-});
+-
+-// Introduce this tab to the worker, and greet the page so it can show that the
+-// extension is connected rather than leaving the admin guessing.
+-if (window.location.pathname.startsWith(COLLECT_PATH)) {
+-  chrome.runtime.sendMessage({ type: "bridge-ready" }).catch(() => {});
+-  ask("hello", {});
+-}
++})();
+diff --git a/extension/manifest.json b/extension/manifest.json
+index 4b97895..af9c597 100644
+--- a/extension/manifest.json
++++ b/extension/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "Goo Collect",
+-  "version": "1.0.4",
++  "version": "1.0.6",
+   "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
+   "minimum_chrome_version": "116",
+   "permissions": [
+@@ -10,6 +10,10 @@
+     "storage",
+     "webRequest"
+   ],
++  "host_permissions": [
++    "https://goo-fashion.com/*",
++    "https://www.goo-fashion.com/*"
++  ],
+   "optional_host_permissions": [
+     "http://*/*",
+     "https://*/*"
+diff --git a/extension/popup.css b/extension/popup.css
+index e8758ee..145da73 100644
+--- a/extension/popup.css
++++ b/extension/popup.css
+@@ -70,6 +70,20 @@ h1 {
+   gap: 8px;
+ }
+ 
++.row.check small {
++  display: block;
++  margin-top: 2px;
++  font-size: 10px;
++  letter-spacing: 0;
++  text-transform: none;
++  color: var(--foreground-subtle);
++}
++
++.row.check input {
++  width: auto;
++  flex: none;
++}
++
+ .row {
+   display: flex;
+   align-items: center;
+diff --git a/extension/popup.html b/extension/popup.html
+index 251c73f..49baf9d 100644
+--- a/extension/popup.html
++++ b/extension/popup.html
+@@ -17,6 +17,14 @@
+         <input id="limit" type="number" min="1" max="2000" value="30" />
+       </label>
+ 
++      <label class="row check" for="linkOnly">
++        <span>
++          Link only
++          <small>Photos here are missing or wrong: only add this store's link to pieces the catalogue already has.</small>
++        </span>
++        <input id="linkOnly" type="checkbox" />
++      </label>
++
+       <label class="row" for="studio">
+         <span>Goo Studio</span>
+         <input id="studio" type="url" spellcheck="false" placeholder="https://www.goo-fashion.com" />
+diff --git a/extension/popup.js b/extension/popup.js
+index cd405fd..ce745c1 100644
+--- a/extension/popup.js
++++ b/extension/popup.js
+@@ -21,6 +21,7 @@ const COLLECT_PATH = "/goo-studio/parser/collect";
+ const el = {
+   store: document.getElementById("store"),
+   limit: document.getElementById("limit"),
++  linkOnly: document.getElementById("linkOnly"),
+   studio: document.getElementById("studio"),
+   start: document.getElementById("start"),
+   stop: document.getElementById("stop"),
+@@ -36,6 +37,33 @@ const el = {
+ 
+ let activeUrl = "";
+ 
++/**
++ * Link-only is a fact about a store, not about a run: a store whose photos are
++ * wrong today will be wrong next week. So it is remembered per store, on this
++ * machine, and the box is ticked again when the admin comes back to it.
++ */
++const LINK_ONLY_KEY = "linkOnlyStores";
++
++function hostOf(url) {
++  try {
++    return new URL(url).hostname.replace(/^www\./, "");
++  } catch {
++    return "";
++  }
++}
++
++async function linkOnlyStores() {
++  const stored = await chrome.storage.local.get(LINK_ONLY_KEY);
++  return Array.isArray(stored[LINK_ONLY_KEY]) ? stored[LINK_ONLY_KEY] : [];
++}
++
++async function rememberLinkOnly(host, on) {
++  if (!host) return;
++  const list = (await linkOnlyStores()).filter((h) => h !== host);
++  if (on) list.push(host);
++  await chrome.storage.local.set({ [LINK_ONLY_KEY]: list.slice(-500) });
++}
++
+ function note(message) {
+   el.note.textContent = message ?? "";
+   el.note.hidden = !message;
+@@ -57,6 +85,7 @@ async function init() {
+ 
+   if (/^https?:/i.test(activeUrl)) {
+     el.store.textContent = activeUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70);
++    el.linkOnly.checked = (await linkOnlyStores()).includes(hostOf(activeUrl));
+   } else {
+     el.store.textContent = "Open a store page in this tab first.";
+     el.start.disabled = true;
+@@ -76,17 +105,22 @@ async function init() {
+  * content script in it until it is reloaded — hence the honest timeout message.
+  */
+ async function ensureCollectTab(studioOrigin) {
+-  const known = await send("state");
+-  if (known?.studioTabId != null) return true;
++  // A tab id alone proves nothing: the tab may have reloaded, been sent to
++  // sign in, or kept a bridge from before an update. Ask the worker to reach it.
++  const first = await send("connect");
++  if (first?.ok) return { ok: true };
+ 
+   await chrome.tabs.create({ url: `${studioOrigin}${COLLECT_PATH}`, active: false });
+ 
++  let last = first;
+   for (let i = 0; i < 40; i++) {
+     await new Promise((r) => setTimeout(r, 250));
+     const s = await send("state");
+-    if (s?.studioTabId != null) return true;
++    if (s?.studioTabId == null) continue;
++    last = await send("connect");
++    if (last?.ok) return { ok: true };
+   }
+-  return false;
++  return { ok: false, error: last?.error };
+ }
+ 
+ async function start() {
+@@ -104,7 +138,9 @@ async function start() {
+ 
+   const studioOrigin = (el.studio.value || DEFAULT_STUDIO).replace(/\/+$/, "");
+   const limit = Math.max(1, Math.min(Number(el.limit.value) || 30, 2000));
++  const linkOnly = el.linkOnly.checked;
+   await chrome.storage.sync.set({ studioOrigin, limit });
++  await rememberLinkOnly(hostOf(activeUrl), linkOnly);
+ 
+   // Must be inside the click: Chrome refuses a permission prompt without one.
+   let granted = false;
+@@ -121,15 +157,18 @@ async function start() {
+     return;
+   }
+ 
+-  if (!(await ensureCollectTab(studioOrigin))) {
++  const link = await ensureCollectTab(studioOrigin);
++  if (!link.ok) {
+     note(
+-      `Could not reach ${studioOrigin}${COLLECT_PATH}. Open it, make sure you are signed in as an admin, reload it, then try again.`,
++      link.error && /sign/i.test(link.error)
++        ? link.error
++        : `Could not reach ${studioOrigin}${COLLECT_PATH}. Open it, make sure you are signed in as an admin, reload it, then try again.`,
+     );
+     el.start.disabled = false;
+     return;
+   }
+ 
+-  const res = await send("start", { storeUrl: activeUrl, limit });
++  const res = await send("start", { storeUrl: activeUrl, limit, linkOnly });
+   if (res && res.ok === false) {
+     note(res.error ?? "Could not start.");
+     el.start.disabled = false;
+diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
+index 24e0c9a..8bcef89 100644
+--- a/src/app/api/admin/parser/collect/route.ts
++++ b/src/app/api/admin/parser/collect/route.ts
+@@ -280,6 +280,8 @@ export async function POST(req: Request) {
+   const mirrorImages =
+     typeof body?.mirrorImages === "boolean" ? body.mirrorImages : aiSettings.downloadImages;
+   const dryRun = body?.dryRun === true;
++  // Set in the popup for a store whose photos are missing or wrong.
++  const requestedLinkOnly = body?.linkOnly === true;
+ 
+   let result: CrawlItemResult;
+ 
+@@ -324,13 +326,39 @@ export async function POST(req: Request) {
+     } else if (dryRun) {
+       result = { url, status: "skipped", reason: "Dry run", name: product.name, usedAi };
+     } else {
++      // Link-only when the admin said the store's photos are not to be trusted,
++      // and when the page yielded none at all: a card without a photo is not a
++      // card, but its price and address still make a "where to buy" line on the
++      // product we already have.
++      const photoless = !product.imageUrl && !(product.images?.length ?? 0);
++      const linkOnly = requestedLinkOnly || photoless;
+       const imported = await importParsedProduct(
+         product as unknown as Record<string, unknown>,
+         product.sourceUrl || url,
+-        { mirrorImages },
++        { mirrorImages, linkOnly },
+       );
+-      result = imported.ok
++      result = !imported.ok
++        ? { url, status: "failed", reason: imported.error, name: product.name, usedAi }
++        : imported.linkOnly === "no-match"
+         ? {
++            url,
++            status: "skipped",
++            name: product.name,
++            usedAi,
++            reason: requestedLinkOnly
++              ? "Link-only store: no such piece in the catalogue yet, so nothing was added"
++              : "No photos on the page, and no such piece in the catalogue to add the link to",
++          }
++        : imported.linkOnly === "own-row"
++        ? {
++            url,
++            status: "skipped",
++            name: product.name,
++            usedAi,
++            productId: imported.productId ?? undefined,
++            reason: "Already in the catalogue as its own card; left unchanged (link-only)",
++          }
++        : {
+             url,
+             status: imported.updated ? "updated" : "imported",
+             productId: imported.productId ?? undefined,
+@@ -347,8 +375,8 @@ export async function POST(req: Request) {
+             merged: !!imported.mergedInto,
+             mergedBy: imported.mergedBy,
+             mergedFields: imported.mergedFields,
+-          }
+-        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
++            linkOnly: imported.linkOnly === "linked",
++          };
+     }
+   } catch (err) {
+     result = {
+diff --git a/src/app/goo-studio/parser/collect/page.tsx b/src/app/goo-studio/parser/collect/page.tsx
+index ff5abd8..5315b10 100644
+--- a/src/app/goo-studio/parser/collect/page.tsx
++++ b/src/app/goo-studio/parser/collect/page.tsx
+@@ -453,6 +453,10 @@ function detailLine(r: CrawlItemResult): string {
+     // Said, because a name match is a judgement where a code match is a fact,
+     // and the admin is the one who can undo a wrong one.
+     const how = r.mergedBy === "name" ? " (same name and colour)" : "";
++    if (r.linkOnly) {
++      parts.push(`store link added to an existing product${how}, without its photos`);
++      return parts.join(" · ");
++    }
+     parts.push(
+       filled.length
+         ? `added as a store to an existing product${how}, filling ${filled.join(", ")}`
+diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
+index f4d7227..adebe0e 100644
+--- a/src/lib/server/parser/import-product.ts
++++ b/src/lib/server/parser/import-product.ts
+@@ -438,8 +438,27 @@ async function keepOtherStores(
+ export interface ImportOptions {
+   /** Download photos into Supabase Storage and store our URLs instead. */
+   mirrorImages?: boolean;
++  /**
++   * The store's photos are missing or not the product's, so this page may only
++   * add its link to a piece the catalogue already has — never a card of its own.
++   *
++   * A card is a photo first; a card built from a store that shows none, or shows
++   * a banner and a size chart where the product should be, is worse than no
++   * card. But the price and the address are still worth having: they become one
++   * more "where to buy" line on the product we already show.
++   */
++  linkOnly?: boolean;
+ }
+ 
++/** What a link-only page came to. */
++export type LinkOnlyOutcome =
++  /** Its store link was added to the product the catalogue already had. */
++  | "linked"
++  /** The catalogue has no such piece yet, so nothing was written. */
++  | "no-match"
++  /** This very page is already in the catalogue as its own card; left as it is. */
++  | "own-row";
++
+ export interface ImportResult {
+   ok: boolean;
+   productId: string | null;
+@@ -469,6 +488,8 @@ export interface ImportResult {
+   mergedBy?: "code" | "name";
+   /** What the merge filled in on that product. */
+   mergedFields?: string[];
++  /** Set on a link-only import: what it did instead of creating a card. */
++  linkOnly?: LinkOnlyOutcome;
+ }
+ 
+ export async function importParsedProduct(
+@@ -555,8 +576,12 @@ export async function importParsedProduct(
+     priceNote = "the page never stated a currency — price taken as dollars";
+   }
+ 
+-  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
+-  let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
++  // A link-only page's photos are the very thing it cannot be trusted with, so
++  // none of them are kept, mirrored or merged into another product's gallery.
++  let images = opts.linkOnly
++    ? []
++    : (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
++  let imageUrl = opts.linkOnly ? "" : httpUrl(p.imageUrl) || images[0] || "";
+ 
+   // Mirror photos to our storage before writing the row, so the catalog only
+   // ever references URLs we control. A failed download keeps its original URL.
+@@ -761,6 +786,13 @@ export async function importParsedProduct(
+       existingGendered = !!found?.gender;
+     }
+ 
++    if (existingId && opts.linkOnly) {
++      // This page already has its own card, made when its photos were still
++      // trusted. Rewriting it from a page whose photos are not would empty its
++      // gallery; it keeps its link either way, so it is left alone.
++      return { ok: true, productId: existingId, updated: false, priceNote, linkOnly: "own-row" };
++    }
++
+     if (existingId) {
+       const id = existingId;
+       const row = await keepOtherStores(dbRow, existingRetailers, retailers[0], sourceUrl);
+@@ -834,7 +866,17 @@ export async function importParsedProduct(
+         const merged = mergePatch(twin, incoming);
+         const patch = merged.patch;
+         for (const column of unread) delete patch[column];
+-        const filled = merged.filled.filter((f) => !unread.includes(f));
++        // Link-only: the store's link and its price, nothing else. Its
++        // description and sizes are read off the same page as the photos we
++        // just refused, and the product already has its own.
++        if (opts.linkOnly) {
++          for (const column of Object.keys(patch)) {
++            if (!["retailers", "price_min", "price_max"].includes(column)) delete patch[column];
++          }
++        }
++        const filled = merged.filled.filter(
++          (f) => !unread.includes(f) && (!opts.linkOnly || f === "retailer" || f === "price"),
++        );
+         // Merged prices are dollars on both sides, so the comparable scale is
+         // the same number.
+         if (patch.price_min !== undefined) patch.price_min_usd = patch.price_min;
+@@ -858,9 +900,17 @@ export async function importParsedProduct(
+           mergedInto: twinId,
+           mergedBy,
+           mergedFields: filled,
++          ...(opts.linkOnly ? { linkOnly: "linked" as const } : {}),
+         };
+       }
+ 
++      // Link-only and nothing to attach to: no card. The piece gets one when a
++      // store that shows it properly is collected; this store's link joins it
++      // then, on a later run.
++      if (opts.linkOnly) {
++        return { ok: true, productId: null, updated: false, priceNote, linkOnly: "no-match" };
++      }
++
+       const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);
+       if (error) throw new Error(error.message);
+       productId = data?.id ?? null;
+diff --git a/src/lib/server/parser/plan-collection.ts b/src/lib/server/parser/plan-collection.ts
+index 9004d57..81bc94b 100644
+--- a/src/lib/server/parser/plan-collection.ts
++++ b/src/lib/server/parser/plan-collection.ts
+@@ -21,7 +21,21 @@
+  * what a product address looks like, and `sitemap.ts` decides how a sitemap
+  * document is read. This module only sequences them and applies robots.txt.
+  */
+-import { extractProductLinks, looksLikeProductPath, isNonProductPath } from "./extract";
++import { extractProductLinks, looksLikeProductPath, isNonProductPath, partitionProducts } from "./extract";
++
++/**
++ * Does this page describe one product of its own?
++ *
++ * A listing states many (or an ItemList of them); a product page states one,
++ * or says `og:type` product. Related-item carousels live in ItemLists and are
++ * not counted, so a product page with a "you may also like" row still reads as
++ * one product.
++ */
++function pageStatesOneProduct(html: string): boolean {
++  if (partitionProducts(html).standaloneCount === 1) return true;
++  return /<meta[^>]+property=["']og:type["'][^>]+content=["'](?:og:)?product["']/i.test(html) ||
++    /<meta[^>]+content=["'](?:og:)?product["'][^>]+property=["']og:type["']/i.test(html);
++}
+ import {
+   locations as sitemapLocations,
+   isIndex as isSitemapIndex,
+@@ -185,12 +199,19 @@ export function planCollection(input: CollectionPlanInput): CollectionPlan {
+   // ── The page the admin pointed at ──────────────────────────────────────────
+   // Its own address counts as a candidate when it is itself a product: pasting
+   // a single piece is a legitimate one-item run, not a failed crawl.
++  //
++  // The address alone does not always say so: StockX sells a sneaker at
++  // `/air-jordan-4-retro-toro-bravo-2026`, with no product segment and no code.
++  // The page itself does — structured data naming one Product, or OpenGraph's
++  // `og:type` of product — and read as a category, it handed the run the first
++  // "related" sneaker instead of the one on screen.
+   const isSingleProduct = (() => {
+     try {
+-      return looksLikeProductPath(new URL(input.startUrl).pathname);
++      if (looksLikeProductPath(new URL(input.startUrl).pathname)) return true;
+     } catch {
+       return false;
+     }
++    return !!input.html && pageStatesOneProduct(input.html);
+   })();
+   if (isSingleProduct) candidates.unshift(canonical(input.startUrl));
+   if (input.html) candidates.push(...extractProductLinks(input.html, input.startUrl, limit));
+diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
+index b95b391..c00dd5b 100644
+--- a/src/lib/server/parser/types.ts
++++ b/src/lib/server/parser/types.ts
+@@ -337,6 +337,8 @@ export interface CrawlItemResult {
+   mergedBy?: "code" | "name";
+   /** What that merge filled in. */
+   mergedFields?: string[];
++  /** Set when only the store's link was added, without its photos. */
++  linkOnly?: boolean;
+ }
+ 
+ export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {

@@ -17,6 +17,42 @@ const STORE = "http://127.0.0.1:3301";
 const STUDIO = "http://localhost:3302";
 const COLLECT = `${STUDIO}/goo-studio/parser/collect`;
 
+// The real collect screen's address, served locally: Chromium resolves
+// www.goo-fashion.com to a TLS front on this machine that forwards to the
+// studio stub. Run G needs it, because the extension's lasting access is to
+// goo-fashion itself — a grant seeded into the profile for 127.0.0.1 does not
+// survive the extension reloading.
+const GF_PORT = 3443;
+const GF_COLLECT = "https://www.goo-fashion.com/goo-studio/parser/collect";
+
+function startGooFashionFront() {
+  const https = require("https");
+  const http = require("http");
+  const { execSync } = require("child_process");
+  const dir = fs.mkdtempSync(path.join(require("os").tmpdir(), "gf-tls-"));
+  execSync(
+    `openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=www.goo-fashion.com -keyout ${dir}/k.pem -out ${dir}/c.pem`,
+    { stdio: "ignore" },
+  );
+  const target = new URL(STUDIO);
+  const server = https.createServer(
+    { key: fs.readFileSync(`${dir}/k.pem`), cert: fs.readFileSync(`${dir}/c.pem`) },
+    (req, res) => {
+      const up = http.request(
+        { host: target.hostname, port: target.port, path: req.url, method: req.method, headers: { ...req.headers, host: target.host } },
+        (r) => {
+          res.writeHead(r.statusCode, r.headers);
+          r.pipe(res);
+        },
+      );
+      up.on("error", () => res.writeHead(502).end());
+      req.pipe(up);
+    },
+  );
+  server.listen(GF_PORT, "127.0.0.1");
+  return server;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── tiny CDP client ──────────────────────────────────────────────────────────
@@ -112,6 +148,9 @@ function launch() {
       `--remote-debugging-port=${PORT}`,
       `--disable-extensions-except=${EXT}`,
       `--load-extension=${EXT}`,
+      `--host-resolver-rules=MAP www.goo-fashion.com 127.0.0.1:${GF_PORT}`,
+      "--ignore-certificate-errors",
+      "--no-proxy-server",
       "about:blank",
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
@@ -153,10 +192,16 @@ function grantHost(id, pattern) {
   const p = prefsPath();
   const prefs = JSON.parse(fs.readFileSync(p, "utf8"));
   const entry = prefs.extensions.settings[id];
+  // Developer mode, as the admin has it: an unpacked extension reloaded without
+  // it is disabled, and run G reloads it.
+  prefs.extensions.ui = { ...(prefs.extensions.ui || {}), developer_mode: true };
   for (const key of ["granted_permissions", "active_permissions"]) {
     entry[key] = entry[key] || { api: [], explicit_host: [], manifest_permissions: [], scriptable_host: [] };
-    entry[key].explicit_host = [pattern];
-    entry[key].scriptable_host = [pattern];
+    // Added to, not replaced: the extension holds goo-fashion from install, and
+    // a grant list missing a required host reads to Chrome as a permission
+    // increase — it disables the extension on its next reload.
+    entry[key].explicit_host = [...new Set([...(entry[key].explicit_host || []), pattern])];
+    entry[key].scriptable_host = [...new Set([...(entry[key].scriptable_host || []), pattern])];
   }
   fs.writeFileSync(p, JSON.stringify(prefs));
 }
@@ -199,8 +244,8 @@ async function openPopup(extId) {
   return attach(t.webSocketDebuggerUrl);
 }
 
-async function openCollect() {
-  const t = await newTab(COLLECT);
+async function openCollect(url = COLLECT) {
+  const t = await newTab(url);
   await sleep(1200);
   return attach(t.webSocketDebuggerUrl);
 }
@@ -236,9 +281,12 @@ async function main() {
 
   // The security property: nothing granted at install.
   const atInstall = installedHostPermissions(extId);
+  // Since 1.0.6 it holds our own site from install, and nothing else: that is
+  // what lets it find the collect tab again and mend its bridge after an update.
   check(
-    "installs with access to no store whatsoever (no <all_urls>)",
-    atInstall.explicit.length === 0,
+    "installs with access to no store whatsoever (no <all_urls>) — only goo-fashion itself",
+    JSON.stringify([...atInstall.explicit].sort()) ===
+      JSON.stringify(["https://goo-fashion.com/*", "https://www.goo-fashion.com/*"]),
     JSON.stringify(atInstall.explicit),
   );
   check(
@@ -639,6 +687,52 @@ async function main() {
     JSON.stringify(ingestsF.map((e) => e.detail.candidates)),
   );
   collect.close(); popup.close();
+
+  // ── Run G: the extension is updated while the collect tab stays open ───────
+  //
+  // What an admin does after installing a new version: ↻ on the extensions
+  // page. The open collect tab keeps a bridge from the old copy, which cannot
+  // reach the new worker, and the new worker has forgotten the tab. Before
+  // 1.0.6 the next run died at once with "The collect tab is not reachable".
+  console.log("\n— run G: the extension reloaded under an open collect tab —");
+  await storeControl({ mode: "normal", reset: true });
+  await studioReset();
+  const front = startGooFashionFront();
+  collect = await openCollect(GF_COLLECT);
+  popup = await openPopup(extId);
+  // The ↻ button on chrome://extensions, which is what an admin presses.
+  popup.close();
+  {
+    const t = await newTab("chrome://extensions/");
+    await sleep(1500);
+    const page = await attach(t.webSocketDebuggerUrl);
+    await page.evaluate(`new Promise((r) => chrome.developerPrivate.reload('${extId}', { failQuietly: true }, r))`);
+    page.close();
+  }
+  // The extension comes back on its own schedule; a popup opened before it
+  // does has no `chrome.runtime` to talk through.
+  for (let i = 0; i < 20; i++) {
+    await sleep(1000);
+    popup = await openPopup(extId);
+    const alive = await popup.evaluate("!!(globalThis.chrome && chrome.runtime && chrome.runtime.id)").catch((e) => e.message);
+    if (alive === true) break;
+    popup.close();
+  }
+  await studioReset();
+  const linked = await popup.evaluate(
+    "Promise.race([chrome.runtime.sendMessage({type:'connect'}), new Promise((r) => setTimeout(() => r({ timeout: true }), 20000))])",
+  );
+  check(
+    "the new worker found the old collect tab and gave it a working bridge",
+    !!linked && linked.ok === true,
+    JSON.stringify(linked),
+  );
+  // The fresh bridge greets the page, and the page answers — the same round
+  // trip every plan and ingest makes.
+  const helloG = await waitForEvent("hello", 10000);
+  check("and the collect screen hears the extension again", !!helloG);
+  collect.close(); popup.close();
+  front.close();
 
   console.log(`\n  ${pass} passed, ${failures.length} failed\n`);
   failures.forEach((f) => console.log("  FAIL " + f));

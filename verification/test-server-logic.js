@@ -210,6 +210,50 @@ const single = planCollection({ startUrl: "https://shop.test/product/solo", limi
 check("a pasted product page is recognised", single.isSingleProduct, true);
 check("and is itself planned", single.urls, ["https://shop.test/product/solo"]);
 
+// A product whose address has no product marker at all — StockX's
+// `/air-jordan-4-retro-toro-bravo-2026`. The page says what it is: one Product
+// in its structured data. With a "related" sneaker linked on it, the run of one
+// used to take that related sneaker instead of the one on screen.
+const stockxHtml = `<html><head><script type="application/ld+json">${JSON.stringify({
+  "@context": "https://schema.org",
+  "@type": "Product",
+  name: "Jordan 4 Retro Toro Bravo (2026)",
+  brand: "Jordan",
+  offers: { "@type": "AggregateOffer", lowPrice: "210", priceCurrency: "USD" },
+})}</script></head><body>
+  <a href="/air-jordan-1-retro-high-og-chicago">Related</a>
+  <a href="/nike-dunk-low-panda">Related</a></body></html>`;
+const stockx = planCollection({
+  startUrl: "https://stockx.com/air-jordan-4-retro-toro-bravo-2026",
+  html: stockxHtml,
+  limit: 1,
+});
+check("a slug-only product page is recognised by its structured data", stockx.isSingleProduct, true);
+check("and the sneaker on screen is the one planned", stockx.urls, [
+  "https://stockx.com/air-jordan-4-retro-toro-bravo-2026",
+]);
+
+const ogOnly = planCollection({
+  startUrl: "https://brand.test/nebula-jacket",
+  html: '<html><head><meta property="og:type" content="product"></head><body></body></html>',
+  limit: 3,
+});
+check("og:type product is enough on its own", ogOnly.isSingleProduct, true);
+
+const category = planCollection({
+  startUrl: "https://brand.test/jackets",
+  html: `<html><head><script type="application/ld+json">${JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, item: { "@type": "Product", name: "A" } },
+      { "@type": "ListItem", position: 2, item: { "@type": "Product", name: "B" } },
+    ],
+  })}</script></head><body></body></html>`,
+  limit: 3,
+});
+check("a category's ItemList does not make it a product page", category.isSingleProduct, false);
+
 // ── Report ───────────────────────────────────────────────────────────────────
 
 console.log(`\n  ${pass} passed, ${failures.length} failed\n`);

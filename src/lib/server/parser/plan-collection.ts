@@ -21,7 +21,21 @@
  * what a product address looks like, and `sitemap.ts` decides how a sitemap
  * document is read. This module only sequences them and applies robots.txt.
  */
-import { extractProductLinks, looksLikeProductPath, isNonProductPath } from "./extract";
+import { extractProductLinks, looksLikeProductPath, isNonProductPath, partitionProducts } from "./extract";
+
+/**
+ * Does this page describe one product of its own?
+ *
+ * A listing states many (or an ItemList of them); a product page states one,
+ * or says `og:type` product. Related-item carousels live in ItemLists and are
+ * not counted, so a product page with a "you may also like" row still reads as
+ * one product.
+ */
+function pageStatesOneProduct(html: string): boolean {
+  if (partitionProducts(html).standaloneCount === 1) return true;
+  return /<meta[^>]+property=["']og:type["'][^>]+content=["'](?:og:)?product["']/i.test(html) ||
+    /<meta[^>]+content=["'](?:og:)?product["'][^>]+property=["']og:type["']/i.test(html);
+}
 import {
   locations as sitemapLocations,
   isIndex as isSitemapIndex,
@@ -185,12 +199,19 @@ export function planCollection(input: CollectionPlanInput): CollectionPlan {
   // ── The page the admin pointed at ──────────────────────────────────────────
   // Its own address counts as a candidate when it is itself a product: pasting
   // a single piece is a legitimate one-item run, not a failed crawl.
+  //
+  // The address alone does not always say so: StockX sells a sneaker at
+  // `/air-jordan-4-retro-toro-bravo-2026`, with no product segment and no code.
+  // The page itself does — structured data naming one Product, or OpenGraph's
+  // `og:type` of product — and read as a category, it handed the run the first
+  // "related" sneaker instead of the one on screen.
   const isSingleProduct = (() => {
     try {
-      return looksLikeProductPath(new URL(input.startUrl).pathname);
+      if (looksLikeProductPath(new URL(input.startUrl).pathname)) return true;
     } catch {
       return false;
     }
+    return !!input.html && pageStatesOneProduct(input.html);
   })();
   if (isSingleProduct) candidates.unshift(canonical(input.startUrl));
   if (input.html) candidates.push(...extractProductLinks(input.html, input.startUrl, limit));

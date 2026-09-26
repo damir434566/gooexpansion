@@ -105,17 +105,22 @@ async function init() {
  * content script in it until it is reloaded — hence the honest timeout message.
  */
 async function ensureCollectTab(studioOrigin) {
-  const known = await send("state");
-  if (known?.studioTabId != null) return true;
+  // A tab id alone proves nothing: the tab may have reloaded, been sent to
+  // sign in, or kept a bridge from before an update. Ask the worker to reach it.
+  const first = await send("connect");
+  if (first?.ok) return { ok: true };
 
   await chrome.tabs.create({ url: `${studioOrigin}${COLLECT_PATH}`, active: false });
 
+  let last = first;
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 250));
     const s = await send("state");
-    if (s?.studioTabId != null) return true;
+    if (s?.studioTabId == null) continue;
+    last = await send("connect");
+    if (last?.ok) return { ok: true };
   }
-  return false;
+  return { ok: false, error: last?.error };
 }
 
 async function start() {
@@ -152,9 +157,12 @@ async function start() {
     return;
   }
 
-  if (!(await ensureCollectTab(studioOrigin))) {
+  const link = await ensureCollectTab(studioOrigin);
+  if (!link.ok) {
     note(
-      `Could not reach ${studioOrigin}${COLLECT_PATH}. Open it, make sure you are signed in as an admin, reload it, then try again.`,
+      link.error && /sign/i.test(link.error)
+        ? link.error
+        : `Could not reach ${studioOrigin}${COLLECT_PATH}. Open it, make sure you are signed in as an admin, reload it, then try again.`,
     );
     el.start.disabled = false;
     return;
