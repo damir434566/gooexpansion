@@ -5,25 +5,38 @@
  */
 import {
   cleanName,
+  tidyProductName,
   parsePrice,
   extractCurrencyFromDisplay,
+  currencyFromLocale,
   normalizeGtin,
   normalizeCode,
   MAX_PRODUCT_IMAGES,
   matchCategory,
-  inferGenderFromText,
   canonicalColor,
+  looksLikeColourLabel,
 } from "@/lib/server/product-fields";
 import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
-import { inferStyleKeywords } from "@/lib/style-keywords";
+import { garmentLabel, matchGarment } from "@/lib/taxonomy/garments";
+import { inferStyleKeywords } from "@/lib/taxonomy/styles";
+import { genderFromPage } from "@/lib/taxonomy/gender";
 import {
   isBuiltInBucket,
   matchSubcategoryLabel,
   resolveSubcategory,
   subcategoryToValue,
+  type CategoryGroup,
 } from "@/lib/categories";
 import { upgradeImageUrl, imageKey } from "./gallery";
 import { looksLikeProductPath, isNonProductPath } from "./extract";
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
 
 /** Resolve a possibly-relative image URL against the page URL. */
 function absoluteUrl(src: string, base: string): string | null {
@@ -52,24 +65,56 @@ function normalizeCurrency(rawCurrency: string | undefined, rawPrice: string | u
   return (extractCurrencyFromDisplay(rawCurrency ?? "") || extractCurrencyFromDisplay(rawPrice ?? "")).toUpperCase();
 }
 
+export interface NormalizeOptions {
+  /**
+   * The trailing text this store appends to every page title, worked out by a
+   * caller that has seen several of its pages. Subtracted from the name.
+   */
+  titleSuffix?: string;
+  /**
+   * The category tree the admin actually runs, from `loadCategoryTree`. Without
+   * it the built-in tree is used, which has no "Hoodies", "Long Sleeves" or
+   * "Track Jackets" — so a catalogue whose editor split those out got the
+   * built-in "Hoodies & Sweatshirts" and "T-Shirts" labels, which its tree then
+   * dropped.
+   */
+  tree?: CategoryGroup[];
+}
+
 export function normalizeExtract(
   raw: RawExtract,
   sourceUrl: string,
   config?: ParserSiteConfig | null,
+  opts?: NormalizeOptions,
 ): ParsedProduct {
   const issues: string[] = [];
 
-  const name = cleanName(raw.name ?? "");
-  if (!name) issues.push("missing name");
-
   const brand = (config?.brandOverride || raw.brand || "").trim();
+
+  // The size suffix goes first (it is about the garment), then the store's
+  // furniture (it is about the shop). Both are conservative: anything that
+  // cannot be justified is left on the name.
+  const name = tidyProductName(cleanName(raw.name ?? ""), {
+    host: hostOf(sourceUrl),
+    brand,
+    titleSuffix: opts?.titleSuffix,
+  });
+  if (!name) issues.push("missing name");
 
   const price = parsePrice(raw.price ?? "");
   if (!price) issues.push("missing price");
   const priceOriginal = parsePrice(raw.priceOriginal ?? "");
 
-  const currency = normalizeCurrency(raw.currency, raw.price);
-  if (price && !currency) issues.push("currency not stated");
+  // What the page says, and only when it says nothing, what the store is: its
+  // country domain or declared language. The inferred answer is labelled, so
+  // the import can say "UAH, from the .ua address" instead of passing a guess
+  // off as a statement — and so a store with neither still reads as unstated.
+  const stated = normalizeCurrency(raw.currency, raw.price);
+  const inferred = !stated && price ? currencyFromLocale(sourceUrl, raw.lang) : null;
+  const currency = stated || inferred?.code || "";
+  if (price && !stated) {
+    issues.push(inferred ? `currency not stated — ${inferred.code} from ${inferred.basis}` : "currency not stated");
+  }
 
   // The store's own filing of this piece, outermost crumb first. Two things are
   // read out of it, and both used to be guessed from the name alone or not
@@ -80,9 +125,18 @@ export function normalizeExtract(
   // The tree's label for what this piece is: from the name first, which is more
   // specific ("Wool-blend bomber jacket" over a trail's "Jackets"), then from the
   // trail, which answers for a name that classifies nothing ("Aurelio").
-  const subLabelFromName = matchSubcategoryLabel(name);
-  const subLabelFromTrail = trail ? matchSubcategoryLabel(trail) : undefined;
-  const labelValues = subcategoryToValue();
+  // The garment dictionary first — it knows "tee", "trainers", "beanie" and the
+  // Russian names, none of which spell out a label's own words — and the
+  // label's words themselves only when the dictionary does not recognise the
+  // piece at all. Once it does, a label's words elsewhere in the name are about
+  // something else: "Belt Scarf" is a scarf, and reading label words filed it
+  // under Belts.
+  const tree = opts?.tree;
+  const labelValues = subcategoryToValue(tree);
+  const labelFor = (text: string) =>
+    matchGarment(text) ? garmentLabel(text, labelValues) : matchSubcategoryLabel(text, tree);
+  const subLabelFromName = labelFor(name);
+  const subLabelFromTrail = trail ? labelFor(trail) : undefined;
   const labelCategory = (label: string | undefined) => {
     const value = label ? labelValues[label] : undefined;
     // The admin can point a tree label at a bucket outside the code's own list.
@@ -115,7 +169,7 @@ export function normalizeExtract(
   // `resolveSubcategory` drops a label the tree does not claim for this
   // category, so a disagreement — an override that says footwear over a name
   // that says bomber jacket — resolves rather than persists.
-  const subcategory = resolveSubcategory(category, subLabelFromName ?? subLabelFromTrail);
+  const subcategory = resolveSubcategory(category, subLabelFromName ?? subLabelFromTrail, tree);
 
   // Style, from everything the page said about the piece. The description
   // carries most of it ("a pared-back essential", "utility pockets"), the
@@ -124,11 +178,13 @@ export function normalizeExtract(
     [name, raw.description ?? "", raw.material ?? "", subcategory ?? "", trail].join(" "),
   );
 
-  // Gender: explicit override → URL → name/description
+  // Gender: the site config's override, then what the page states — name,
+  // address, breadcrumbs, description, strongest first. A page that states
+  // nothing is left without one here; the import decides it from the store's
+  // setting and the catalogue's history, which this function cannot see.
   const gender =
     config?.genderOverride ??
-    inferGenderFromText(sourceUrl) ??
-    inferGenderFromText(`${name} ${raw.description ?? ""}`);
+    genderFromPage({ name, url: sourceUrl, breadcrumbs: trail, description: raw.description })?.gender;
 
   // Images: resolve to absolute URLs, ask the CDN for the full-resolution
   // original, then dedupe by photo identity rather than by string.
@@ -217,6 +273,7 @@ export function normalizeExtract(
     price,
     priceOriginal,
     currency,
+    ...(inferred ? { currencyBasis: inferred.basis } : {}),
     sourceUrl,
     strategies: raw.strategies ?? [],
     issues,
@@ -239,9 +296,11 @@ export function normalizeExtract(
  */
 function colorFrom(stated: string | undefined, name: string, sourceUrl: string): string | undefined {
   // Even a stated colour we cannot classify ("as pictured", "multi") is the
-  // store's answer, and a better label than one we made up.
+  // store's answer, and a better label than one we made up — so long as it is a
+  // name at all. The storefront readers (Shopify, Woo, Squarespace) reach this
+  // without passing through the extractor's own check.
   const said = (stated ?? "").trim();
-  if (said) return said;
+  if (said && looksLikeColourLabel(said)) return said;
 
   const slug = (() => {
     try {

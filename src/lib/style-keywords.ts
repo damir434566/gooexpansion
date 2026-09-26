@@ -48,56 +48,5 @@ export function normalizeStyleKeywords(values: unknown): StyleKeyword[] {
   return STYLE_KEYWORD_LIST.filter((k) => wanted.has(k));
 }
 
-// ── Reading a style off a product ─────────────────────────────────────────────
-// The importer wrote `styleKeywords: []` for every product it has ever created:
-// the vocabulary above existed, the pickers used it, and nothing ever filled it
-// from a page. The stylist reads these tags, so an empty column means a
-// catalogue the stylist cannot reason about beyond category and colour.
-//
-// The rules below are the same shape as the category classifier's: ordered
-// pairs of a pattern and the value it implies, matched against the words a page
-// already gives us — the product's name, its description, its material and the
-// label the tree filed it under.
-//
-// Deliberately narrow. A style tag is a soft signal (a filter, a hint to the
-// stylist), so a missing one costs little and a wrong one teaches the stylist
-// something false about the piece. Words that name a garment rather than a
-// manner — "jacket", "dress" — are not here at all, and neither are colours:
-// black is not a style, and inferring "dark" from it would tag half the
-// catalogue.
-
-const STYLE_RULES: [RegExp, StyleKeyword][] = [
-  [/\bavant[-\s]?garde|deconstructed|asymmetric(?:al)?|sculptural|conceptual\b/i, "avant-garde"],
-  [/\bstreetwear|street\s?style|skate|graffiti|graphic\s?(?:tee|print)|hype\b/i, "streetwear"],
-  [/\butility|utilitarian|workwear|military|combat|tactical|technical|multi[-\s]?pocket\b/i, "utilitarian"],
-  [/\bbohemian|\bboho\b|crochet|fringe[ds]?|paisley|kaftan|caftan|peasant\b/i, "bohemian"],
-  [/\bpreppy|varsity|collegiate|argyle|letterman|pinstripe\b/i, "preppy"],
-  [/\bacademic|academia|tweed|houndstooth|herringbone|corduroy|scholar\b/i, "academic"],
-  [/\bsport|sports|sporty|athletic|performance|running|training|track\s?(?:suit|top|pant)|activewear|gym\b/i, "sporty"],
-  [/\bcoastal|nautical|resort|seersucker|beachwear|vacation|holiday\s?shop|\blinen\b/i, "coastal"],
-  [/\bromantic|feminine|floral|lace|ruffle[ds]?|bow\s?detail|chiffon|broderie\b/i, "romantic"],
-  [/\bmaximalis[mt]|eclectic|statement\s?(?:piece|print)|sequin|leopard|animal\s?print|vibrant\b/i, "maximalist"],
-  [/\bgothic|grunge|punk|darkwear|distressed\b/i, "dark"],
-  [/\bclassic|timeless|heritage|tailor(?:ed|ing)|refined|elegant|trench|loafer\b/i, "classic"],
-  [/\bminimal(?:ist)?|understated|clean\s?line|essential|pared[-\s]?back|sleek\b/i, "minimal"],
-];
-
-/**
- * The styles a product's own words imply, at most `max` of them.
- *
- * Returned in the vocabulary's order rather than the order they were found, so
- * two products tagged with the same pair read the same way — the same rule
- * `normalizeStyleKeywords` follows.
- */
-export function inferStyleKeywords(text: string, max = 3): StyleKeyword[] {
-  const source = (text ?? "").replace(/\s+/g, " ");
-  if (source.length < 3) return [];
-
-  const found = new Set<StyleKeyword>();
-  for (const [pattern, style] of STYLE_RULES) {
-    if (pattern.test(source)) found.add(style);
-  }
-  if (!found.size) return [];
-
-  return STYLE_KEYWORD_LIST.filter((k) => found.has(k)).slice(0, max);
-}
+// Reading a style off a product's own words lives in `lib/taxonomy/styles`,
+// next to the other dictionaries the importer reads pages with.

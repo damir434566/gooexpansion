@@ -11,6 +11,7 @@
  *   - a listing that only carries links — `links` is filled so the caller can
  *     walk them.
  */
+import type { CategoryGroup } from "@/lib/categories";
 import { fetchHtml } from "./fetch";
 import { extractProduct, partitionProducts, extractProductLinks } from "./extract";
 import { normalizeExtract } from "./normalize";
@@ -78,6 +79,14 @@ export interface ParsePageOptions {
    * lowest precedence, behind every structured source.
    */
   evidence?: PageEvidence;
+  /**
+   * The trailing text this store appends to every page title. Subtracted from
+   * the product name — whatever is identical across twenty of a shop's pages
+   * is the shop talking, not any one product's name.
+   */
+  titleSuffix?: string;
+  /** The admin's category tree, so subcategories are the labels it actually has. */
+  categoryTree?: CategoryGroup[];
 }
 
 function resolveUrl(href: string, base: string): string {
@@ -127,7 +136,7 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
   // store anything at all would only be a request that can be refused.
   const storefront = pasted ? null : await fetchStorefrontProduct(url, settings, opts.fetchApiKey);
   if (storefront) {
-    const product = normalizeExtract(storefront.raw, storefront.sourceUrl, matched);
+    const product = normalizeExtract(storefront.raw, storefront.sourceUrl, matched, { titleSuffix: opts.titleSuffix, tree: opts.categoryTree });
     return {
       ok: true,
       products: product.name || product.imageUrl ? [product] : [],
@@ -195,7 +204,7 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
       }
     }
 
-    const prod = normalizeExtract(raw, pageUrl, matched);
+    const prod = normalizeExtract(raw, pageUrl, matched, { titleSuffix: opts.titleSuffix, tree: opts.categoryTree });
     return prod.name || prod.imageUrl ? [prod] : [];
   };
 
@@ -220,7 +229,7 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
       isListing = true;
       products = items.map((n) => {
         const purl = n.url ? resolveUrl(n.url, pageUrl) : "";
-        const prod = normalizeExtract(n, purl || pageUrl, matched);
+        const prod = normalizeExtract(n, purl || pageUrl, matched, { titleSuffix: opts.titleSuffix, tree: opts.categoryTree });
         // Keep each card's own source URL (empty → import inserts a fresh row
         // instead of all cards colliding on the listing URL).
         prod.sourceUrl = purl;

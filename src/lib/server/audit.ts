@@ -23,6 +23,8 @@ export type AdminAction =
   | "products.bulk_edited"
   | "products.bg_color_sampled"
   | "products.bg_color_undone"
+  | "products.duplicates_merged"
+  | "products.duplicates_dismissed"
   | "retailer_domain.saved"
   | "retailer_domain.deleted"
   | "retailer_domain.applied";

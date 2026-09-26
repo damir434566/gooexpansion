@@ -6,23 +6,29 @@
  * the catalogue wanted was one product with two links — which is only safe when
  * the two pages can be shown to be the same ITEM, not merely similar ones.
  *
- * Codes decide it, and only two of the three are usable:
+ * Codes decide it first, and only two of the three are usable:
  *
  *   gtin       the item's own number. Same GTIN, same thing, whoever sells it.
  *   brand+mpn  the maker's part number within its brand.
  *   sku        the store's shelf label — two retailers use the same string for
  *              different things, so it is never matched across hosts.
  *
- * Names are not used at all. "Wool Blend Bomber Jacket" is what four brands call
- * four different jackets, and a wrong merge is worse than two rows: it puts a
- * link on a product that sends a shopper to something else, and it reads as
- * correct while doing it.
+ * Most stores print none of them, so a page with no code is then asked by name
+ * (`pickSameItemByName`) — under every condition that keeps a name from being
+ * a guess. "Wool Blend Bomber Jacket" is what four brands call four different
+ * jackets, and a wrong merge is worse than two rows: it puts a link on a
+ * product that sends a shopper to something else, and it reads as correct
+ * while doing it. So the brand must be the same, the piece the same once
+ * reduced (`piece-name.ts`), the colour the same, the store a different one,
+ * and the two prices within a factor of three of each other.
  *
  * The merge itself only ever FILLS: a field the existing row has is left alone.
  * Two stores describe the same coat differently, and the row that arrived first
  * is the one an admin may already have edited.
  */
 import type { Retailer } from "@/lib/types";
+import { colourRelation, samePiece } from "./piece-name";
+import { foldBrand } from "./brand-from-name";
 
 /** The columns the importer needs to decide and to merge. */
 export interface ExistingItem {
@@ -72,6 +78,87 @@ export function isSameItem(incoming: IncomingItem, row: ExistingItem): boolean {
   }
 
   return false;
+}
+
+/** A row as the name test needs it: the merge columns plus what identifies the piece. */
+export interface NamedItem extends ExistingItem {
+  name: string;
+  category?: string | null;
+}
+
+/**
+ * Widest gap between two stores' prices for one item. A sale takes a price to
+ * half and sometimes to a third; past that, two rows under one name are two
+ * different things — a £90 cap and a £900 coat both called "Logo".
+ */
+const MAX_PRICE_RATIO = 3;
+
+function hostOf(url: string | null | undefined): string {
+  try {
+    return url ? new URL(url).hostname.replace(/^www\./, "").toLowerCase() : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The existing row this page is another store's listing of, by name — or null.
+ *
+ * Asked only after the codes found nothing. Among rows of the same brand it
+ * takes the one that is the same piece (`samePiece`) in the same colour, sold
+ * somewhere else, at a comparable price:
+ *
+ *   - the same colour word wins outright; two words for one base colour
+ *     ("Core Black" beside "Black") count only when exactly one row qualifies,
+ *     since a piece made in navy and in sky blue has two rows that are "blue";
+ *   - a colour stated on one side and not the other decides nothing, and is
+ *     left to the colour grouping;
+ *   - a row already carrying this store is another listing of the store's own,
+ *     not a second place to buy — unless it carries this very page, which is a
+ *     re-collect updating its price.
+ */
+export function pickSameItemByName(
+  incoming: {
+    brand: string;
+    name: string;
+    colors: string[];
+    category?: string | null;
+    /** Dollars, like `priceMin` on the rows. */
+    price: number;
+    sourceUrl: string | null;
+  },
+  rows: NamedItem[],
+): NamedItem | null {
+  const ourHost = hostOf(incoming.sourceUrl);
+  // Without an address there is no place to buy to add.
+  if (!ourHost || !incoming.brand.trim()) return null;
+
+  const exact: NamedItem[] = [];
+  const near: NamedItem[] = [];
+  const brand = foldBrand(incoming.brand);
+  for (const row of rows) {
+    if (row.sourceUrl && row.sourceUrl === incoming.sourceUrl) continue;
+    // The caller reads one brand's rows, but the decision does not lean on it.
+    if (foldBrand(row.brand ?? "") !== brand) continue;
+    if (!samePiece(incoming.brand, incoming, row)) continue;
+
+    const relation = colourRelation(incoming.colors, row.colors);
+    if (relation === "different" || relation === "unknown") continue;
+
+    const retailers = row.retailers ?? [];
+    if (retailers.some((r) => r.url && r.url === incoming.sourceUrl)) return row;
+    const hosts = [row.sourceUrl, ...retailers.map((r) => r.url)].map(hostOf);
+    if (hosts.includes(ourHost)) continue;
+
+    const theirs = typeof row.priceMin === "number" ? row.priceMin : 0;
+    if (incoming.price > 0 && theirs > 0) {
+      const ratio = Math.max(incoming.price, theirs) / Math.min(incoming.price, theirs);
+      if (ratio > MAX_PRICE_RATIO) continue;
+    }
+
+    (relation === "near" ? near : exact).push(row);
+  }
+  return exact[0] ?? (near.length === 1 ? near[0] : null);
 }
 
 /**

@@ -8,6 +8,7 @@
  */
 // A spec row is defined where the helpers that read one live, so the parser
 // and the CSV importer cannot end up with two shapes for the same thing.
+import type { ColourOrigin } from "./colour-choice";
 import type { SpecPair } from "@/lib/server/product-fields";
 
 export type { SpecPair };
@@ -124,6 +125,15 @@ export interface PageEvidence {
    */
   colorText?: string;
   /**
+   * Every string the page offers as its colour, each with where it was read —
+   * the selected swatch's attributes, the label beside the swatch row, the
+   * store's selected-variant data, loose text in the colour area. Sent by the
+   * extension from 1.0.3; the server picks the one that is a colour
+   * (`colour-choice.ts`) instead of the extension taking the first that looked
+   * like words, which is how a swatch photo's alt "Emerson" became a colour.
+   */
+  colorCandidates?: { value: string; origin: ColourOrigin }[];
+  /**
    * Addresses of the same piece in other colours, as the colour row links them.
    *
    * This is the catalogue's variant grouping problem stated by the page itself:
@@ -179,6 +189,17 @@ export interface RawExtract {
   price?: string;
   priceOriginal?: string;
   currency?: string;
+  /**
+   * The language the page declares (`uk-UA`, `pl`). Not evidence about any one
+   * price; read only when nothing on the page states a currency.
+   */
+  lang?: string;
+  /**
+   * The page's `<title>`, unmodified. Not a name candidate in its own right
+   * except as a last resort — it is kept so the store's own repeated furniture
+   * can be measured and subtracted.
+   */
+  pageTitle?: string;
   image?: string;
   images: string[];
   sizes: string[];
@@ -224,6 +245,12 @@ export interface ParsedProduct {
   price: number;
   priceOriginal: number;
   currency: string;
+  /**
+   * Set when `currency` was inferred from the store rather than stated by the
+   * page — "the .ua address". Carried to the import so the admin can see why a
+   * price was read as hryvnia.
+   */
+  currencyBasis?: string;
   sourceUrl: string;
   /** Same piece, other colours, for the importer to group this row with. */
   variantUrls: string[];
@@ -281,10 +308,20 @@ export interface CrawlItemResult {
   images?: number;
   /** What happened to the price: the conversion applied, or why none was. */
   priceNote?: string;
+  /** Set when the brand came from the product name, not the page. */
+  brandNote?: string;
+  /** Set when the colour filter came from the name or the photo, not the label. */
+  colorNote?: string;
+  /** Set when the gender came from the store or the catalogue's history, not the page. */
+  genderNote?: string;
+  /** What argued for the style tags written. */
+  styleNote?: string;
   /** Colour siblings this row was grouped with, if any. */
   variantsLinked?: number;
   /** Set when the page joined an existing product instead of creating one. */
   merged?: boolean;
+  /** What recognised that product: a code, or the name and colour. */
+  mergedBy?: "code" | "name";
   /** What that merge filled in. */
   mergedFields?: string[];
 }
