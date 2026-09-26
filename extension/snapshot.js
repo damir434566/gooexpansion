@@ -283,6 +283,21 @@
   /** A colour control is a row of swatches, not a page: past this many elements it is a section. */
   const MAX_CONTROL_ELEMENTS = 600;
 
+  /**
+   * Where other products live: recommendation rails and listing cards. Their
+   * swatches are those products' colours, and their links are other products —
+   * read as this page's colour row, "you may also like" made three different
+   * jackets one jacket in five colours.
+   */
+  const OTHER_PRODUCTS = [
+    "product-recommendations", "complementary-products", "recently-viewed-products",
+    '[class*="recommend" i]', '[id*="recommend" i]', '[class*="related" i]', '[id*="related" i]',
+    '[class*="upsell" i]', '[class*="cross-sell" i]', '[class*="crosssell" i]', '[class*="also-like" i]',
+    '[class*="you-may" i]', '[class*="recently" i]', '[class*="complete-the-look" i]', '[class*="shop-the-look" i]',
+    '[class*="product-card" i]', '[class*="card-product" i]', '[class*="productcard" i]', '[class*="product-item" i]',
+    '[class*="grid-product" i]', '[class*="product-tile" i]', '[class*="product-grid" i]', '[class*="products-grid" i]',
+  ].join(",");
+
   /** Elements whose own attributes say they are the colour control. */
   function colorContainers() {
     const out = [];
@@ -302,6 +317,11 @@
       );
       if (!says) continue;
       if (el.getElementsByTagName("*").length > MAX_CONTROL_ELEMENTS) continue;
+      try {
+        if (el.closest(OTHER_PRODUCTS)) continue;
+      } catch {
+        // A selector this browser cannot parse: keep the element rather than lose the row.
+      }
       out.push(el);
       if (out.length >= 40) break;
     }
@@ -583,6 +603,137 @@
   function colorTextFrom(candidates) {
     const stating = candidates.find((c) => ["data", "swatch", "label", "line"].includes(c.origin));
     return stating ? stating.value : "";
+  }
+
+  /** Words on a buy button, in the languages the catalogue collects from. */
+  const BUY_BUTTON =
+    /add\s+to\s+(?:bag|cart|basket)|buy\s+(?:it\s+)?now|pre-?order|sold\s+out|в\s+корзину|купить|до\s+кошика|в\s+кошик|купити|ajouter\s+au\s+panier|in\s+den\s+warenkorb|aggiungi\s+al\s+carrello|añadir\s+a\s+la\s+(?:cesta|bolsa)/i;
+
+  /** Labels that sit near a buy button without being the product's name. */
+  const NOT_A_TITLE =
+    /^(?:size|sizes|colou?r|quantity|qty|select|choose|price|sale|new|description|details|shipping|delivery|returns|size\s+guide|in\s+stock|out\s+of\s+stock|размер|цвет|количество|розмір|колір|кількість)\b/i;
+
+  /** A line that could be a product's name: one short line of words, not a price or a label. */
+  function titleLine(raw) {
+    const text = String(raw || "").trim().replace(/\s+/g, " ");
+    if (text.length < 3 || text.length > 120) return "";
+    if (!/\p{L}{2}/u.test(text)) return "";
+    if (PRICE_TEXT.test(text) || BUY_BUTTON.test(text) || NOT_A_TITLE.test(text)) return "";
+    return text;
+  }
+
+  /**
+   * The product's title as the page prints it beside the buy button.
+   *
+   * Some stores state their product's name nowhere a parser looks: no
+   * structured data, and an h1 that is the store's logo. mowalola.com is one —
+   * "JORDAN LEATHER JACKET" appears only in the bar that holds the price and
+   * "Add to bag". So the buy button is found and its surroundings searched,
+   * nearest first: a heading or a title/name element, then the first line of a
+   * small block that is not the price.
+   */
+  function collectTitleText() {
+    const starts = [];
+    for (const el of document.querySelectorAll('button, input[type="submit"], [role="button"]')) {
+      const label = (el.innerText || el.value || el.textContent || "").trim();
+      if (label && label.length < 40 && BUY_BUTTON.test(label)) starts.push(el);
+      if (starts.length >= 3) break;
+    }
+    for (const form of document.querySelectorAll('form[action*="/cart/add"]')) starts.push(form);
+
+    for (const start of starts) {
+      let node = start.parentElement;
+      for (let depth = 0; depth < 6 && node; depth++, node = node.parentElement) {
+        if (node === document.body) break;
+        let heads = [];
+        try {
+          heads = node.querySelectorAll('h1, h2, h3, [class*="title" i], [class*="name" i]');
+        } catch {
+          heads = [];
+        }
+        for (const head of heads) {
+          if (head.contains(start)) continue;
+          const text = titleLine(head.innerText || head.textContent);
+          if (text) return text;
+        }
+        // Then the block's own smallest pieces of text, one element at a time:
+        // a title and a price in neighbouring spans read as one line of
+        // `innerText` ("JORDAN LEATHER JACKET42 323,00 грн.").
+        const leaves = [...node.querySelectorAll("*")].filter(
+          (el) => !el.children.length && !el.contains(start) && !start.contains(el),
+        );
+        if (leaves.length <= 30) {
+          for (const leaf of leaves) {
+            const text = titleLine(leaf.innerText || leaf.textContent);
+            if (text) return text;
+          }
+        }
+      }
+    }
+    return "";
+  }
+
+  /**
+   * The store's own record of this product, when the store is Shopify.
+   *
+   * Every Shopify store answers `/products/<handle>.json` from its own origin,
+   * and that record names the product, its maker, its type, every photo, its
+   * sizes and its colour option as data. The server reads it whenever it can
+   * reach the store; a collected page it never fetches, so the extension reads
+   * it here, from the page's own origin. The prices in it are in the store's
+   * base currency, stated by `/meta.json` — which the page's displayed currency
+   * (a hryvnia price on a store that sells in pounds) is not.
+   */
+  async function fetchShopifyProduct() {
+    const shopify =
+      document.querySelector('link[href*="cdn.shopify.com"], script[src*="cdn.shopify.com"], meta[name="shopify-digital-wallet"], meta[name="shopify-checkout-api-token"]') ||
+      [...document.scripts].some((script) => /Shopify\.shop\s*=/.test(script.textContent || ""));
+    if (!shopify) return null;
+    const segments = location.pathname.split("/").filter(Boolean);
+    const at = segments.lastIndexOf("products");
+    if (at < 0 || at === segments.length - 1) return null;
+    const handle = segments[at + 1].replace(/\.(?:json|js)$/i, "");
+    const base = `${location.origin}/${segments.slice(0, at + 1).join("/")}`;
+
+    const get = async (url) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      try {
+        const res = await fetch(url, { credentials: "same-origin", signal: controller.signal, headers: { Accept: "application/json" } });
+        return res.ok ? await res.json() : null;
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    const json = await get(`${base}/${encodeURIComponent(handle)}.json`);
+    const p = json && json.product;
+    if (!p || typeof p.handle !== "string") return null;
+    const meta = await get(`${location.origin}/meta.json`);
+    return {
+      product: {
+        title: p.title,
+        handle: p.handle,
+        vendor: p.vendor,
+        product_type: p.product_type,
+        body_html: typeof p.body_html === "string" ? p.body_html.slice(0, 20000) : undefined,
+        options: Array.isArray(p.options) ? p.options.map((o) => ({ name: o && o.name, values: o && o.values })) : [],
+        images: Array.isArray(p.images) ? p.images.slice(0, 60).map((i) => ({ src: i && i.src, position: i && i.position })) : [],
+        variants: Array.isArray(p.variants)
+          ? p.variants.slice(0, 150).map((v) => ({
+              price: v && v.price,
+              compare_at_price: v && v.compare_at_price,
+              option1: v && v.option1,
+              option2: v && v.option2,
+              option3: v && v.option3,
+              available: v && v.available,
+            }))
+          : [],
+      },
+      currency: meta && typeof meta.currency === "string" ? meta.currency : "",
+    };
   }
 
   /**
@@ -908,6 +1059,8 @@
     const priceText = collectPriceText();
     const sizes = collectSizes();
     const colorCandidates = collectColorCandidates();
+    const titleText = collectTitleText();
+    const shopify = await fetchShopifyProduct();
     const colorText = colorTextFrom(colorCandidates);
     const variantUrls = collectVariantUrls();
     const descriptionText = collectDescription();
@@ -938,6 +1091,8 @@
       sizes,
       colorText,
       colorCandidates,
+      titleText,
+      shopify,
       variantUrls,
       descriptionText,
       specs,

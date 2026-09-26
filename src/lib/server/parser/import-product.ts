@@ -22,6 +22,7 @@ import { normalizeStyleKeywords } from "@/lib/style-keywords";
 import {
   chooseGroup,
   isColorSiblingByName,
+  sameModelFamily,
   type VariantCandidate,
 } from "./variant-group";
 import {
@@ -189,8 +190,14 @@ async function linkColorVariants(input: {
         .from("products")
         .select(VARIANT_COLUMNS)
         .in("source_url", input.variantUrls.slice(0, 20));
+      // The page's own colour row, checked once: a link is a colourway only
+      // if it can be one. A "you may also like" grid with swatches on its
+      // cards read as the colour row, and other jackets joined this one.
+      const ours = { name: input.name, colors: input.colors, category: input.category };
       for (const row of (data ?? []) as VariantRow[]) {
-        if (row.id !== input.productId) siblings.set(row.id, toCandidate(row));
+        if (row.id === input.productId) continue;
+        const candidate = toCandidate(row);
+        if (sameModelFamily(input.brand, ours, candidate)) siblings.set(row.id, candidate);
       }
     }
 

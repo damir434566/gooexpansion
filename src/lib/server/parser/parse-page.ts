@@ -11,6 +11,7 @@
  *   - a listing that only carries links — `links` is filled so the caller can
  *     walk them.
  */
+import { mergeShopifyIntoRaw } from "./shopify";
 import type { CategoryGroup } from "@/lib/categories";
 import { fetchHtml } from "./fetch";
 import { extractProduct, partitionProducts, extractProductLinks } from "./extract";
@@ -190,6 +191,9 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
     // pageUrl lets the extractor harvest the gallery out of the markup —
     // relative and protocol-relative image URLs need a base to resolve against.
     let raw = extractProduct(fetched.html, matched, pageUrl, opts.evidence);
+    if (opts.evidence?.shopify) {
+      raw = mergeShopifyIntoRaw(raw, opts.evidence.shopify.product, pageUrl, opts.evidence.shopify.currency);
+    }
 
     const aiAllowed = opts.useAi ?? opts.aiSettings.enabled;
     const aiWanted = aiAllowed && (opts.aiSettings.mode === "always" || shouldUseAi(raw));

@@ -1,0 +1,46 @@
+{
+ "product": {
+  "title": "Jordan Leather Jacket",
+  "handle": "jordan-leather-jkt",
+  "vendor": "Mowalola",
+  "product_type": "Jackets",
+  "body_html": "<p>Oxblood leather bomber with fur collar.</p><p>100% leather</p>",
+  "options": [
+   {
+    "name": "Size",
+    "values": [
+     "S",
+     "M",
+     "L"
+    ]
+   }
+  ],
+  "images": [
+   {
+    "src": "https://cdn.shopify.com/s/files/1/jordan-front.jpg",
+    "position": 1
+   },
+   {
+    "src": "https://cdn.shopify.com/s/files/1/jordan-back.jpg",
+    "position": 2
+   },
+   {
+    "src": "https://cdn.shopify.com/s/files/1/jordan-collar.jpg",
+    "position": 3
+   }
+  ],
+  "variants": [
+   {
+    "price": "850.00",
+    "compare_at_price": null,
+    "option1": "S",
+    "available": true
+   },
+   {
+    "price": "850.00",
+    "option1": "M",
+    "available": true
+   }
+  ]
+ }
+}

@@ -134,6 +134,19 @@ export interface PageEvidence {
    */
   colorCandidates?: { value: string; origin: ColourOrigin }[];
   /**
+   * The product's title as the page shows it beside the buy button. On a store
+   * whose h1 is its logo and which states no structured name, this is the only
+   * place the name is printed ("JORDAN LEATHER JACKET" on mowalola.com).
+   */
+  titleText?: string;
+  /**
+   * The store's own product JSON, fetched by the extension from the page's
+   * origin — for Shopify, `/products/<handle>.json` with the currency of
+   * `/meta.json`. The same record the server reads when it can reach the store
+   * itself; the extension reads it because a collected page is never fetched.
+   */
+  shopify?: { product: unknown; currency?: string };
+  /**
    * Addresses of the same piece in other colours, as the colour row links them.
    *
    * This is the catalogue's variant grouping problem stated by the page itself:

@@ -112,7 +112,7 @@ export const GARMENT_TYPES: readonly GarmentType[] = [
     "косух", "мотокуртк", "байкерск куртк",
   ]),
   g("leather-jacket", "outerwear", ["Leather Jackets", "Jackets"], [
-    "leather jacket", "suede jacket", "shearling jacket", "sheepskin jacket", "aviator jacket",
+    "leather jacket", "leather jkt", "suede jacket", "shearling jacket", "sheepskin jacket", "aviator jacket",
     "b 3", "b3 jacket", "flying jacket",
     "кожан куртк", "замшев куртк", "куртк из кож", "шкур куртк",
   ]),
@@ -166,7 +166,7 @@ export const GARMENT_TYPES: readonly GarmentType[] = [
   ]),
   g("jacket", "outerwear", ["Jackets"], [
     "jacket", "jacket coat", "outer jacket", "overjacket", "hooded jacket", "zip jacket", "short jacket",
-    "cropped jacket", "crinkle jacket", "shell jacket",
+    "cropped jacket", "crinkle jacket", "shell jacket", "jkt", "jckt",
     "veste", "giacca", "giubbotto", "chaqueta", "cazadora", "jacke",
     "куртк", "курточк", "куртка!",
   ]),

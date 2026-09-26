@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Goo Collect",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
   "minimum_chrome_version": "116",
   "permissions": [

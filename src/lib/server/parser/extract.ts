@@ -813,26 +813,56 @@ function fromMeta(html: string): Partial<RawExtract> {
  * `<title>` is kept as well, but only as a last resort and as the raw material
  * for working out what this store appends to every page.
  */
-function fromHeading(html: string): { h1?: string; title?: string } {
+function fromHeading(html: string): { h1?: string; h1s: string[]; title?: string } {
   const strip = (frag: string) =>
     decodeEntities(frag.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
 
-  let h1: string | undefined;
-  // First non-empty h1: a header logo is sometimes marked up as one, and those
-  // are usually image-only, so they strip to nothing and are skipped.
-  const headings = html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi);
-  for (const m of headings) {
+  // Every non-empty h1, in order. A header logo is sometimes marked up as one:
+  // usually image-only, so it strips to nothing — but on some stores it is the
+  // store's name in text ("mowalola"), and taking the first h1 named a leather
+  // jacket after the shop. The caller skips the ones that are the store.
+  const h1s: string[] = [];
+  for (const m of html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)) {
     const text = strip(m[1] ?? "");
-    if (text && text.length <= 200) {
-      h1 = text;
-      break;
-    }
+    if (text && text.length <= 200) h1s.push(text);
+    if (h1s.length >= 5) break;
   }
 
   const tm = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
   const title = tm ? strip(tm[1] ?? "") : undefined;
 
-  return { h1, title: title || undefined };
+  return { h1: h1s[0], h1s, title: title || undefined };
+}
+
+/** Hosts' generic labels: never a store's name. */
+const HOST_NOISE = new Set([
+  "www", "shop", "store", "eu", "us", "uk", "en", "de", "fr", "it", "es", "ua", "ru", "pl",
+  "com", "net", "org", "io", "co", "app", "online", "global", "int",
+]);
+
+/**
+ * The store's own name as a page might print it where a product name belongs:
+ * its `og:site_name` and the words of its host ("mowalola" for mowalola.com).
+ * Compared by letters only, so "MOWALOLA" and "Mowalola" are the store.
+ */
+function storeNames(html: string, baseUrl?: string): Set<string> {
+  const key = (v: string) => v.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const names = new Set<string>();
+  const site =
+    html.match(/<meta[^>]+property=["']og:site_name["'][^>]*content=["']([^"']+)["']/i)?.[1] ??
+    html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:site_name["']/i)?.[1];
+  if (site) names.add(key(decodeEntities(site)));
+  try {
+    if (baseUrl) {
+      for (const label of new URL(baseUrl).hostname.split(".")) {
+        if (!HOST_NOISE.has(label) && label.length >= 3) names.add(key(label));
+      }
+    }
+  } catch {
+    /* no host, no names */
+  }
+  names.delete("");
+  return names;
 }
 
 /**
@@ -987,7 +1017,22 @@ export function extractProduct(
   );
 
   const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
-  const name = pick(ruleVal("name"), jsonld.name, heading.h1, meta.name, micro.name, heading.title);
+  // The product's name: the first candidate that is not the store's own name.
+  // The title the extension read beside the buy button sits after the h1s —
+  // on most stores the h1 is the product — and before `og:title`, which is
+  // written for search results.
+  const shopNames = storeNames(html, baseUrl);
+  const isShopName = (v: string) => shopNames.has(v.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ""));
+  const nameCandidates = [
+    ruleVal("name"),
+    jsonld.name,
+    ...heading.h1s,
+    evidence?.titleText,
+    meta.name,
+    micro.name,
+    heading.title,
+  ].filter((v): v is string => !!v && !!v.trim());
+  const name = nameCandidates.find((v) => !isShopName(v)) ?? nameCandidates[0];
   const brand = pick(
     ruleVal("brand"),
     jsonld.brand,
@@ -1005,7 +1050,7 @@ export function extractProduct(
   let galleryImages: string[] = [];
   if (baseUrl) {
     const anchor = image ? [image, ...images] : images;
-    const productName = pick(ruleVal("name"), jsonld.name, heading.h1, meta.name, micro.name, heading.title) ?? "";
+    const productName = name ?? "";
     galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName, evidence?.images ?? []);
     if (galleryImages.length) strategies.push("gallery");
   }
