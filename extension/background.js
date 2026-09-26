@@ -291,11 +291,13 @@ async function snapshotPage(url) {
       priceText: typeof result.priceText === "string" ? result.priceText : "",
       sizes: Array.isArray(result.sizes) ? result.sizes : [],
       colorText: typeof result.colorText === "string" ? result.colorText : "",
+      colorCandidates: Array.isArray(result.colorCandidates) ? result.colorCandidates : [],
       variantUrls: Array.isArray(result.variantUrls) ? result.variantUrls : [],
       descriptionText: typeof result.descriptionText === "string" ? result.descriptionText : "",
       specs: Array.isArray(result.specs) ? result.specs : [],
       breadcrumbs: Array.isArray(result.breadcrumbs) ? result.breadcrumbs : [],
       brandText: typeof result.brandText === "string" ? result.brandText : "",
+      pageTitle: typeof result.pageTitle === "string" ? result.pageTitle : "",
       status,
     };
   } catch (err) {
@@ -441,11 +443,13 @@ async function run({ storeUrl, limit }) {
         priceText: snap.priceText,
         sizes: snap.sizes,
         colorText: snap.colorText,
+        colorCandidates: snap.colorCandidates,
         variantUrls: snap.variantUrls,
         descriptionText: snap.descriptionText,
         specs: snap.specs,
         breadcrumbs: snap.breadcrumbs,
         brandText: snap.brandText,
+        pageTitle: snap.pageTitle,
       });
       collected++;
       state.done = collected;

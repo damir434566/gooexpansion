@@ -264,10 +264,12 @@ function serveRates(rates) {
   const uahUrl = "https://shop.example.ua/product/kurtka-bomber";
 
   const noHint = normalizeExtract(extractProduct(uahPage, null, uahUrl), uahUrl, null);
-  check("without the rendered price: currency unknown", noHint.currency, "");
+  // Since goo-fashion #870 a .ua address is evidence of hryvnia: the currency is
+  // inferred, and the issue says where it came from rather than going blank.
+  check("without the rendered price: hryvnia from the .ua address", noHint.currency, "UAH");
   ok(
-    "without it: the product says so",
-    noHint.issues.includes("currency not stated"),
+    "without it: the product says it was inferred",
+    noHint.issues.some((i) => /currency not stated.*\.ua/.test(i)),
     `issues: ${noHint.issues.join(", ")}`,
   );
 

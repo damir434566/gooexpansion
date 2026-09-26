@@ -144,3 +144,47 @@ export async function toUsd(amount: number, currency: string): Promise<Converted
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
+
+export interface Offer {
+  amount: number;
+  /** ISO code the amount is in. */
+  currency: string;
+}
+
+/**
+ * The cheapest of a product's offers, in the currency that store charges.
+ *
+ * A retailer entry keeps the store's own number — ₴4 000 on a hryvnia store —
+ * because that is what a shopper clicking through will be asked to pay. Taking
+ * the smallest of those numbers and printing it with the product's currency is
+ * how the product page came to say "From $4,000" above a retailer row reading
+ * "$97.56". So the offers are compared in dollars and the winner is handed back
+ * with its own currency, for the display to convert like any other price.
+ *
+ * `fallback` is the product's own price, for a product with no priced offers.
+ */
+export async function cheapestOffer(
+  offers: { price: number; currency?: string }[],
+  fallback: Offer,
+): Promise<Offer> {
+  const priced = offers
+    .filter((o) => Number.isFinite(o.price) && o.price > 0)
+    .map((o) => ({ amount: o.price, currency: (o.currency || "USD").trim().toUpperCase() }));
+  if (!priced.length) return fallback;
+
+  // One currency needs no rates, and that is nearly every product.
+  if (priced.every((o) => o.currency === priced[0].currency)) {
+    return priced.reduce((min, o) => (o.amount < min.amount ? o : min));
+  }
+
+  const { rates } = await usdRates();
+  const inUsd = (o: Offer) => {
+    if (o.currency === "USD") return o.amount;
+    const rate = rates[o.currency];
+    // An offer we cannot put on the dollar scale cannot be compared; it is
+    // still shown in the retailer list, it just never wins "From".
+    return rate && rate > 0 ? o.amount / rate : Infinity;
+  };
+  const best = priced.reduce((min, o) => (inUsd(o) < inUsd(min) ? o : min));
+  return Number.isFinite(inUsd(best)) ? best : fallback;
+}

@@ -82,6 +82,13 @@ export default function CollectPage() {
    * exactly the moment before the admin presses the button.
    */
   const stoppedRef = useRef(false);
+  /**
+   * Page titles seen in this run, sent back with each product so the server can
+   * work out what this store appends to every title. Kept here because this is
+   * the only place that sees more than one of the store's pages; what the
+   * suffix *means* is still decided server-side.
+   */
+  const titlesRef = useRef<string[]>([]);
 
   const reply = useCallback((id: number | undefined, ok: boolean, data: unknown) => {
     if (typeof id !== "number") return;
@@ -159,7 +166,15 @@ export default function CollectPage() {
           setConnected(true);
           setPhase("collecting");
           try {
-            const data = await callApi({ action: "ingest", ...payload });
+            const pageTitle = typeof payload.pageTitle === "string" ? payload.pageTitle : "";
+            if (pageTitle && !titlesRef.current.includes(pageTitle)) {
+              titlesRef.current = [...titlesRef.current, pageTitle].slice(-12);
+            }
+            const data = await callApi({
+              action: "ingest",
+              ...payload,
+              titles: titlesRef.current,
+            });
             const result = data.result as CrawlItemResult | undefined;
             if (result) setResults((prev) => [...prev, result]);
             reply(msg.id, true, data);
@@ -206,6 +221,7 @@ export default function CollectPage() {
 
   function reset() {
     stoppedRef.current = false;
+    titlesRef.current = [];
     setResults([]);
     setPlanned(0);
     setNotice("");
@@ -416,12 +432,17 @@ export default function CollectPage() {
  * how many photos came across, and what happened to the price. The second one
  * matters most on a store that does not price in dollars — the catalogue stores
  * dollars, so the row says which rate turned ₴4,000 into a number, rather than
- * leaving the admin to wonder whether it did.
+ * leaving the admin to wonder whether it did. A brand read off the product name
+ * is said too, since it replaced whatever the page gave.
  */
 function detailLine(r: CrawlItemResult): string {
   const parts: string[] = [];
   if (r.images) parts.push(`${r.images} photo${r.images === 1 ? "" : "s"}`);
   if (r.priceNote) parts.push(r.priceNote);
+  if (r.brandNote) parts.push(r.brandNote);
+  if (r.colorNote) parts.push(r.colorNote);
+  if (r.genderNote) parts.push(r.genderNote);
+  if (r.styleNote) parts.push(r.styleNote);
   if (r.variantsLinked) {
     parts.push(`grouped with ${r.variantsLinked} colour${r.variantsLinked === 1 ? "" : "s"}`);
   }
@@ -429,10 +450,13 @@ function detailLine(r: CrawlItemResult): string {
   // product, it added a place to buy one we already had.
   if (r.merged) {
     const filled = (r.mergedFields ?? []).filter((f) => f !== "retailer");
+    // Said, because a name match is a judgement where a code match is a fact,
+    // and the admin is the one who can undo a wrong one.
+    const how = r.mergedBy === "name" ? " (same name and colour)" : "";
     parts.push(
       filled.length
-        ? `linked to an existing product, filling ${filled.join(", ")}`
-        : "linked to an existing product",
+        ? `added as a store to an existing product${how}, filling ${filled.join(", ")}`
+        : `added as a store to an existing product${how}`,
     );
   }
   return parts.join(" · ");

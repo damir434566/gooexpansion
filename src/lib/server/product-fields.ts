@@ -6,6 +6,17 @@
  * (`/api/admin/parser/*`). Keep them dependency-free and side-effect-free so
  * they can run in any serverless route.
  */
+import { garmentCategory } from "@/lib/taxonomy/garments";
+import {
+  COLOUR_PHRASES,
+  COLOUR_STEMS,
+  FIELD_COLOUR_STEMS,
+  FIELD_COLOUR_WORDS,
+  MULTICOLOUR_WORDS,
+  QUALIFIER_COLOUR_STEMS,
+  QUALIFIER_COLOUR_WORDS,
+  SAFE_COLOUR_WORDS,
+} from "@/lib/taxonomy/colours";
 import type { Category, Gender } from "@/lib/types";
 
 // ── Strip trailing size suffix from a product name ────────────────────────────
@@ -16,6 +27,170 @@ const SIZE_SUFFIXES =
 
 export function cleanName(raw: string): string {
   return (raw ?? "").replace(SIZE_SUFFIXES, "").trim();
+}
+
+// ── Strip the store's furniture from a product name ───────────────────────────
+//
+// A page title is written for a search engine, not for a catalogue:
+//
+//     "Куртка бомбер, чёрная — MyStore | Купить с доставкой"
+//
+// Only the first few words are the product. The rest is the shop's name and its
+// sales copy, repeated on every page it owns, and it used to land in the
+// catalogue verbatim because the name came from `og:title` and `cleanName` only
+// ever removed a trailing size.
+
+/**
+ * Separators a store hangs its own name off. Captured, so a split keeps them
+ * and a name loses only the segments that were removed.
+ */
+const TITLE_SPLIT = /(\s+[|—–·•]\s+|\s+-\s+)/;
+
+/**
+ * Sales words that are never part of a garment's name. Matched only as whole
+ * trailing or leading segments, so a "Sale Rail Tote" keeps its name.
+ */
+const BOILERPLATE =
+  /^(?:buy(?:\s+online)?|shop(?:\s+online)?|online(?:\s+(?:store|shop))?|official(?:\s+(?:site|store))?|free\s+shipping|fast\s+delivery|sale|discounts?|price|best\s+price|new\s+arrivals?|купить(?:\s+\S+)*|цена|доставка|интернет-магазин|магазин|заказать|недорого)$/i;
+
+function slug(s: string): string {
+  return (s ?? "").toLowerCase().replace(/[^a-z0-9а-яё]/gi, "");
+}
+
+/**
+ * The words a host could be called by, so "shop.mystore.co.uk" is recognised as
+ * MyStore rather than as "shop".
+ *
+ * Every label is a candidate because the shop's name can sit anywhere in the
+ * host, but the generic ones are dropped: a title segment reading exactly "shop"
+ * or "uk" says nothing about which store this is, and removing it on that basis
+ * would eat real words.
+ */
+const HOST_NOISE = new Set([
+  "www", "shop", "store", "sklep", "magazin", "com", "net", "org", "co", "uk",
+  "ua", "pl", "de", "fr", "it", "es", "cz", "eu", "us", "io", "online", "site",
+]);
+
+function hostWords(host: string): string[] {
+  return (host ?? "")
+    .toLowerCase()
+    .split(".")
+    .map(slug)
+    .filter((w) => w.length >= 3 && !HOST_NOISE.has(w));
+}
+
+export interface TidyNameOptions {
+  /** The store's hostname, so a title ending in the shop's own name loses it. */
+  host?: string;
+  /** The product's brand, so "Aurelio Aurelio Nebula Jacket" says it once. */
+  brand?: string;
+  /**
+   * A trailing string observed on every title across this store. Whatever is
+   * identical on twenty different products is not any one product's name, and
+   * no list of stop-words can be as reliable about a given shop as the shop's
+   * own repetition. Supplied by the caller that can see more than one page.
+   */
+  titleSuffix?: string;
+}
+
+/**
+ * Turn a page title into a product name.
+ *
+ * Deliberately conservative: it only removes a trailing segment it can justify
+ * — one the whole store repeats, one that is the shop's own name or host, or
+ * one that is pure sales copy. A name it cannot explain is left alone, because
+ * a slightly long name is a much smaller problem than a truncated one.
+ */
+export function tidyProductName(raw: string, opts: TidyNameOptions = {}): string {
+  let name = (raw ?? "").replace(/\s+/g, " ").trim();
+  if (!name) return "";
+
+  // 1. The suffix this store puts on everything, removed as plain text before
+  //    any splitting — it may itself contain separators.
+  const suffix = (opts.titleSuffix ?? "").trim();
+  if (suffix && name.length > suffix.length && name.endsWith(suffix)) {
+    name = name.slice(0, -suffix.length).trim();
+  }
+
+  // 2. Trailing segments that name the shop or sell rather than describe.
+  const storeWords = new Set(
+    [...hostWords(opts.host ?? ""), slug(opts.host ?? "")].filter(Boolean),
+  );
+  //    Segments sit at even indices, the separators between them at odd ones.
+  //    What stays is joined with its own separators, never a new one: the colour
+  //    grouping reads a colourway off "Nebula Jacket - Black" by its hyphen, and
+  //    a name rewritten to "Nebula Jacket — Black" would stop matching its camel
+  //    twin.
+  const pieces = name.split(TITLE_SPLIT);
+  while (pieces.length > 1) {
+    const last = pieces[pieces.length - 1].trim();
+    if (BOILERPLATE.test(last) || storeWords.has(slug(last))) {
+      pieces.splice(-2, 2);
+      continue;
+    }
+    break;
+  }
+  // A leading segment can be the shop too ("MyStore | Bomber Jacket").
+  while (pieces.length > 1 && storeWords.has(slug(pieces[0].trim()))) pieces.splice(0, 2);
+
+  name = pieces.join("").trim();
+
+  // 3. The brand said twice at the front.
+  const brand = (opts.brand ?? "").trim();
+  if (brand) {
+    const doubled = new RegExp(`^(${escapeRe(brand)})\\s+\\1\\b`, "i");
+    name = name.replace(doubled, "$1").trim();
+  }
+
+  // Trailing punctuation left behind by a removed segment.
+  name = name.replace(/[\s,;:|—–·•-]+$/, "").trim();
+
+  // Never hand back nothing: if the rules ate the whole title, the original was
+  // a better answer than an empty one.
+  return name || (raw ?? "").trim();
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The longest trailing text shared by every title given.
+ *
+ * This is the reliable half of name cleaning: a stop-word list encodes guesses
+ * about shops in general, while this measures one shop. If twenty products all
+ * end " | MyStore — Купить с доставкой", that string is the shop talking, not
+ * any product's name.
+ *
+ * Needs at least `minTitles` distinct titles before it will claim anything —
+ * two products from the same category can legitimately share a tail, twenty
+ * cannot. Trimmed back to a separator so it never bites into a word, and
+ * ignored unless it starts at one, so a shared word like "Jacket" is not
+ * mistaken for furniture.
+ */
+export function commonTitleSuffix(titles: string[], minTitles = 3): string {
+  const uniq = [...new Set((titles ?? []).map((t) => (t ?? "").replace(/\s+/g, " ").trim()))].filter(
+    Boolean,
+  );
+  if (uniq.length < minTitles) return "";
+
+  let suffix = uniq[0];
+  for (const t of uniq.slice(1)) {
+    let i = 0;
+    while (i < suffix.length && i < t.length && suffix[suffix.length - 1 - i] === t[t.length - 1 - i]) {
+      i++;
+    }
+    suffix = suffix.slice(suffix.length - i);
+    if (!suffix.trim()) return "";
+  }
+
+  // Keep only from the first separator onwards, so the suffix begins where the
+  // store's furniture begins rather than mid-word.
+  const at = suffix.search(/\s+[|—–·•]\s+|\s+-\s+/);
+  if (at === -1) return "";
+  const trimmed = suffix.slice(at);
+  // A bare separator is not worth subtracting.
+  return trimmed.replace(/[\s|—–·•-]/g, "") ? trimmed : "";
 }
 
 // ── Strip trailing color suffix from a size-cleaned name ──────────────────────
@@ -133,6 +308,79 @@ export function extractCurrencyFromDisplay(raw: string): string {
   const suffixMatch = raw.match(/[\d.,]\s*([A-Z]{3})$/);
   if (suffixMatch) return suffixMatch[1];
   return "";
+}
+
+// ── The currency a store charges in, when no price says it ───────────────────
+// Last resort, and a better one than the one it replaces. A page whose markup
+// carries a bare "4000" and whose rendered price the extension could not read
+// used to be taken as dollars — the "₴4 000 coat at $4 000" again, by the back
+// door. The store's address and language are not a statement about one price,
+// but they are a statement about the shop: a Ukrainian store sells in hryvnia
+// by law, and a `.co.uk` checkout is in pounds. Anything the page itself says
+// still wins over this; it only answers where the page said nothing at all.
+
+/** Country (ccTLD or locale region) → the currency its shops charge in. */
+const COUNTRY_CURRENCY: Record<string, string> = {
+  ua: "UAH", pl: "PLN", cz: "CZK", uk: "GBP", gb: "GBP", ru: "RUB", tr: "TRY",
+  se: "SEK", no: "NOK", dk: "DKK", ch: "CHF", hu: "HUF", ro: "RON", il: "ILS",
+  jp: "JPY", kr: "KRW", cn: "CNY", hk: "HKD", tw: "TWD", sg: "SGD", th: "THB",
+  in: "INR", ae: "AED", za: "ZAR", br: "BRL", mx: "MXN", ca: "CAD", au: "AUD",
+  nz: "NZD", us: "USD",
+  // Euro area.
+  de: "EUR", fr: "EUR", it: "EUR", es: "EUR", nl: "EUR", be: "EUR", at: "EUR",
+  ie: "EUR", pt: "EUR", fi: "EUR", gr: "EUR", sk: "EUR", si: "EUR", ee: "EUR",
+  lv: "EUR", lt: "EUR", lu: "EUR", mt: "EUR", cy: "EUR", hr: "EUR", eu: "EUR",
+};
+
+/**
+ * Languages spoken as the main language of one currency's country only.
+ *
+ * "uk" is Ukrainian here, never the United Kingdom — a `lang` attribute holds a
+ * language. German, French, Russian, English and the rest are left out: each is
+ * the shop language of several currencies, so it says nothing without a region.
+ */
+const LANGUAGE_CURRENCY: Record<string, string> = {
+  uk: "UAH", pl: "PLN", cs: "CZK", hu: "HUF", sv: "SEK", da: "DKK", nb: "NOK",
+  nn: "NOK", no: "NOK", ja: "JPY", ko: "KRW", he: "ILS", tr: "TRY", th: "THB",
+};
+
+export interface InferredCurrency {
+  code: string;
+  /** What gave it away, for the admin: "the .ua address", "the page language (uk-UA)". */
+  basis: string;
+}
+
+/**
+ * The currency a store most likely charges in, from its address and the
+ * language its page declares — or null when neither says.
+ *
+ * The address comes first. A country-code domain is the business's own choice,
+ * while a page's `lang` is often a theme default ("en-US" on a Kyiv store).
+ * Generic domains (.com, .shop) say nothing and fall through to the language.
+ */
+export function currencyFromLocale(url: string, lang?: string): InferredCurrency | null {
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    /* no address, only the language can answer */
+  }
+  const tld = host.split(".").pop() ?? "";
+  if (tld && COUNTRY_CURRENCY[tld]) {
+    return { code: COUNTRY_CURRENCY[tld], basis: `the .${tld} address` };
+  }
+
+  // `uk-UA`, `ru_UA`, `en-GB`: the region is the country, whatever the language.
+  const tag = (lang ?? "").trim().toLowerCase().replace(/_/g, "-");
+  if (!tag) return null;
+  const [language, region] = tag.split("-");
+  if (region && region.length === 2 && COUNTRY_CURRENCY[region] && region !== "eu") {
+    return { code: COUNTRY_CURRENCY[region], basis: `the page language (${lang!.trim()})` };
+  }
+  if (!region && LANGUAGE_CURRENCY[language]) {
+    return { code: LANGUAGE_CURRENCY[language], basis: `the page language (${lang!.trim()})` };
+  }
+  return null;
 }
 
 // ── Product codes ─────────────────────────────────────────────────────────────
@@ -265,8 +513,10 @@ export function compositionFromText(text: string): string {
   for (const match of source.matchAll(atom)) {
     const fibre = match[2].trim();
     // "20% off" is not a fibre, and a sale banner sits closer to the price than
-    // the composition does.
-    if (NOT_A_FIBRE.test(fibre)) continue;
+    // the composition does. Nor is "20% Unit price" — a Shopify price block
+    // reads "-20%" then its unit-price label, and it was stored as the
+    // material. So the words after a percentage must name a material.
+    if (NOT_A_FIBRE.test(fibre) || !FIBRE.test(fibre)) continue;
 
     const share = Number(match[1]);
     parts.push(`${share}% ${fibre}`);
@@ -278,6 +528,16 @@ export function compositionFromText(text: string): string {
   }
   return parts.join(", ").slice(0, 200);
 }
+
+/**
+ * Words that name what a thing is made of, as stems: fibres, leathers, foams,
+ * metals. Checked as a stem at the start of a word so "cotton", "cottons",
+ * "polyester", "polyesters" and "шерстяной" all pass. Qualifiers are not
+ * materials: "50% recycled materials" is a claim, "50% recycled polyester" a
+ * composition, and only the second names one.
+ */
+const FIBRE =
+  /(?:^|[\s-])(?:cotton|pima|supima|polyester|poly|polyamide|nylon|elasta|spandex|lycra|viscose|rayon|modal|lyocell|tencel|cupro|acetate|triacetate|acrylic|wool|merino|lambswool|cashmere|mohair|alpaca|angora|camel|yak|vicu|silk|linen|flax|hemp|ramie|jute|bamboo|leather|suede|nubuck|shearling|sheepskin|down\b|feather|rubber|eva\b|polyurethane|pu\b|pvc|neoprene|cordura|gore|metal|brass|steel|silver|gold|zinc|copper|textile|synthetic|fibre|fiber|denim|canvas|mesh|fleece|terry|velvet|corduroy|tweed|jersey|хлоп|бавовн|полиэст|поліест|полиамид|поліамід|нейлон|эласт|еласт|спандекс|вискоз|віскоз|модал|акрил|шерст|вовн|кашемир|кашемір|мохер|альпак|шелк|шёлк|шовк|л[её]н|льон|конопл|кож|шкір|замш|резин|гум|текстил|текстиль|синтет|пух|металл|метал)/iu;
 
 /** Words that follow a percentage without being a fibre. */
 const NOT_A_FIBRE =
@@ -450,14 +710,34 @@ const CATEGORY_RULES_RU: ReadonlyArray<readonly [RegExp, Category]> = [
   [/ремень|ремни|галстук|шарф|платок|платк|шапк|кепк|берет|перчатк|варежк|носк|носок|очки|часы|кошел|бабочк|запонк|подтяжк|ободок/, "accessories"],
 ];
 
-/** First matching category for a free-text string, or null if none matched. */
-export function matchCategory(text: string): Category | null {
+/**
+ * The category the rule table above assigns, on its own — kept separately so
+ * the garment dictionary's answers can be compared against it.
+ */
+export function matchCategoryByRules(text: string): Category | null {
   const t = (text ?? "").toLowerCase();
   if (!t) return null;
   for (const [re, cat] of CATEGORY_RULES) if (re.test(t)) return cat;
   // Fall back to Russian keywords only when the English table matched nothing.
   for (const [re, cat] of CATEGORY_RULES_RU) if (re.test(t)) return cat;
   return null;
+}
+
+/**
+ * First matching category for a free-text string, or null if none matched.
+ *
+ * The garment dictionary answers first. It knows far more names than the rule
+ * table ("Harrington", "Sukajan", "косуха", "берцы"), and it reads a title the
+ * way the title is built — by its head noun — so "Pullover Hoodie", "Knit
+ * Dress" and "Suit Jacket" come out as a hoodie, a dress and tailoring, where
+ * the first-match rules stopped at "pullover", "knit" and "jacket".
+ *
+ * It answers only from strong evidence. A title whose only garment word is a
+ * fabric ("denim", "knit") falls through to the rules, which have handled those
+ * cases for a long time and whose traps ("boot cut", "shoe bag") stay in force.
+ */
+export function matchCategory(text: string): Category | null {
+  return garmentCategory(text ?? "") ?? matchCategoryByRules(text);
 }
 
 // ── Retail category path → { category, gender } ───────────────────────────────
@@ -511,8 +791,9 @@ export function colorToHex(colorName: string): string {
   if (exact) return exact;
   // "Core Black", "Cloud White", "Deep Navy Blue": a colourway is a base colour
   // with marketing in front of it. Reading the base out is what stops every
-  // such product from landing on the grey placeholder swatch.
-  const base = canonicalColor(key);
+  // such product from landing on the grey placeholder swatch. The argument is
+  // always a colour label, so the field vocabulary applies.
+  const base = canonicalColor(key, "field");
   return base ? BASE_COLOR_HEX[base] : "#888888";
 }
 
@@ -548,119 +829,89 @@ const BASE_COLOR_HEX: Record<BaseColor, string> = {
 export const MULTICOLOR_GROUP = "Multicolor";
 
 /**
- * Single words that name a colour. Deliberately a closed list: a word that is
- * not here contributes nothing, which is what keeps "Air Force" or "Heritage"
- * from being read as a colourway.
+ * Where a colour word is being read from.
+ *
+ *   "text"   a product name, a URL slug, page markup — anything that is not
+ *            known to be a colour. Only words that mean a colour everywhere
+ *            count, so "Stone Island" and "Linen Shirt" name no colour.
+ *   "field"  the store's colour field or a swatch label: the text IS a colour,
+ *            so "Stone", "Linen" and "Sky" read as colours too.
+ *
+ * The vocabulary itself is in `lib/taxonomy/colours`.
  */
-const COLOR_WORDS: Record<string, BaseColor> = {
-  // black
-  black: "black", noir: "black", nero: "black", negro: "black", schwarz: "black",
-  onyx: "black", ebony: "black", jet: "black", coal: "black", licorice: "black",
-  caviar: "black", anthracite: "black",
-  // white
-  white: "white", blanc: "white", bianco: "white", blanco: "white", weiss: "white",
-  ivory: "white", snow: "white", chalk: "white", optic: "white",
-  // grey
-  grey: "grey", gray: "grey", gris: "grey", grigio: "grey", charcoal: "grey",
-  graphite: "grey", slate: "grey", silver: "grey", ash: "grey", pewter: "grey",
-  steel: "grey", smoke: "grey", chrome: "grey", platinum: "grey", gunmetal: "grey",
-  // beige / neutrals
-  beige: "beige", cream: "beige", ecru: "beige", sand: "beige", stone: "beige",
-  oat: "beige", oatmeal: "beige", nude: "beige", taupe: "beige", khaki: "beige",
-  camel: "beige", champagne: "beige", bone: "beige", linen: "beige",
-  natural: "beige", sable: "beige",
-  // brown
-  brown: "brown", chocolate: "brown", coffee: "brown", mocha: "brown",
-  espresso: "brown", cognac: "brown", chestnut: "brown", walnut: "brown",
-  hazel: "brown", marron: "brown", marrone: "brown", bronze: "brown",
-  toffee: "brown", caramel: "brown", tan: "brown", rust: "brown", cocoa: "brown",
-  // blue
-  blue: "blue", bleu: "blue", blu: "blue", azul: "blue", navy: "blue",
-  denim: "blue", indigo: "blue", cobalt: "blue", azure: "blue", sky: "blue",
-  teal: "blue", aqua: "blue", turquoise: "blue", petrol: "blue", marine: "blue",
-  // green
-  green: "green", vert: "green", verde: "green", olive: "green", sage: "green",
-  forest: "green", mint: "green", emerald: "green", moss: "green",
-  pistachio: "green", lime: "green",
-  // red
-  red: "red", rouge: "red", rosso: "red", rojo: "red", crimson: "red",
-  scarlet: "red", burgundy: "red", wine: "red", bordeaux: "red", maroon: "red",
-  cherry: "red", ruby: "red",
-  // pink
-  pink: "pink", rose: "pink", blush: "pink", fuchsia: "pink", fuschia: "pink",
-  magenta: "pink", salmon: "pink", coral: "pink",
-  // yellow
-  yellow: "yellow", jaune: "yellow", giallo: "yellow", mustard: "yellow",
-  lemon: "yellow", gold: "yellow", golden: "yellow", ochre: "yellow",
-  amber: "yellow", butter: "yellow",
-  // orange
-  orange: "orange", apricot: "orange", peach: "orange", tangerine: "orange",
-  papaya: "orange", terracotta: "orange", copper: "orange",
-  // violet
-  violet: "violet", purple: "violet", lilac: "violet", lavender: "violet",
-  plum: "violet", mauve: "violet", aubergine: "violet",
-};
+export type ColourSource = "text" | "field";
 
-/**
- * Russian and Ukrainian colour words, matched by stem because they decline
- * ("чёрный", "чёрная", "чёрное"). Feeds are bilingual here.
- */
-const COLOR_STEMS: [RegExp, BaseColor][] = [
-  [/^(?:ч[её]рн|чорн)/, "black"],
-  [/^бел|^біл/, "white"],
-  [/^сер|^сір/, "grey"],
-  [/^беж/, "beige"],
-  [/^коричн|^шокол/, "brown"],
-  [/^син|^голуб|^блакит/, "blue"],
-  [/^зел[её]н/, "green"],
-  [/^красн|^червон|^бордов/, "red"],
-  [/^розов|^рожев/, "pink"],
-  [/^ж[её]лт|^жовт/, "yellow"],
-  [/^оранж|^помаранч/, "orange"],
-  [/^фиолет|^фіолет|^сирен|^бузков/, "violet"],
-];
+/** 0 = safe word or phrase, 1 = field-only word, 2 = qualifier ("Marl"). Lower wins. */
+interface ColourHit { base: BaseColor; at: number; rank: 0 | 1 | 2 }
 
-/**
- * Colourways whose meaning is destroyed by reading their words separately:
- * "rose gold" is not rose and gold, and "off white" is not the absence of white.
- */
-const COLOR_PHRASES: [RegExp, BaseColor][] = [
-  [/\broses?[\s-]?gold\b/, "pink"],
-  [/\bgold(?:en)?[\s-]?ros[eé]\b/, "pink"],
-  [/\boff[\s-]?white\b/, "white"],
-  [/\braw[\s-]?white\b/, "white"],
-  [/\boptic[\s-]?white\b/, "white"],
-  [/\bnavy[\s-]?blue\b/, "blue"],
-];
+function colourHits(text: string, source: ColourSource): ColourHit[] {
+  let rest = (text ?? "").toLowerCase();
+  if (!rest) return [];
+  const field = source === "field";
+
+  const hits: ColourHit[] = [];
+  // Phrases first, blanked out in place so the words inside them are not read
+  // again and every later hit keeps its position.
+  for (const [re, base] of COLOUR_PHRASES) {
+    const global = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+    rest = rest.replace(global, (m, ...args) => {
+      hits.push({ base, at: args[args.length - 2] as number, rank: 0 });
+      return " ".repeat(m.length);
+    });
+  }
+
+  for (const m of rest.matchAll(/\p{L}+/gu)) {
+    const word = m[0];
+    if (word.length < 3) continue;
+    const at = m.index ?? 0;
+    const safe = SAFE_COLOUR_WORDS[word] ?? COLOUR_STEMS.find(([re]) => re.test(word))?.[1];
+    if (safe) { hits.push({ base: safe, at, rank: 0 }); continue; }
+    if (!field) continue;
+    const fieldOnly = FIELD_COLOUR_WORDS[word] ?? FIELD_COLOUR_STEMS.find(([re]) => re.test(word))?.[1];
+    if (fieldOnly) { hits.push({ base: fieldOnly, at, rank: 1 }); continue; }
+    const qualifier = QUALIFIER_COLOUR_WORDS[word] ?? QUALIFIER_COLOUR_STEMS.find(([re]) => re.test(word))?.[1];
+    if (qualifier) hits.push({ base: qualifier, at, rank: 2 });
+  }
+  return hits.sort((a, b) => a.at - b.at);
+}
 
 /**
  * Every base colour named in a piece of text, in the order it reads.
  * Non-colour words are ignored, so "Men's Cruiser — Shadow Blue" yields ["blue"].
  */
-export function colorWordsIn(text: string): BaseColor[] {
-  const t = (text ?? "").toLowerCase();
-  if (!t) return [];
+export function colorWordsIn(text: string, source: ColourSource = "text"): BaseColor[] {
+  return colourHits(text, source).map((h) => h.base);
+}
 
-  const found: BaseColor[] = [];
-  let rest = t;
-  for (const [re, base] of COLOR_PHRASES) {
-    if (re.test(rest)) {
-      found.push(base);
-      rest = rest.replace(new RegExp(re.source, "g"), " ");
-    }
-  }
-
-  for (const word of rest.split(/[^a-zа-яёіїєґ]+/i)) {
-    if (word.length < 3) continue;
-    const direct = COLOR_WORDS[word];
-    if (direct) {
-      found.push(direct);
-      continue;
-    }
-    const stem = COLOR_STEMS.find(([re]) => re.test(word));
-    if (stem) found.push(stem[1]);
-  }
-  return found;
+/**
+ * Could this string be the name of a colour, as a shop writes one — rather than
+ * a file, an address or a code that happened to sit where the colour should?
+ *
+ * The collect extension reads the selected swatch, and a swatch is often a tiny
+ * product photo whose `alt` or `title` is its file name. So "A35893_1.jpg" and
+ * "A35224-BabymetalStorm-1.jpg" were stored as colours, shown to shoppers, and
+ * left the colour filter empty because no colour word is in them. A colour name
+ * is words; these shapes never are:
+ *
+ *   - a file name (an image extension),
+ *   - an address (a scheme, `//`, a leading slash),
+ *   - anything with an underscore — how files and codes are joined, never names,
+ *   - one token mixing letters with two or more digits ("A35893", "BLK001"),
+ *   - no letters at all ("0012"), or a hex value ("#1a1a1a").
+ *
+ * "Black/White", "010 Black" and "Core Black" all pass.
+ */
+export function looksLikeColourLabel(raw: string | undefined | null): boolean {
+  const v = (raw ?? "").trim();
+  if (v.length < 2 || v.length > 40) return false;
+  if (/\.(?:jpe?g|png|webp|gif|avif|svg|bmp|tiff?|heic)(?:[?#].*)?$/i.test(v)) return false;
+  if (/:\/\/|^\/|^www\./i.test(v)) return false;
+  if (v.includes("_")) return false;
+  if (!/\p{L}/u.test(v)) return false;
+  if (v.startsWith("#")) return false;
+  if (!/\s/.test(v) && /\d.*\d/.test(v)) return false;
+  if (/^(?:select|choose|pick)\b/i.test(v)) return false;
+  return true;
 }
 
 /**
@@ -668,11 +919,15 @@ export function colorWordsIn(text: string): BaseColor[] {
  *
  * The LAST colour word wins, because a colourway puts its qualifier in front of
  * the colour: "Natural Black" is a black shoe, "Cloud White" a white one. Taking
- * the first would file both under the qualifier.
+ * the first would file both under the qualifier. A word that means a colour
+ * everywhere outranks one that only does in a colour field, so "Black Linen" is
+ * black however the words are ordered, and "Navy Marl" is navy.
  */
-export function canonicalColor(label: string): BaseColor | undefined {
-  const words = colorWordsIn(label);
-  return words.length ? words[words.length - 1] : undefined;
+export function canonicalColor(label: string, source: ColourSource = "text"): BaseColor | undefined {
+  const hits = colourHits(label, source);
+  if (!hits.length) return undefined;
+  const best = Math.min(...hits.map((h) => h.rank));
+  return hits.filter((h) => h.rank === best).pop()?.base;
 }
 
 /**
@@ -683,19 +938,24 @@ export function canonicalColor(label: string): BaseColor | undefined {
  *
  * Splitting on separators is what distinguishes a two-colour piece from a
  * two-word colourway: "Natural Black" is one colour, "Natural/Black" is two.
+ *
+ * Read from a colour field, "Multi", "Camo" and "Tie-Dye" say Multicolor on
+ * their own; from a name they say nothing ("Camo Cargo" is a print, and the
+ * variant being imported may be the plain one).
  */
-export function colorGroupNamesFor(labels: string | string[]): string[] {
+export function colorGroupNamesFor(labels: string | string[], source: ColourSource = "text"): string[] {
   const list = (Array.isArray(labels) ? labels : [labels]).filter(Boolean);
   const bases: BaseColor[] = [];
+  let multi = false;
   for (const label of list) {
+    if (source === "field" && MULTICOLOUR_WORDS.test(String(label))) multi = true;
     for (const part of String(label).split(/[/,&+·|]|\band\b|\sи\s/i)) {
-      const base = canonicalColor(part);
+      const base = canonicalColor(part, source);
       if (base && !bases.includes(base)) bases.push(base);
     }
   }
-  if (!bases.length) return [];
   const names = bases.map((b) => BASE_COLOR_GROUP[b]);
-  return bases.length > 1 ? [...names, MULTICOLOR_GROUP] : names;
+  return bases.length > 1 || multi ? [...names, MULTICOLOR_GROUP] : names;
 }
 
 // ── Resolve the *store* name a product is sold at from its source URL ─────────
@@ -730,10 +990,20 @@ const AFFILIATE_TRACKERS = new Set([
   "jdoqocy", "kqzyfj", "tkqlhce",
 ]);
 
+/**
+ * Second-level labels a country registry sells under: "shop.com.ua",
+ * "brand.co.uk", "store.kiev.ua". The shop's name is the label before them —
+ * reading these as the name called every Ukrainian `.com.ua` store "Com", and
+ * two such stores on one product then overwrote each other in "Where to buy".
+ */
+const REGISTRY_LABELS = new Set(["com", "co", "org", "net", "gov", "edu", "ac", "biz", "in", "kiev", "kyiv"]);
+
 export function storeNameFromUrl(url: string, fallback = ""): string {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "");
-    const root = (host.split(".").slice(-2, -1)[0] ?? host).toLowerCase();
+    const labels = host.split(".");
+    let root = (labels.slice(-2, -1)[0] ?? host).toLowerCase();
+    if (REGISTRY_LABELS.has(root) && labels.length >= 3) root = labels[labels.length - 3].toLowerCase();
     if (!root || AFFILIATE_TRACKERS.has(root)) return fallback || "Store";
     if (KNOWN_STORES[root]) return KNOWN_STORES[root];
     return root.charAt(0).toUpperCase() + root.slice(1);

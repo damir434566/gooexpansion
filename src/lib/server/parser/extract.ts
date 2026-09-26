@@ -11,6 +11,7 @@
  */
 import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
 import { harvestGalleryImages } from "./gallery";
+import { chooseColour } from "./colour-choice";
 import {
   canonicalColor,
   extractCurrencyFromDisplay,
@@ -800,6 +801,54 @@ function fromMeta(html: string): Partial<RawExtract> {
   };
 }
 
+/**
+ * The page's own heading and title.
+ *
+ * Neither was read before, which is why product names arrived as
+ * "Куртка бомбер, чёрная — MyStore | Купить с доставкой": the name came from
+ * `og:title`, and an `og:title` is written for a search result, not a
+ * catalogue. An `<h1>` is what the shop prints at the top of the page for a
+ * shopper, so it is nearly always the product and nothing else.
+ *
+ * `<title>` is kept as well, but only as a last resort and as the raw material
+ * for working out what this store appends to every page.
+ */
+function fromHeading(html: string): { h1?: string; title?: string } {
+  const strip = (frag: string) =>
+    decodeEntities(frag.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+
+  let h1: string | undefined;
+  // First non-empty h1: a header logo is sometimes marked up as one, and those
+  // are usually image-only, so they strip to nothing and are skipped.
+  const headings = html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi);
+  for (const m of headings) {
+    const text = strip(m[1] ?? "");
+    if (text && text.length <= 200) {
+      h1 = text;
+      break;
+    }
+  }
+
+  const tm = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  const title = tm ? strip(tm[1] ?? "") : undefined;
+
+  return { h1, title: title || undefined };
+}
+
+/**
+ * The language the page declares for itself: `<html lang>`, then `og:locale`,
+ * then a `Content-Language` meta. Used only to guess the currency of a price
+ * that no source on the page names (see `currencyFromLocale`).
+ */
+function pageLanguage(html: string): string | undefined {
+  const htmlTag = html.match(/<html\b[^>]*?\blang\s*=\s*["']?([A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})?)/i);
+  if (htmlTag) return htmlTag[1];
+  const meta = parseMetaTags(html);
+  const value = meta.get("og:locale") || meta.get("content-language");
+  const tag = value?.trim().match(/^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})?/);
+  return tag ? tag[0] : undefined;
+}
+
 function fromMicrodata(html: string): Partial<RawExtract> {
   const prop = (name: string): string | undefined => {
     // <span itemprop="price" content="49.99"> or text content
@@ -898,6 +947,8 @@ export function extractProduct(
   if (meta.name || meta.price || (meta.images?.length ?? 0) > 0) strategies.push("opengraph");
   const micro = fromMicrodata(html);
   if (micro.name || micro.price) strategies.push("microdata");
+  const heading = fromHeading(html);
+  if (heading.h1) strategies.push("h1");
 
   // Recipe regex overrides (highest precedence)
   const ruleVal = (field: ParserRuleField): string | undefined =>
@@ -936,6 +987,15 @@ export function extractProduct(
   );
 
   const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
+  const name = pick(ruleVal("name"), jsonld.name, heading.h1, meta.name, micro.name, heading.title);
+  const brand = pick(
+    ruleVal("brand"),
+    jsonld.brand,
+    meta.brand,
+    micro.brand,
+    specValue(evidence?.specs, BRAND_KEYS),
+    evidence?.brandText,
+  );
 
   // Structured data routinely advertises a single photo for a page that shows
   // a full gallery (an OpenGraph-only page always does — there is one og:image).
@@ -945,7 +1005,7 @@ export function extractProduct(
   let galleryImages: string[] = [];
   if (baseUrl) {
     const anchor = image ? [image, ...images] : images;
-    const productName = pick(ruleVal("name"), jsonld.name, meta.name, micro.name) ?? "";
+    const productName = pick(ruleVal("name"), jsonld.name, heading.h1, meta.name, micro.name, heading.title) ?? "";
     galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName, evidence?.images ?? []);
     if (galleryImages.length) strategies.push("gallery");
   }
@@ -956,18 +1016,12 @@ export function extractProduct(
   }
 
   return {
-    name: pick(ruleVal("name"), jsonld.name, meta.name, micro.name),
+    pageTitle: heading.title,
+    name,
     // Brand: structured data first, then the two places a store that treats its
     // designer as a link rather than a property puts it — the spec table, and
     // whatever the page marks as the brand.
-    brand: pick(
-      ruleVal("brand"),
-      jsonld.brand,
-      meta.brand,
-      micro.brand,
-      specValue(evidence?.specs, BRAND_KEYS),
-      evidence?.brandText,
-    ),
+    brand,
     // The trail, from the markup and from the rendered page. The markup's own
     // BreadcrumbList wins: it is data rather than a reading of the layout.
     breadcrumbs: (() => {
@@ -989,6 +1043,9 @@ export function extractProduct(
       micro.currency,
       evidence?.priceText ? extractCurrencyFromDisplay(evidence.priceText) : undefined,
     ),
+    // Not a currency — the page's language, for `normalize` to fall back on
+    // when neither the markup nor the rendered price named one.
+    lang: pageLanguage(html),
     image,
     images: [
       ...(image && !images.includes(image) ? [image, ...images] : images),
@@ -1002,15 +1059,28 @@ export function extractProduct(
     // the spec row come before the markup scan because they are what the shopper
     // is looking at: `colorFromHtml` mines attributes and inline JSON, which on
     // a page with several colourways can name any of them.
-    color: pick(
-      ruleVal("color"),
-      jsonld.color,
-      meta.color,
-      micro.color,
-      evidence?.colorText,
-      specValue(evidence?.specs, COLOR_KEYS),
-      colorFromHtml(html),
-    ),
+    //
+    // Every candidate is kept with where it came from, and `chooseColour` picks
+    // the one that is a colour. The first string that merely looked like a
+    // name used to win: a swatch thumbnail's alt text is its file name on one
+    // store and the product's name on the next ("Emerson"), and both were
+    // stored as colours ahead of the "grey/white/leather" the page printed.
+    // An extension from before 1.0.3 sends one guess with no origin; it is
+    // used only when the new list is absent.
+    color: chooseColour(
+      [
+        { value: ruleVal("color") ?? "", origin: "rule" },
+        { value: jsonld.color ?? "", origin: "data" },
+        { value: meta.color ?? "", origin: "data" },
+        { value: micro.color ?? "", origin: "data" },
+        ...(evidence?.colorCandidates?.length
+          ? evidence.colorCandidates
+          : [{ value: evidence?.colorText ?? "", origin: "legacy" as const }]),
+        { value: specValue(evidence?.specs, COLOR_KEYS) ?? "", origin: "line" },
+        { value: colorFromHtml(html) ?? "", origin: "markup" },
+      ],
+      { name, brand },
+    )?.value,
     // Material, which until now came from JSON-LD `material` and nowhere else —
     // a field few stores fill, while the page prints "80% wool, 20% polyamide"
     // two lines under the price. Now: the spec table the extension read, then

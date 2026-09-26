@@ -39,9 +39,10 @@ const {
   normalizeCode,
 } = require(path.join(COMPILED, "lib", "server", "product-fields.js"));
 const { isSameItem, withRetailer, mergePatch } = require(path.join(PARSER, "same-item.js"));
-const { inferStyleKeywords } = require(path.join(COMPILED, "lib", "style-keywords.js"));
+const { inferStyleKeywords } = require(path.join(COMPILED, "lib", "taxonomy", "styles.js"));
 const { matchSubcategoryLabel } = require(path.join(COMPILED, "lib", "categories.js"));
-const { isColorSiblingByName, chooseGroup, variantBaseName } = require(
+const { pieceName } = require(path.join(PARSER, "piece-name.js"));
+const { isColorSiblingByName, chooseGroup } = require(
   path.join(PARSER, "variant-group.js"),
 );
 
@@ -308,7 +309,13 @@ console.log("— deciding that two rows are one piece in two colours —");
 const ours = { brand: "Fixture Atelier", name: "Wool Blend Coat - Charcoal", colors: ["Charcoal"] };
 const row = (id, name, colors, extra = {}) => ({ id, name, colors, ...extra });
 
-check("base name drops the colour suffix", variantBaseName("Wool Blend Coat - Charcoal"), "wool blend coat");
+// The base name moved from variant-group's variantBaseName to piece-name's
+// pieceName, which also drops the brand and understands Cyrillic around a model.
+ok(
+  "base name drops the colour suffix",
+  !/charcoal/i.test(JSON.stringify(pieceName("Wool Blend Coat - Charcoal", "Fixture Atelier", ["Charcoal"]))),
+  JSON.stringify(pieceName("Wool Blend Coat - Charcoal", "Fixture Atelier", ["Charcoal"])),
+);
 ok(
   "same base name, different colour → variants",
   isColorSiblingByName(ours, row("b", "Wool Blend Coat - Sand", ["Sand"])),

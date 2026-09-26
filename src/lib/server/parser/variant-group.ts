@@ -19,58 +19,38 @@
  *   cost of a wrong answer is not a missing swatch — it is two different coats
  *   shown to a shopper as one coat in two colours.
  *
- * So the name test below insists on an exact base-name match rather than a
- * prefix one. "Wool Coat" and "Wool Coat Long" share a prefix and are two
- * products; a database query can only ask for the prefix, so this function
- * throws back what the query over-fetched.
+ * So the name test below insists on the same piece by `samePiece` — the name
+ * with brand, colour and filler removed, matched exactly, never by prefix.
+ * "Wool Coat" and "Wool Coat Long" share a prefix and are two products.
  *
  * It also insists the colours differ. Two rows of the same piece in the same
  * colour are not variants of each other — they are the same thing twice, which
- * is a different problem with a different fix (the retailer list).
+ * is a different problem with a different fix (the retailer list, see
+ * `same-item.ts`).
  */
-import { cleanName, getBaseProductName } from "@/lib/server/product-fields";
+import { colourRelation, samePiece } from "./piece-name";
 
 export interface VariantCandidate {
   id: string;
   name: string;
   colors: string[];
+  category?: string | null;
   variantGroupId?: string | null;
   isGroupPrimary?: boolean | null;
 }
 
-/** The name a variant group is keyed on: no size suffix, no colour suffix. */
-export function variantBaseName(name: string): string {
-  return getBaseProductName(cleanName(name ?? "")).trim().toLowerCase();
-}
-
-/**
- * Shortest base name worth matching on.
- *
- * Below this a name is a word, not an identity: "Tee" or "Bag" would group a
- * brand's whole catalogue into one card.
- */
-export const MIN_BASE_NAME = 8;
-
 /** True when `candidate` is our piece in a different colour, by name alone. */
 export function isColorSiblingByName(
-  ours: { brand: string; name: string; colors: string[] },
+  ours: { brand: string; name: string; colors: string[]; category?: string | null },
   candidate: VariantCandidate,
 ): boolean {
-  const brand = (ours.brand ?? "").trim();
-  if (!brand) return false;
+  if (!samePiece(ours.brand, ours, candidate)) return false;
 
-  const base = variantBaseName(ours.name);
-  if (base.length < MIN_BASE_NAME) return false;
-  if (variantBaseName(candidate.name) !== base) return false;
-
-  const ourColor = (ours.colors[0] ?? "").trim().toLowerCase();
-  const theirColor = (candidate.colors[0] ?? "").trim().toLowerCase();
   // An unknown colour on either side is not evidence of sameness, but it is not
   // evidence against it either: the piece is still the same piece, and a group
-  // whose colours are half-known is better than no group at all.
-  if (ourColor && theirColor && ourColor === theirColor) return false;
-
-  return true;
+  // whose colours are half-known is better than no group at all. Two words for
+  // one base colour ("Navy", "Sky Blue") are two colourways from one store.
+  return colourRelation(ours.colors, candidate.colors) !== "same";
 }
 
 /**

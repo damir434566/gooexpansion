@@ -30,8 +30,11 @@ import { requireAdmin } from "@/lib/server/admin-auth";
 import { logAdminAction } from "@/lib/server/audit";
 import { clerkClient } from "@clerk/nextjs/server";
 import { parsePage } from "@/lib/server/parser/parse-page";
+import { loadCategoryTree } from "@/lib/server/category-tree";
 import { importParsedProduct } from "@/lib/server/parser/import-product";
+import { COLOUR_ORIGINS, type ColourOrigin } from "@/lib/server/parser/colour-choice";
 import { planCollection, type FetchedSitemap } from "@/lib/server/parser/plan-collection";
+import { commonTitleSuffix } from "@/lib/server/product-fields";
 import {
   getFetchSettings,
   getFetchApiKey,
@@ -93,6 +96,8 @@ const MAX_SIZE_LABEL = 24;
 
 /** Longest colour name accepted, e.g. "Charcoal marl". */
 const MAX_COLOR_TEXT = 80;
+/** Colour candidates one page can send, and the origins the server knows. */
+const MAX_COLOR_CANDIDATES = 30;
 
 /**
  * Sibling colourway addresses one page may name.
@@ -116,6 +121,13 @@ const MAX_BRAND_TEXT = 80;
 const MAX_SPECS = 40;
 const MAX_SPEC_KEY = 40;
 const MAX_SPEC_VALUE = 200;
+
+/**
+ * Page titles kept for working out a store's repeated furniture. A dozen is
+ * plenty — the suffix stops changing after a handful — and keeps the payload
+ * to about a kilobyte.
+ */
+const MAX_TITLES = 12;
 
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
@@ -201,6 +213,17 @@ export async function POST(req: Request) {
     .filter((v: unknown): v is string => typeof v === "string" && v.length <= MAX_SIZE_LABEL)
     .slice(0, MAX_SIZE_CANDIDATES);
   const colorText = str(body?.colorText).slice(0, MAX_COLOR_TEXT);
+  // Extension 1.0.3 sends every string it read as a colour, with where it read
+  // it; the choice is made here. An origin the server does not know is not
+  // trusted as one it does.
+  const colorCandidates = (Array.isArray(body?.colorCandidates) ? body.colorCandidates : [])
+    .map((c: unknown) => ({
+      value: str((c as { value?: unknown })?.value).slice(0, MAX_COLOR_TEXT),
+      origin: str((c as { origin?: unknown })?.origin),
+    }))
+    .filter((c: { value: string; origin: string }) =>
+      !!c.value && (COLOUR_ORIGINS as readonly string[]).includes(c.origin))
+    .slice(0, MAX_COLOR_CANDIDATES) as { value: string; origin: ColourOrigin }[];
   const variantUrls = (Array.isArray(body?.variantUrls) ? body.variantUrls : [])
     .filter(
       (u: unknown): u is string =>
@@ -221,11 +244,21 @@ export async function POST(req: Request) {
     .slice(0, MAX_BREADCRUMBS);
   const brandText = str(body?.brandText).slice(0, MAX_BRAND_TEXT);
 
-  const [fetchSettings, keyInfo, siteConfigs, aiSettings] = await Promise.all([
+  // Page titles the receiver has seen from this store so far. The suffix is
+  // worked out here rather than in the browser so the rule that decides what a
+  // product is called stays on the server, next to every other such rule.
+  const titles = (Array.isArray(body?.titles) ? body.titles : [])
+    .filter((t: unknown): t is string => typeof t === "string")
+    .map((t: string) => t.slice(0, 200))
+    .slice(0, MAX_TITLES);
+  const titleSuffix = commonTitleSuffix(titles);
+
+  const [fetchSettings, keyInfo, siteConfigs, aiSettings, categoryTree] = await Promise.all([
     getFetchSettings(),
     getFetchApiKey(),
     getSiteConfigs(),
     getAiSettings(),
+    loadCategoryTree(),
   ]);
 
   const useAi = typeof body?.useAi === "boolean" ? body.useAi : aiSettings.enabled;
@@ -241,6 +274,7 @@ export async function POST(req: Request) {
       fetchApiKey: keyInfo.key,
       siteConfigs,
       aiSettings,
+      categoryTree: categoryTree.groups,
       useAi,
       html,
       evidence: {
@@ -248,12 +282,14 @@ export async function POST(req: Request) {
         priceText,
         sizes: sizeCandidates,
         colorText,
+        colorCandidates,
         variantUrls,
         descriptionText,
         specs,
         breadcrumbs,
         brandText,
       },
+      titleSuffix: titleSuffix || undefined,
     });
 
     const usedAi = (parsed.diagnostics.aiFields?.length ?? 0) > 0;
@@ -286,8 +322,13 @@ export async function POST(req: Request) {
             imagesMirrored: imported.imagesMirrored ?? 0,
             images: imported.images ?? 0,
             priceNote: imported.priceNote,
+            brandNote: imported.brandNote,
+            colorNote: imported.colorNote,
+            genderNote: imported.genderNote,
+            styleNote: imported.styleNote,
             variantsLinked: imported.variantsLinked ?? 0,
             merged: !!imported.mergedInto,
+            mergedBy: imported.mergedBy,
             mergedFields: imported.mergedFields,
           }
         : { url, status: "failed", reason: imported.error, name: product.name, usedAi };

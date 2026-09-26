@@ -96,9 +96,15 @@
   const JSON_IMAGE =
     /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
 
-  /** A price: a currency marker with digits next to it, either order. */
+  /**
+   * A price: a currency marker with digits next to it, either order.
+   *
+   * Case-insensitive, because a Ukrainian store is as likely to print "4 000 ГРН"
+   * as "4 000 грн", and a price whose marker is missed here reaches the server as
+   * a bare number with no currency at all.
+   */
   const PRICE_TEXT =
-    /(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)\s*[\d][\d\s.,]*|[\d][\d\s.,]*\s*(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)/;
+    /(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)\s*[\d][\d\s.,]*|[\d][\d\s.,]*\s*(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)/i;
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -266,6 +272,17 @@
     return found;
   }
 
+  /**
+   * Class and id words that mention colour without being the colour control.
+   * Shopify themes put `color-scheme-1` on whole page sections, and a section
+   * read as "the colour control" made its active navigation link the selected
+   * swatch and its product carousel the colour row.
+   */
+  const NOT_A_COLOR_CONTROL = /scheme|theme|background|^bg|text-colou?r|border-colou?r|accent|palette|mode/i;
+
+  /** A colour control is a row of swatches, not a page: past this many elements it is a section. */
+  const MAX_CONTROL_ELEMENTS = 600;
+
   /** Elements whose own attributes say they are the colour control. */
   function colorContainers() {
     const out = [];
@@ -273,39 +290,210 @@
       '[class*="colo" i],[id*="colo" i],[data-testid*="colo" i],[aria-label*="colo" i],[class*="swatch" i],[data-option*="colo" i]',
     );
     for (const el of all) {
-      const attrs = [
-        typeof el.className === "string" ? el.className : "",
+      const words = [
+        ...(typeof el.className === "string" ? el.className.split(/\s+/) : []),
         el.id || "",
         el.getAttribute("aria-label") || "",
         el.getAttribute("data-testid") || "",
         el.getAttribute("data-option") || "",
-      ].join(" ");
-      if (COLOR_HINT.test(attrs) || /swatch/i.test(attrs)) out.push(el);
+      ];
+      const says = words.some(
+        (w) => w && (COLOR_HINT.test(w) || /swatch/i.test(w)) && !NOT_A_COLOR_CONTROL.test(w),
+      );
+      if (!says) continue;
+      if (el.getElementsByTagName("*").length > MAX_CONTROL_ELEMENTS) continue;
+      out.push(el);
       if (out.length >= 40) break;
     }
     return out;
   }
 
-  /** A colour name has to be a word, not a placeholder or a number. */
+  /**
+   * A colour name has to be words: not a placeholder, not a number, and not the
+   * file name of the swatch's own thumbnail — "A35893_1.jpg" is what a swatch's
+   * `alt` holds on plenty of stores, and it used to be sent as the colour. The
+   * server applies the same test (`looksLikeColourLabel`); it is repeated here
+   * so the next attribute on the swatch gets its turn instead.
+   */
   function usableColor(raw) {
     const value = String(raw || "").trim().replace(/\s+/g, " ");
     if (value.length < 2 || value.length > 40) return "";
-    if (/^\d+$/.test(value)) return "";
+    if (!/\p{L}/u.test(value)) return "";
     if (/^(?:select|choose|pick|colou?r|цвет|колір)\b/i.test(value)) return "";
+    if (/\.(?:jpe?g|png|webp|gif|avif|svg|bmp|tiff?|heic)(?:[?#].*)?$/i.test(value)) return "";
+    if (/:\/\/|^\/|^www\./i.test(value)) return "";
+    if (value.includes("_") || value.startsWith("#")) return "";
+    if (!/\s/.test(value) && /\d.*\d/.test(value)) return "";
     return value;
   }
 
+  /** Text of one short line, or "" for anything longer than a colour's name. */
+  function shortText(el) {
+    const text = (el && (el.innerText || el.textContent) || "").trim().replace(/\s+/g, " ");
+    return text.length >= 2 && text.length <= 40 && !/\n/.test(text) ? text : "";
+  }
+
+  /** Option names that mean "colour" in a store's own product data. */
+  const COLOR_OPTION = /^(?:colou?rs?|colou?rway|farbe|couleur|colore|kolor|barva|цвет|колір)$/i;
+
+  /** The JSON object starting at `start`, by counting braces outside strings. */
+  function balancedObject(text, start) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < text.length; i++) {
+      const c = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c === "\\") escaped = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === "{") depth++;
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
+    return "";
+  }
+
   /**
-   * The colour this page is showing, in the store's own word for it.
+   * Shopify's own record of the variant on screen.
    *
-   * The catalogue builds the swatch, the colour filter and a good part of the
-   * stylist's vocabulary out of this one string, and a store almost never puts
-   * it in structured data. It puts it in the swatch the shopper has selected —
-   * an aria-label, a title, a tiny image's alt text — or in a line that reads
-   * "Colour: Charcoal". All three are asked, in that order: a selected swatch
-   * is the page pointing at its own answer.
+   * The selected variant is the form's `id` (or `?variant=` in the address).
+   * A theme's product JSON names its options, so the colour option's value is
+   * the store stating its colour outright. ShopifyAnalytics' `meta` does not
+   * name them — only "grey/white/leather / 7" — so every part of that title is
+   * sent, and the server keeps the one that names a colour.
    */
-  function collectColorText() {
+  function shopifyVariantColours() {
+    const out = [];
+    let wantedId = "";
+    try {
+      wantedId = new URL(location.href).searchParams.get("variant") || "";
+    } catch {
+      wantedId = "";
+    }
+    if (!wantedId) {
+      const field = document.querySelector('form[action*="/cart/add"] [name="id"]');
+      wantedId = field && field.value ? String(field.value) : "";
+    }
+    const pickVariant = (variants) =>
+      variants.find((v) => v && wantedId && String(v.id) === wantedId) ||
+      variants.find((v) => v && v.available) ||
+      variants[0];
+
+    const visit = (node, depth) => {
+      if (!node || typeof node !== "object" || depth > 5 || out.length >= 4) return;
+      if (Array.isArray(node)) {
+        for (const item of node) visit(item, depth + 1);
+        return;
+      }
+      if (Array.isArray(node.variants) && Array.isArray(node.options)) {
+        const names = node.options.map((o) => String((typeof o === "string" ? o : o && o.name) || "").trim());
+        const index = names.findIndex((n) => COLOR_OPTION.test(n));
+        const variant = pickVariant(node.variants);
+        if (index >= 0 && variant) {
+          const value = (Array.isArray(variant.options) ? variant.options[index] : undefined) ?? variant[`option${index + 1}`];
+          if (value) out.push({ value: String(value), origin: "data" });
+        }
+        return;
+      }
+      for (const key of Object.keys(node)) visit(node[key], depth + 1);
+    };
+    for (const script of document.querySelectorAll('script[type="application/json"]')) {
+      const text = script.textContent || "";
+      if (text.length > 2000000 || !text.includes('"variants"')) continue;
+      try {
+        visit(JSON.parse(text), 0);
+      } catch {
+        // Not JSON after all; the next block may be.
+      }
+    }
+
+    for (const script of document.querySelectorAll("script:not([src])")) {
+      const text = script.textContent || "";
+      const at = text.indexOf("var meta = {");
+      if (at < 0) continue;
+      try {
+        const meta = JSON.parse(balancedObject(text, at + "var meta = ".length));
+        const variants = meta && meta.product && Array.isArray(meta.product.variants) ? meta.product.variants : [];
+        const variant = pickVariant(variants);
+        for (const part of String((variant && variant.public_title) || "").split(" / ")) {
+          out.push({ value: part, origin: "variant" });
+        }
+      } catch {
+        // A theme that writes `meta` differently; nothing to read.
+      }
+      break;
+    }
+    return out;
+  }
+
+  /** Classes and attributes that mark "the colour you picked", beside the swatch row. */
+  const SELECTED_LABEL = [
+    '[class*="selected" i][class*="label" i]',
+    '[class*="selected" i][class*="value" i]',
+    '[class*="selected" i][class*="name" i]',
+    '[class*="selected" i][class*="colo" i]',
+    '[class*="current" i][class*="colo" i]',
+    '[class*="option" i][class*="value" i]',
+    '[class*="variant" i][class*="label" i]',
+    '[class*="variant" i][class*="name" i]',
+    '[class*="swatch" i][class*="label" i]',
+    '[class*="swatch" i][class*="name" i]',
+    '[class*="swatch" i][class*="title" i]',
+    '[class*="colo" i][class*="label" i]',
+    '[class*="colo" i][class*="name" i]',
+    '[class*="colo" i][class*="title" i]',
+    '[class*="colo" i][class*="value" i]',
+    "legend",
+  ].join(",");
+
+  /**
+   * Every string the page offers as the colour it is showing, each with where
+   * it was read. The server picks the one that is a colour — see
+   * `colour-choice.ts` — because the first that merely looks like words is,
+   * on plenty of stores, the product's name in a swatch photo's alt text.
+   *
+   * In order of how directly the page states it: the store's variant data, the
+   * form's checked colour option, the selected swatch's colour attributes, the
+   * label beside the swatch row, a "Colour: Charcoal" line; then the weak ones —
+   * the swatch photo's alt, and loose text from the colour area.
+   */
+  function collectColorCandidates() {
+    const list = [];
+    const seen = new Set();
+    const add = (raw, origin) => {
+      const value = usableColor(raw);
+      if (!value || list.length >= 30) return;
+      const key = `${origin}|${value.toLowerCase()}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      list.push({ value, origin });
+    };
+
+    for (const c of shopifyVariantColours()) add(c.value, c.origin);
+
+    // A form's colour option: `<input type="radio" name="Color" value="Black" checked>`,
+    // `<select name="options[Colour]">`, or a fieldset whose legend says colour.
+    for (const input of document.querySelectorAll('input[type="radio"]:checked')) {
+      const fieldset = input.closest("fieldset");
+      const legend = fieldset && fieldset.querySelector("legend");
+      if (COLOR_HINT.test(input.name || "") || (legend && COLOR_HINT.test(legend.textContent || ""))) {
+        add(input.value, "swatch");
+        const label = input.id && document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+        if (label) add(shortText(label), "swatch");
+      }
+    }
+    for (const select of document.querySelectorAll("select")) {
+      if (!COLOR_HINT.test(`${select.name || ""} ${select.id || ""} ${select.getAttribute("aria-label") || ""}`)) continue;
+      const option = select.options && select.options[select.selectedIndex];
+      if (option) add(option.textContent, "swatch");
+    }
+
     const containers = colorContainers();
     const selected = [
       '[aria-checked="true"]',
@@ -317,7 +505,6 @@
       ".is-selected",
       ".is-active",
     ];
-
     for (const container of containers) {
       for (const selector of selected) {
         let el = null;
@@ -327,39 +514,75 @@
           el = null;
         }
         if (!el) continue;
+        for (const attr of ["aria-label", "title", "data-color", "data-colour", "data-color-name", "data-value"]) {
+          add(el.getAttribute(attr), "swatch");
+        }
         const img = el.querySelector && el.querySelector("img");
-        const name = usableColor(
-          el.getAttribute("aria-label") ||
-            el.getAttribute("title") ||
-            el.getAttribute("data-color") ||
-            el.getAttribute("data-colour") ||
-            el.getAttribute("data-color-name") ||
-            (img && img.getAttribute("alt")) ||
-            el.innerText ||
-            el.textContent,
-        );
-        if (name) return name;
+        if (img) {
+          add(img.getAttribute("alt"), "alt");
+          add(img.getAttribute("title"), "alt");
+        }
+        add(shortText(el), "text");
+        break;
       }
     }
 
+    // The label that repeats the picked colour above or beside the row. It sits
+    // next to the swatches rather than inside them, so the row's parent and
+    // grandparent are searched too.
+    const scopes = new Set();
+    for (const container of containers) {
+      scopes.add(container);
+      if (container.parentElement) scopes.add(container.parentElement);
+      if (container.parentElement && container.parentElement.parentElement) {
+        scopes.add(container.parentElement.parentElement);
+      }
+    }
+    for (const scope of scopes) {
+      if (scope.getElementsByTagName("*").length > MAX_CONTROL_ELEMENTS * 2) continue;
+      for (const attr of ["data-selected-value", "data-selected-color", "data-selected-colour", "data-current-value"]) {
+        add(scope.getAttribute(attr), "label");
+      }
+      let labels = [];
+      try {
+        labels = scope.querySelectorAll(SELECTED_LABEL);
+      } catch {
+        labels = [];
+      }
+      for (const el of labels) add(shortText(el), "label");
+    }
     for (const attr of ["data-selected-color", "data-selected-colour", "data-color-name"]) {
       const el = document.querySelector(`[${attr}]`);
-      const name = el && usableColor(el.getAttribute(attr));
-      if (name) return name;
+      if (el) add(el.getAttribute(attr), "label");
     }
 
     // "Colour: Charcoal" — the label and its value in one line of text.
     for (const container of containers) {
       const text = (container.innerText || container.textContent || "").trim();
       if (!text || text.length > 200) continue;
-      const match = text.match(
-        /(?:colou?r|farbe|couleur|colore|цвет|колір)\s*[:：]\s*([^\n,;]{2,40})/i,
-      );
-      const name = match && usableColor(match[1]);
-      if (name) return name;
+      const match = text.match(/(?:colou?r|farbe|couleur|colore|цвет|колір)\s*[:：]\s*([^\n,;]{2,40})/i);
+      if (match) add(match[1], "line");
     }
 
-    return "";
+    // Loose lines from the colour area: badges ("New", "-20%") and other
+    // colourways' names among them. The server takes one of these only when it
+    // names a colour and nothing better did.
+    for (const scope of scopes) {
+      const text = (scope.innerText || "").trim();
+      if (!text || text.length > 1500) continue;
+      for (const line of text.split(/\n+/)) add(line, "text");
+    }
+
+    return list;
+  }
+
+  /**
+   * One guess, for a server older than 1.0.3 that reads `colorText` only: the
+   * first candidate from a place that states colours.
+   */
+  function colorTextFrom(candidates) {
+    const stating = candidates.find((c) => ["data", "swatch", "label", "line"].includes(c.origin));
+    return stating ? stating.value : "";
   }
 
   /**
@@ -684,7 +907,8 @@
     const images = collectImages();
     const priceText = collectPriceText();
     const sizes = collectSizes();
-    const colorText = collectColorText();
+    const colorCandidates = collectColorCandidates();
+    const colorText = colorTextFrom(colorCandidates);
     const variantUrls = collectVariantUrls();
     const descriptionText = collectDescription();
     const specs = collectSpecs();
@@ -698,19 +922,30 @@
     // and the element stays.
     root.querySelectorAll('[src^="data:"]').forEach((n) => n.removeAttribute("src"));
 
+    // `innerHTML` drops the root element's own attributes, and `lang` is the one
+    // the server reads: when no price on the page names its currency, the
+    // store's declared language ("uk-UA") is what tells hryvnia from dollars.
+    const lang = (document.documentElement.getAttribute("lang") || "")
+      .replace(/[^A-Za-z0-9_-]/g, "")
+      .slice(0, 20);
+
     return {
       ok: true,
       url: location.href,
-      html: `<html>${root.innerHTML}</html>`,
+      html: `<html${lang ? ` lang="${lang}"` : ""}>${root.innerHTML}</html>`,
       images,
       priceText,
       sizes,
       colorText,
+      colorCandidates,
       variantUrls,
       descriptionText,
       specs,
       breadcrumbs,
       brandText,
+      // The store's own title, for working out the furniture it appends to
+      // every page. Sent raw; the server decides what of it is a product name.
+      pageTitle: (document.title || "").replace(/\s+/g, " ").trim().slice(0, 200),
     };
   } catch (err) {
     return { ok: false, error: err && err.message ? err.message : String(err) };
