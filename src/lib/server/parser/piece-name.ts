@@ -190,6 +190,43 @@ export function samePiece(brand: string, a: PieceRow, b: PieceRow): boolean {
 }
 
 /**
+ * Could these two rows be one model's colourways, as a store's colour row
+ * links them? Looser than `samePiece`, because the store has already said so —
+ * etnies links "Emerson X FOS" beside "Emerson" — and strict enough to refuse a
+ * link that cannot be one: the colour row a page was read from was sometimes a
+ * "you may also like" grid, and "Cypher Woven Jacket", "Ritual Jacket" and
+ * "Stack Jacket" became one jacket in five colours.
+ *
+ * The same piece; or, with no category or garment against it, a reduced name
+ * that starts with the same model word, or that is the start of the other.
+ */
+export function sameModelFamily(brand: string, a: PieceRow, b: PieceRow): boolean {
+  if (samePiece(brand, a, b)) return true;
+  if (!categoriesAgree(a.category, b.category)) return false;
+  if (garmentTypesConflict(a.name, b.name)) return false;
+  const words = (row: PieceRow) => {
+    const p = pieceName(row.name, brand, row.colors ?? []);
+    return (p.core || p.full).split(" ").filter(Boolean);
+  };
+  const x = words(a);
+  const y = words(b);
+  if (!x.length || !y.length) return false;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  if (short.every((w, i) => long[i] === w) && short.join(" ").length >= 4) return true;
+  // A shared first word is a model only when it is long enough to be a name
+  // and is not a brand's line: Nike's "Air" starts the Force 1 and the Max 90.
+  const root = x[0];
+  return root === y[0] && root.length >= 4 && !/\d/.test(root) && !NOT_A_MODEL.has(root) && !LINE_WORDS.has(root);
+}
+
+/** First words a brand starts many different models with. */
+const LINE_WORDS = new Set([
+  "air", "zoom", "ultra", "super", "free", "react", "speed", "force", "court", "retro", "cloud",
+  "gel", "fresh", "foam", "boost", "old", "skool", "chuck", "club", "dunk", "blazer", "jordan",
+  "yeezy", "tech", "nano", "wave", "trail", "hyper", "flex", "metcon", "pegasus",
+]);
+
+/**
  * How the colours of two rows of one piece compare.
  *
  *   same       the same colour word ("Black" / "black")

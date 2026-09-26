@@ -33,6 +33,7 @@ import { parsePage } from "@/lib/server/parser/parse-page";
 import { loadCategoryTree } from "@/lib/server/category-tree";
 import { importParsedProduct } from "@/lib/server/parser/import-product";
 import { COLOUR_ORIGINS, type ColourOrigin } from "@/lib/server/parser/colour-choice";
+import { isShopifyProduct } from "@/lib/server/parser/shopify";
 import { planCollection, type FetchedSitemap } from "@/lib/server/parser/plan-collection";
 import { commonTitleSuffix } from "@/lib/server/product-fields";
 import {
@@ -98,6 +99,10 @@ const MAX_SIZE_LABEL = 24;
 const MAX_COLOR_TEXT = 80;
 /** Colour candidates one page can send, and the origins the server knows. */
 const MAX_COLOR_CANDIDATES = 30;
+/** Longest title the extension can send from beside the buy button. */
+const MAX_TITLE_TEXT = 200;
+/** Largest store JSON the extension can send for one product. */
+const MAX_SHOPIFY_JSON = 400_000;
 
 /**
  * Sibling colourway addresses one page may name.
@@ -224,6 +229,16 @@ export async function POST(req: Request) {
     .filter((c: { value: string; origin: string }) =>
       !!c.value && (COLOUR_ORIGINS as readonly string[]).includes(c.origin))
     .slice(0, MAX_COLOR_CANDIDATES) as { value: string; origin: ColourOrigin }[];
+  const titleText = str(body?.titleText).slice(0, MAX_TITLE_TEXT);
+  // The store's own product JSON, as the extension fetched it from the page's
+  // origin. Checked for shape and size; anything else is ignored, never trusted.
+  const shopify = (() => {
+    const product = body?.shopify?.product;
+    if (!isShopifyProduct(product)) return undefined;
+    if (JSON.stringify(product).length > MAX_SHOPIFY_JSON) return undefined;
+    const currency = str(body?.shopify?.currency).toUpperCase();
+    return { product, currency: /^[A-Z]{3}$/.test(currency) ? currency : undefined };
+  })();
   const variantUrls = (Array.isArray(body?.variantUrls) ? body.variantUrls : [])
     .filter(
       (u: unknown): u is string =>
@@ -283,6 +298,8 @@ export async function POST(req: Request) {
         sizes: sizeCandidates,
         colorText,
         colorCandidates,
+        titleText,
+        shopify,
         variantUrls,
         descriptionText,
         specs,

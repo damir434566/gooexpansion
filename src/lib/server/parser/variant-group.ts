@@ -28,7 +28,9 @@
  * is a different problem with a different fix (the retailer list, see
  * `same-item.ts`).
  */
-import { colourRelation, samePiece } from "./piece-name";
+import { colourRelation, sameModelFamily, samePiece } from "./piece-name";
+
+export { sameModelFamily };
 
 export interface VariantCandidate {
   id: string;

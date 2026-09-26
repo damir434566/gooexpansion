@@ -25,6 +25,7 @@ export type AdminAction =
   | "products.bg_color_undone"
   | "products.duplicates_merged"
   | "products.duplicates_dismissed"
+  | "products.colour_group_split"
   | "retailer_domain.saved"
   | "retailer_domain.deleted"
   | "retailer_domain.applied";
