@@ -1,0 +1,548 @@
+diff --git a/extension/README.md b/extension/README.md
+index 5904719..4da7f87 100644
+--- a/extension/README.md
++++ b/extension/README.md
+@@ -65,6 +65,8 @@
+ | Что видишь | Что делать |
+ |---|---|
+ | **«Waiting for the extension»** и ничего не происходит | Перезагрузи вкладку приёмника (F5). Так бывает, если она была открыта раньше, чем поставили расширение. |
++| **«The collect tab is not reachable»** | С версии 1.0.6 расширение само находит вкладку приёмника и чинит связь, в том числе после обновления расширения. Если сообщение всё же появилось — открой Goo Studio → Parser → Collect, обнови её (F5) и нажми «Collect this store» ещё раз. |
++| **«…usually a sign-in redirect»** | Вкладку приёмника увело на вход. Войди в Goo Studio админом, открой Parser → Collect и запусти снова. |
+ | **«The store refused two pages in a row»** | Магазин отбивается. Прогон остановился сам, чтобы не поймать бан. Попробуй через час. |
+ | **«Could not reach …/goo-studio/parser/collect»** | Приёмник не выкачен на сайт, либо в popup неверный адрес Goo Studio, либо ты не залогинен админом. |
+ | Надо остановить | Кнопка **Stop** в popup или на вкладке приёмника. Срабатывает мгновенно. |
+diff --git a/extension/background.js b/extension/background.js
+index d5f75ca..390fb65 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -134,17 +134,97 @@ async function studioTab() {
+ const NO_TAB =
+   "The collect tab is not reachable. Open Goo Studio → Parser → Collect, reload that tab, and try again.";
+ 
+-/** Ask the collect tab to call the API, and wait for what it got back. */
+-async function askPage(type, payload) {
+-  const tabId = await studioTab();
+-  if (tabId == null) return { ok: false, error: NO_TAB };
++const SIGNED_OUT =
++  "The collect tab left the collect page — usually a sign-in redirect. Sign in to Goo Studio as an admin, open Parser → Collect, and try again.";
++
++/** Where the collect screen lives; the bridge is only injected there. */
++const COLLECT_URLS = [
++  "http://localhost/goo-studio/parser/collect*",
++  "http://127.0.0.1/goo-studio/parser/collect*",
++  "https://goo-fashion.com/goo-studio/parser/collect*",
++  "https://www.goo-fashion.com/goo-studio/parser/collect*",
++];
++
++/** Does this tab have a live bridge in it? */
++async function answers(tabId) {
+   try {
+-    const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
+-    return res ?? { ok: false, error: "The collect tab did not answer" };
++    const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type: "ping" });
++    return !!res?.ok;
+   } catch {
+-    await rememberStudioTab(null);
+-    return { ok: false, error: NO_TAB };
++    return false;
++  }
++}
++
++/**
++ * Find a collect tab that can be talked to, mending one that cannot.
++ *
++ * The worker only learns the collect tab when a bridge announces itself, and
++ * that link breaks quietly: the tab reloads, a sign-in redirect carries it off
++ * the collect page, or the extension is updated — which leaves every open tab
++ * with a bridge that belongs to the old copy and can no longer reach us. Each
++ * of those used to end a run with "not reachable" while the tab sat right
++ * there. So the known tab is tried, then every collect tab, and one whose
++ * bridge is dead gets a fresh one.
++ */
++async function reconnect() {
++  const known = await studioTab();
++  if (known != null && (await answers(known))) return known;
++
++  let tabs = [];
++  try {
++    tabs = await chrome.tabs.query({ url: COLLECT_URLS });
++  } catch {
++    tabs = [];
++  }
++  if (known != null && !tabs.some((t) => t.id === known)) {
++    // The tab we knew is no longer on the collect page: most often Clerk sent
++    // it to sign in. Said as such, because reloading will not help.
++    try {
++      const tab = await chrome.tabs.get(known);
++      if (tab && !tabs.length) {
++        await rememberStudioTab(null);
++        return { error: SIGNED_OUT };
++      }
++    } catch {
++      /* closed */
++    }
+   }
++
++  for (const tab of tabs) {
++    if (await answers(tab.id)) {
++      await rememberStudioTab(tab.id);
++      return tab.id;
++    }
++  }
++  for (const tab of tabs) {
++    try {
++      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["bridge.js"] });
++    } catch {
++      continue;
++    }
++    if (await answers(tab.id)) {
++      await rememberStudioTab(tab.id);
++      return tab.id;
++    }
++  }
++  await rememberStudioTab(null);
++  return { error: NO_TAB };
++}
++
++/** Ask the collect tab to call the API, and wait for what it got back. */
++async function askPage(type, payload) {
++  for (let attempt = 0; attempt < 2; attempt++) {
++    const tabId = attempt === 0 ? await studioTab() : await reconnect();
++    if (tabId != null && typeof tabId === "object") return { ok: false, error: tabId.error };
++    if (tabId == null) continue;
++    try {
++      const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
++      return res ?? { ok: false, error: "The collect tab did not answer" };
++    } catch {
++      /* dead bridge or gone tab: reconnect and try once more */
++    }
++  }
++  return { ok: false, error: NO_TAB };
+ }
+ 
+ /** Tell the collect tab something. Failures here never stop a run. */
+@@ -515,6 +595,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+       sendResponse(publicState());
+       return undefined;
+ 
++    case "connect":
++      // The popup asks before starting, so a broken link is mended — or named —
++      // while the admin is still looking, not a minute into the run.
++      reconnect().then((res) =>
++        sendResponse(typeof res === "number" ? { ok: true } : { ok: false, error: res?.error ?? NO_TAB }),
++      );
++      return true;
++
+     case "stop":
+       stop();
+       sendResponse({ ok: true });
+diff --git a/extension/bridge.js b/extension/bridge.js
+index 584a9b1..f284f93 100644
+--- a/extension/bridge.js
++++ b/extension/bridge.js
+@@ -17,97 +17,102 @@
+  * the admin's browsing — the collect tab introduces itself.
+  */
+ 
+-const FROM_EXT = "goo-collect/ext";
+-const FROM_PAGE = "goo-collect/page";
++// Wrapped so the worker can inject this file again into a collect tab whose
++// bridge died with an extension update: top-level declarations would collide
++// on a second run in the same page.
++(() => {
++  const FROM_EXT = "goo-collect/ext";
++  const FROM_PAGE = "goo-collect/page";
++
++  /**
++   * The one page this bridge belongs on.
++   *
++   * `matches` in the manifest already narrows injection to this path, but the
++   * guard is repeated here because the consequence of being wrong is specific:
++   * the worker learns which tab to trust from whichever bridge announces itself
++   * first, and a bridge running on some other page of the site would take that
++   * place and send every API call somewhere that cannot answer it.
++   */
++  const COLLECT_PATH = "/goo-studio/parser/collect";
++
++  /** How long to wait for the page before calling a request lost. */
++  const REPLY_TIMEOUT_MS = 120_000;
++
++  let nextId = 1;
++  /** id → resolver, for requests the page has not answered yet. */
++  const pending = new Map();
++
++  window.addEventListener("message", (event) => {
++    // Same window, same origin, our marker. `postMessage` is shoutable by any
++    // script on the page, and this bridge relays to a privileged worker.
++    if (event.source !== window) return;
++    if (event.origin !== window.location.origin) return;
++
++    const msg = event.data;
++    if (!msg || msg.source !== FROM_PAGE) return;
++
++    if (typeof msg.id === "number") {
++      const entry = pending.get(msg.id);
++      if (!entry) return;
++      pending.delete(msg.id);
++      entry(msg.ok ? { ok: true, data: msg.data } : { ok: false, error: msg.error });
++      return;
++    }
++
++    // One-way instructions from the screen. Stop is the one that matters, and it
++    // has to reach the worker whatever it is in the middle of.
++    if (msg.type === "stop") {
++      chrome.runtime.sendMessage({ type: "stop" }).catch(() => {});
++    }
++  });
+ 
+-/**
+- * The one page this bridge belongs on.
+- *
+- * `matches` in the manifest already narrows injection to this path, but the
+- * guard is repeated here because the consequence of being wrong is specific:
+- * the worker learns which tab to trust from whichever bridge announces itself
+- * first, and a bridge running on some other page of the site would take that
+- * place and send every API call somewhere that cannot answer it.
+- */
+-const COLLECT_PATH = "/goo-studio/parser/collect";
+-
+-/** How long to wait for the page before calling a request lost. */
+-const REPLY_TIMEOUT_MS = 120_000;
+-
+-let nextId = 1;
+-/** id → resolver, for requests the page has not answered yet. */
+-const pending = new Map();
+-
+-window.addEventListener("message", (event) => {
+-  // Same window, same origin, our marker. `postMessage` is shoutable by any
+-  // script on the page, and this bridge relays to a privileged worker.
+-  if (event.source !== window) return;
+-  if (event.origin !== window.location.origin) return;
+-
+-  const msg = event.data;
+-  if (!msg || msg.source !== FROM_PAGE) return;
+-
+-  if (typeof msg.id === "number") {
+-    const entry = pending.get(msg.id);
+-    if (!entry) return;
+-    pending.delete(msg.id);
+-    entry(msg.ok ? { ok: true, data: msg.data } : { ok: false, error: msg.error });
+-    return;
++  /** Ask the page something and wait for its answer. */
++  function ask(type, payload) {
++    return new Promise((resolve) => {
++      const id = nextId++;
++      const timer = setTimeout(() => {
++        if (pending.delete(id)) {
++          resolve({ ok: false, error: "The collect tab did not answer in time" });
++        }
++      }, REPLY_TIMEOUT_MS);
++
++      pending.set(id, (value) => {
++        clearTimeout(timer);
++        resolve(value);
++      });
++
++      window.postMessage({ source: FROM_EXT, id, type, payload: payload ?? {} }, window.location.origin);
++    });
+   }
+ 
+-  // One-way instructions from the screen. Stop is the one that matters, and it
+-  // has to reach the worker whatever it is in the middle of.
+-  if (msg.type === "stop") {
+-    chrome.runtime.sendMessage({ type: "stop" }).catch(() => {});
++  /** Tell the page something with no answer expected (progress, run finished). */
++  function tell(type, payload) {
++    window.postMessage({ source: FROM_EXT, type, payload: payload ?? {} }, window.location.origin);
+   }
+-});
+-
+-/** Ask the page something and wait for its answer. */
+-function ask(type, payload) {
+-  return new Promise((resolve) => {
+-    const id = nextId++;
+-    const timer = setTimeout(() => {
+-      if (pending.delete(id)) {
+-        resolve({ ok: false, error: "The collect tab did not answer in time" });
+-      }
+-    }, REPLY_TIMEOUT_MS);
+-
+-    pending.set(id, (value) => {
+-      clearTimeout(timer);
+-      resolve(value);
+-    });
+ 
+-    window.postMessage({ source: FROM_EXT, id, type, payload: payload ?? {} }, window.location.origin);
+-  });
+-}
++  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
++    if (!msg || msg.target !== "bridge") return undefined;
+ 
+-/** Tell the page something with no answer expected (progress, run finished). */
+-function tell(type, payload) {
+-  window.postMessage({ source: FROM_EXT, type, payload: payload ?? {} }, window.location.origin);
+-}
++    if (msg.type === "ping") {
++      sendResponse({ ok: true });
++      return undefined;
++    }
+ 
+-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+-  if (!msg || msg.target !== "bridge") return undefined;
++    // Notices need no reply and must not hold the channel open.
++    if (msg.type === "progress" || msg.type === "done" || msg.type === "error") {
++      tell(msg.type, msg.payload);
++      sendResponse({ ok: true });
++      return undefined;
++    }
+ 
+-  if (msg.type === "ping") {
+-    sendResponse({ ok: true });
+-    return undefined;
+-  }
++    ask(msg.type, msg.payload).then(sendResponse);
++    return true; // keep the channel open for the async reply
++  });
+ 
+-  // Notices need no reply and must not hold the channel open.
+-  if (msg.type === "progress" || msg.type === "done" || msg.type === "error") {
+-    tell(msg.type, msg.payload);
+-    sendResponse({ ok: true });
+-    return undefined;
++  // Introduce this tab to the worker, and greet the page so it can show that the
++  // extension is connected rather than leaving the admin guessing.
++  if (window.location.pathname.startsWith(COLLECT_PATH)) {
++    chrome.runtime.sendMessage({ type: "bridge-ready" }).catch(() => {});
++    ask("hello", {});
+   }
+-
+-  ask(msg.type, msg.payload).then(sendResponse);
+-  return true; // keep the channel open for the async reply
+-});
+-
+-// Introduce this tab to the worker, and greet the page so it can show that the
+-// extension is connected rather than leaving the admin guessing.
+-if (window.location.pathname.startsWith(COLLECT_PATH)) {
+-  chrome.runtime.sendMessage({ type: "bridge-ready" }).catch(() => {});
+-  ask("hello", {});
+-}
++})();
+diff --git a/extension/manifest.json b/extension/manifest.json
+index 4b97895..a3080b8 100644
+--- a/extension/manifest.json
++++ b/extension/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "Goo Collect",
+-  "version": "1.0.4",
++  "version": "1.0.7",
+   "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
+   "minimum_chrome_version": "116",
+   "permissions": [
+@@ -10,6 +10,10 @@
+     "storage",
+     "webRequest"
+   ],
++  "host_permissions": [
++    "https://goo-fashion.com/*",
++    "https://www.goo-fashion.com/*"
++  ],
+   "optional_host_permissions": [
+     "http://*/*",
+     "https://*/*"
+diff --git a/extension/popup.js b/extension/popup.js
+index cd405fd..83b3733 100644
+--- a/extension/popup.js
++++ b/extension/popup.js
+@@ -36,15 +36,6 @@ const el = {
+ 
+ let activeUrl = "";
+ 
+-function note(message) {
+-  el.note.textContent = message ?? "";
+-  el.note.hidden = !message;
+-}
+-
+-function send(type, payload) {
+-  return chrome.runtime.sendMessage({ type, payload }).catch(() => null);
+-}
+-
+ // ── Setup ────────────────────────────────────────────────────────────────────
+ 
+ async function init() {
+@@ -76,17 +67,22 @@ async function init() {
+  * content script in it until it is reloaded — hence the honest timeout message.
+  */
+ async function ensureCollectTab(studioOrigin) {
+-  const known = await send("state");
+-  if (known?.studioTabId != null) return true;
++  // A tab id alone proves nothing: the tab may have reloaded, been sent to
++  // sign in, or kept a bridge from before an update. Ask the worker to reach it.
++  const first = await send("connect");
++  if (first?.ok) return { ok: true };
+ 
+   await chrome.tabs.create({ url: `${studioOrigin}${COLLECT_PATH}`, active: false });
+ 
++  let last = first;
+   for (let i = 0; i < 40; i++) {
+     await new Promise((r) => setTimeout(r, 250));
+     const s = await send("state");
+-    if (s?.studioTabId != null) return true;
++    if (s?.studioTabId == null) continue;
++    last = await send("connect");
++    if (last?.ok) return { ok: true };
+   }
+-  return false;
++  return { ok: false, error: last?.error };
+ }
+ 
+ async function start() {
+@@ -121,9 +117,12 @@ async function start() {
+     return;
+   }
+ 
+-  if (!(await ensureCollectTab(studioOrigin))) {
++  const link = await ensureCollectTab(studioOrigin);
++  if (!link.ok) {
+     note(
+-      `Could not reach ${studioOrigin}${COLLECT_PATH}. Open it, make sure you are signed in as an admin, reload it, then try again.`,
++      link.error && /sign/i.test(link.error)
++        ? link.error
++        : `Could not reach ${studioOrigin}${COLLECT_PATH}. Open it, make sure you are signed in as an admin, reload it, then try again.`,
+     );
+     el.start.disabled = false;
+     return;
+diff --git a/extension/snapshot.js b/extension/snapshot.js
+index c1dca65..9955bb6 100644
+--- a/extension/snapshot.js
++++ b/extension/snapshot.js
+@@ -298,6 +298,19 @@
+     '[class*="grid-product" i]', '[class*="product-tile" i]', '[class*="product-grid" i]', '[class*="products-grid" i]',
+   ].join(",");
+ 
++  /**
++   * The size row. Themes build it from the same swatch component as the colour
++   * row, so "swatch" in a class says nothing about which it is — and the picked
++   * size went out as the picked colour ("XS" on Hoodrich's Mia Jacket). Its own
++   * words say size, or its heading does ("Size", "Size: XS").
++   */
++  const SIZE_WORD = /(?:^|[-_\s])(?:sizes?|размер|розмір|taille|grö(?:ß|ss)e|talla|taglia)(?:$|[-_\s:])/i;
++  function isSizeControl(el, words) {
++    if (words.some((w) => w && SIZE_WORD.test(w))) return true;
++    const heading = (el.innerText || el.textContent || "").trim().slice(0, 40);
++    return /^(?:sizes?|размер|розмір|taille|größe|talla|taglia)\b/i.test(heading);
++  }
++
+   /** Elements whose own attributes say they are the colour control. */
+   function colorContainers() {
+     const out = [];
+@@ -316,6 +329,7 @@
+         (w) => w && (COLOR_HINT.test(w) || /swatch/i.test(w)) && !NOT_A_COLOR_CONTROL.test(w),
+       );
+       if (!says) continue;
++      if (isSizeControl(el, words)) continue;
+       if (el.getElementsByTagName("*").length > MAX_CONTROL_ELEMENTS) continue;
+       try {
+         if (el.closest(OTHER_PRODUCTS)) continue;
+@@ -343,6 +357,10 @@
+     if (/\.(?:jpe?g|png|webp|gif|avif|svg|bmp|tiff?|heic)(?:[?#].*)?$/i.test(value)) return "";
+     if (/:\/\/|^\/|^www\./i.test(value)) return "";
+     if (value.includes("_") || value.startsWith("#")) return "";
++    // A size is never a colour, whatever control it was read from.
++    if (/^(?:xx?xs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl)(?:\s?[/–—-]\s?(?:xx?xs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl))*$/i.test(value)) return "";
++    if (/^(?:(?:eu|uk|us|fr|it|de|jp)\s?)?\d{1,2}(?:[.,]5)?(?:\s?(?:eu|uk|us|fr|it|de|jp))?$/i.test(value)) return "";
++    if (/^(?:one[\s-]?size|onesize|os|free[\s-]?size)$/i.test(value)) return "";
+     if (!/\s/.test(value) && /\d.*\d/.test(value)) return "";
+     return value;
+   }
+diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
+index 797572b..39e2cb4 100644
+--- a/src/app/api/admin/parser/collect/route.ts
++++ b/src/app/api/admin/parser/collect/route.ts
+@@ -282,7 +282,7 @@ export async function POST(req: Request) {
+   const dryRun = body?.dryRun === true;
+   // Set by the collect screen, not the extension: the admin chooses there
+   // whether this store's pages make cards or only add links to ours.
+-  const linksOnly = body?.linksOnly === true;
++  const requestedLinksOnly = body?.linksOnly === true;
+ 
+   let result: CrawlItemResult;
+ 
+@@ -327,13 +327,27 @@ export async function POST(req: Request) {
+     } else if (dryRun) {
+       result = { url, status: "skipped", reason: "Dry run", name: product.name, usedAi };
+     } else {
++      // A page with no photo at all is taken as links only whatever the mode:
++      // a card without a photo is not a card, but its price and address still
++      // make a "where to buy" line on the piece we already have.
++      const photoless = !product.imageUrl && !(product.images?.length ?? 0);
++      const linksOnly = requestedLinksOnly || photoless;
++      const photolessOnly = photoless && !requestedLinksOnly;
+       const imported = await importParsedProduct(
+         product as unknown as Record<string, unknown>,
+         product.sourceUrl || url,
+         { mirrorImages, linksOnly },
+       );
+       result = imported.skipped
+-        ? { url, status: "skipped", reason: imported.skipped, name: product.name, usedAi }
++        ? {
++            url,
++            status: "skipped",
++            reason: photolessOnly
++              ? `no photos on the page — ${imported.skipped.replace(/^links only: /, "")}`
++              : imported.skipped,
++            name: product.name,
++            usedAi,
++          }
+         : imported.ok
+         ? {
+             url,
+diff --git a/src/lib/server/parser/plan-collection.ts b/src/lib/server/parser/plan-collection.ts
+index 9004d57..81bc94b 100644
+--- a/src/lib/server/parser/plan-collection.ts
++++ b/src/lib/server/parser/plan-collection.ts
+@@ -21,7 +21,21 @@
+  * what a product address looks like, and `sitemap.ts` decides how a sitemap
+  * document is read. This module only sequences them and applies robots.txt.
+  */
+-import { extractProductLinks, looksLikeProductPath, isNonProductPath } from "./extract";
++import { extractProductLinks, looksLikeProductPath, isNonProductPath, partitionProducts } from "./extract";
++
++/**
++ * Does this page describe one product of its own?
++ *
++ * A listing states many (or an ItemList of them); a product page states one,
++ * or says `og:type` product. Related-item carousels live in ItemLists and are
++ * not counted, so a product page with a "you may also like" row still reads as
++ * one product.
++ */
++function pageStatesOneProduct(html: string): boolean {
++  if (partitionProducts(html).standaloneCount === 1) return true;
++  return /<meta[^>]+property=["']og:type["'][^>]+content=["'](?:og:)?product["']/i.test(html) ||
++    /<meta[^>]+content=["'](?:og:)?product["'][^>]+property=["']og:type["']/i.test(html);
++}
+ import {
+   locations as sitemapLocations,
+   isIndex as isSitemapIndex,
+@@ -185,12 +199,19 @@ export function planCollection(input: CollectionPlanInput): CollectionPlan {
+   // ── The page the admin pointed at ──────────────────────────────────────────
+   // Its own address counts as a candidate when it is itself a product: pasting
+   // a single piece is a legitimate one-item run, not a failed crawl.
++  //
++  // The address alone does not always say so: StockX sells a sneaker at
++  // `/air-jordan-4-retro-toro-bravo-2026`, with no product segment and no code.
++  // The page itself does — structured data naming one Product, or OpenGraph's
++  // `og:type` of product — and read as a category, it handed the run the first
++  // "related" sneaker instead of the one on screen.
+   const isSingleProduct = (() => {
+     try {
+-      return looksLikeProductPath(new URL(input.startUrl).pathname);
++      if (looksLikeProductPath(new URL(input.startUrl).pathname)) return true;
+     } catch {
+       return false;
+     }
++    return !!input.html && pageStatesOneProduct(input.html);
+   })();
+   if (isSingleProduct) candidates.unshift(canonical(input.startUrl));
+   if (input.html) candidates.push(...extractProductLinks(input.html, input.startUrl, limit));

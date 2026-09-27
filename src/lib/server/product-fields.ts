@@ -897,13 +897,18 @@ export function colorWordsIn(text: string, source: ColourSource = "text"): BaseC
  *   - an address (a scheme, `//`, a leading slash),
  *   - anything with an underscore — how files and codes are joined, never names,
  *   - one token mixing letters with two or more digits ("A35893", "BLK001"),
- *   - no letters at all ("0012"), or a hex value ("#1a1a1a").
+ *   - no letters at all ("0012"), or a hex value ("#1a1a1a"),
+ *   - a size ("XS", "M/L", "UK 10", "One size"). Themes build the size picker
+ *     from the same swatch component as the colour row, so the picked size
+ *     arrives as "the selected swatch": Hoodrich's "Mia Jacket - Beige/White"
+ *     was stored with the colour "XS".
  *
  * "Black/White", "010 Black" and "Core Black" all pass.
  */
 export function looksLikeColourLabel(raw: string | undefined | null): boolean {
   const v = (raw ?? "").trim();
   if (v.length < 2 || v.length > 40) return false;
+  if (looksLikeSize(v)) return false;
   if (/\.(?:jpe?g|png|webp|gif|avif|svg|bmp|tiff?|heic)(?:[?#].*)?$/i.test(v)) return false;
   if (/:\/\/|^\/|^www\./i.test(v)) return false;
   if (v.includes("_")) return false;
@@ -928,6 +933,66 @@ export function canonicalColor(label: string, source: ColourSource = "text"): Ba
   if (!hits.length) return undefined;
   const best = Math.min(...hits.map((h) => h.rank));
   return hits.filter((h) => h.rank === best).pop()?.base;
+}
+
+/** Words that shade a colour rather than name one: "Off White", "Washed Black". */
+const COLOUR_QUALIFIERS = new Set([
+  "light", "dark", "pale", "deep", "bright", "washed", "off", "heather", "marl", "melange",
+  "core", "soft", "mid", "neon", "faded", "vintage", "multi",
+]);
+
+/**
+ * The colourway a product's name ends with, as the store wrote it — or
+ * undefined when the name ends with anything else.
+ *
+ * Stores that make one product per colourway put the colour after a dash:
+ * "Mia Jacket - Beige/White". Only a tail made wholly of colour words (and
+ * shades of them) counts, so "Stack Jacket - Reflective" and "Tee - Oversized
+ * Fit" give nothing, and the whole tail is kept: reading the name for its one
+ * base colour turned "Beige/White" into "White".
+ */
+export function colourFromName(name: string): string | undefined {
+  const parts = (name ?? "").split(/\s+[-–—|]\s+/);
+  if (parts.length < 2) return undefined;
+  const tail = parts[parts.length - 1].replace(/^\(|\)$/g, "").trim();
+  if (!tail || tail.length > 40 || !looksLikeColourLabel(tail)) return undefined;
+  const words = tail.split(/[\s/,&+]+|\band\b/i).map((w) => w.trim()).filter(Boolean);
+  if (!words.length || words.length > 6) return undefined;
+  let colours = 0;
+  for (const word of words) {
+    if (canonicalColor(word, "field")) colours++;
+    else if (!COLOUR_QUALIFIERS.has(word.toLowerCase())) return undefined;
+  }
+  return colours ? tail : undefined;
+}
+
+/** Why a stored colour label is not one, in the admin's words. */
+export function whyNotAColour(label: string): string {
+  const v = (label ?? "").trim();
+  if (looksLikeSize(v)) return `"${v}" is a size`;
+  if (/\.(?:jpe?g|png|webp|gif|avif|svg|bmp|tiff?|heic)(?:[?#].*)?$/i.test(v) || v.includes("_")) return `"${v}" is a file name`;
+  return `"${v}" is not a colour name`;
+}
+
+/**
+ * A stored colour list with the entries that are not colours taken out, and
+ * what stands in for them — or null when every entry is a colour.
+ *
+ * What remains is kept when anything does. Otherwise the name's colourway
+ * ("Mia Jacket - Beige/White"), then the one base colour the name mentions,
+ * then nothing: an empty colour is visibly unfinished, a size shown as the
+ * colour is not.
+ */
+export function repairColourLabels(name: string, colors: string[]): { bad: string[]; next: string[] } | null {
+  const list = (colors ?? []).map((c) => String(c ?? "").trim()).filter(Boolean);
+  const bad = list.filter((c) => !looksLikeColourLabel(c));
+  if (!bad.length) return null;
+  const kept = list.filter((c) => looksLikeColourLabel(c));
+  if (kept.length) return { bad, next: kept };
+  const fromName = colourFromName(name);
+  if (fromName) return { bad, next: [fromName] };
+  const base = canonicalColor(name ?? "");
+  return { bad, next: base ? [base.charAt(0).toUpperCase() + base.slice(1)] : [] };
 }
 
 /**

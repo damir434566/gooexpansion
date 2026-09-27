@@ -337,8 +337,8 @@ export interface CrawlItemResult {
   mergedBy?: "code" | "name";
   /** What that merge filled in. */
   mergedFields?: string[];
-  /** Set when only the store's link was added, without its photos. */
-  linkOnly?: boolean;
+  /** What a links-only page did to a card, when it was not a merge. */
+  linkNote?: string;
 }
 
 export const DEFAULT_FETCH_SETTINGS: ParserFetchSettings = {

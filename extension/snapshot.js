@@ -298,6 +298,19 @@
     '[class*="grid-product" i]', '[class*="product-tile" i]', '[class*="product-grid" i]', '[class*="products-grid" i]',
   ].join(",");
 
+  /**
+   * The size row. Themes build it from the same swatch component as the colour
+   * row, so "swatch" in a class says nothing about which it is — and the picked
+   * size went out as the picked colour ("XS" on Hoodrich's Mia Jacket). Its own
+   * words say size, or its heading does ("Size", "Size: XS").
+   */
+  const SIZE_WORD = /(?:^|[-_\s])(?:sizes?|размер|розмір|taille|grö(?:ß|ss)e|talla|taglia)(?:$|[-_\s:])/i;
+  function isSizeControl(el, words) {
+    if (words.some((w) => w && SIZE_WORD.test(w))) return true;
+    const heading = (el.innerText || el.textContent || "").trim().slice(0, 40);
+    return /^(?:sizes?|размер|розмір|taille|größe|talla|taglia)\b/i.test(heading);
+  }
+
   /** Elements whose own attributes say they are the colour control. */
   function colorContainers() {
     const out = [];
@@ -316,6 +329,7 @@
         (w) => w && (COLOR_HINT.test(w) || /swatch/i.test(w)) && !NOT_A_COLOR_CONTROL.test(w),
       );
       if (!says) continue;
+      if (isSizeControl(el, words)) continue;
       if (el.getElementsByTagName("*").length > MAX_CONTROL_ELEMENTS) continue;
       try {
         if (el.closest(OTHER_PRODUCTS)) continue;
@@ -343,6 +357,10 @@
     if (/\.(?:jpe?g|png|webp|gif|avif|svg|bmp|tiff?|heic)(?:[?#].*)?$/i.test(value)) return "";
     if (/:\/\/|^\/|^www\./i.test(value)) return "";
     if (value.includes("_") || value.startsWith("#")) return "";
+    // A size is never a colour, whatever control it was read from.
+    if (/^(?:xx?xs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl)(?:\s?[/–—-]\s?(?:xx?xs|xs|s|m|l|xl|xxl|xxxl|[2-6]xl))*$/i.test(value)) return "";
+    if (/^(?:(?:eu|uk|us|fr|it|de|jp)\s?)?\d{1,2}(?:[.,]5)?(?:\s?(?:eu|uk|us|fr|it|de|jp))?$/i.test(value)) return "";
+    if (/^(?:one[\s-]?size|onesize|os|free[\s-]?size)$/i.test(value)) return "";
     if (!/\s/.test(value) && /\d.*\d/.test(value)) return "";
     return value;
   }

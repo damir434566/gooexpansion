@@ -19,8 +19,9 @@
  * jackets, and a wrong merge is worse than two rows: it puts a link on a
  * product that sends a shopper to something else, and it reads as correct
  * while doing it. So the brand must be the same, the piece the same once
- * reduced (`piece-name.ts`), the colour the same, the store a different one,
- * and the two prices within a factor of three of each other.
+ * reduced (`piece-name.ts`), the colour the one card of that piece it fits,
+ * the store a different one, and the two prices within a factor of three of
+ * each other.
  *
  * The merge itself only ever FILLS: a field the existing row has is left alone.
  * Two stores describe the same coat differently, and the row that arrived first
@@ -101,64 +102,114 @@ function hostOf(url: string | null | undefined): string {
   }
 }
 
+/** The answer to "which card is this page?", with the reason when there is none. */
+export interface SameItemMatch {
+  item: NamedItem | null;
+  /** Set when `item` is null: why nothing fitted, in words the admin reads on the run's row. */
+  miss?: string;
+}
+
+/** A card's colour as the admin would name it. */
+const colourOf = (row: NamedItem) => row.colors?.[0] || "no colour";
+
 /**
- * The existing row this page is another store's listing of, by name — or null.
+ * The existing row this page is another store's listing of, by name — or none,
+ * and why.
  *
  * Asked only after the codes found nothing. Among rows of the same brand it
- * takes the one that is the same piece (`samePiece`) in the same colour, sold
- * somewhere else, at a comparable price:
+ * takes the same piece (`samePiece`), sold somewhere else, at a comparable
+ * price, and then decides by colour among that piece's cards:
  *
- *   - the same colour word wins outright; two words for one base colour
- *     ("Core Black" beside "Black") count only when exactly one row qualifies,
- *     since a piece made in navy and in sky blue has two rows that are "blue";
- *   - a colour stated on one side and not the other decides nothing, and is
- *     left to the colour grouping;
- *   - a row already carrying this store is another listing of the store's own,
- *     not a second place to buy — unless it carries this very page, which is a
- *     re-collect updating its price.
+ *   - the same colour word wins outright;
+ *   - the same colours in other words ("Core Black" beside "Black"), and then
+ *     some of the card's colours ("Grey" beside "grey/white/leather": stores
+ *     often name only the main one), count when exactly one card fits — a
+ *     piece made in navy and in sky blue has two cards that are "blue";
+ *   - a colour the page does not state — none at all, or only the photo's
+ *     reading — takes the piece's one card when it has only one;
+ *   - a colour neither of those finds is another colourway, which is left to
+ *     the colour grouping.
+ *
+ * A card already carrying this store is another listing of the store's own, not
+ * a second place to buy — unless it carries this very page, which is a
+ * re-collect updating its price.
+ *
+ * Before the partial and unstated cases counted, a reseller's "Grey" Emerson
+ * matched nothing, became its own card, and the colour grouping then filed it
+ * beside etnies' "grey/white/leather" as a second colour of the same shoe.
  */
 export function pickSameItemByName(
   incoming: {
     brand: string;
     name: string;
     colors: string[];
+    /** False when `colors` are a reading of the photo, not the page's word. */
+    coloursStated?: boolean;
     category?: string | null;
     /** Dollars, like `priceMin` on the rows. */
     price: number;
     sourceUrl: string | null;
   },
   rows: NamedItem[],
-): NamedItem | null {
+): SameItemMatch {
   const ourHost = hostOf(incoming.sourceUrl);
   // Without an address there is no place to buy to add.
-  if (!ourHost || !incoming.brand.trim()) return null;
+  if (!ourHost || !incoming.brand.trim()) return { item: null, miss: "no brand or address to match by" };
 
-  const exact: NamedItem[] = [];
-  const near: NamedItem[] = [];
   const brand = foldBrand(incoming.brand);
+  const pieces: NamedItem[] = [];
   for (const row of rows) {
     if (row.sourceUrl && row.sourceUrl === incoming.sourceUrl) continue;
     // The caller reads one brand's rows, but the decision does not lean on it.
     if (foldBrand(row.brand ?? "") !== brand) continue;
     if (!samePiece(incoming.brand, incoming, row)) continue;
-
-    const relation = colourRelation(incoming.colors, row.colors);
-    if (relation === "different" || relation === "unknown") continue;
-
-    const retailers = row.retailers ?? [];
-    if (retailers.some((r) => r.url && r.url === incoming.sourceUrl)) return row;
-    const hosts = [row.sourceUrl, ...retailers.map((r) => r.url)].map(hostOf);
-    if (hosts.includes(ourHost)) continue;
-
-    const theirs = typeof row.priceMin === "number" ? row.priceMin : 0;
-    if (incoming.price > 0 && theirs > 0) {
-      const ratio = Math.max(incoming.price, theirs) / Math.min(incoming.price, theirs);
-      if (ratio > MAX_PRICE_RATIO) continue;
-    }
-
-    (relation === "near" ? near : exact).push(row);
+    if ((row.retailers ?? []).some((r) => r.url && r.url === incoming.sourceUrl)) return { item: row };
+    pieces.push(row);
   }
-  return exact[0] ?? (near.length === 1 ? near[0] : null);
+  if (!pieces.length) return { item: null, miss: "not in the catalogue" };
+
+  const elsewhere = pieces.filter(
+    (row) => ![row.sourceUrl, ...(row.retailers ?? []).map((r) => r.url)].map(hostOf).includes(ourHost),
+  );
+  if (!elsewhere.length) return { item: null, miss: `this store is already on "${pieces[0].name}"` };
+
+  const priced = elsewhere.filter((row) => {
+    const theirs = typeof row.priceMin === "number" ? row.priceMin : 0;
+    if (!(incoming.price > 0 && theirs > 0)) return true;
+    return Math.max(incoming.price, theirs) / Math.min(incoming.price, theirs) <= MAX_PRICE_RATIO;
+  });
+  if (!priced.length) return { item: null, miss: `price is more than ${MAX_PRICE_RATIO}× away from "${elsewhere[0].name}"` };
+
+  const same: NamedItem[] = [];
+  const near: NamedItem[] = [];
+  const partial: NamedItem[] = [];
+  const unstated: NamedItem[] = [];
+  for (const row of priced) {
+    const relation = colourRelation(incoming.colors, row.colors);
+    if (relation === "same") same.push(row);
+    else if (relation === "near") near.push(row);
+    else if (relation === "partial") partial.push(row);
+    else if (relation === "unknown" || relation === "none") unstated.push(row);
+  }
+  if (same.length) return { item: same[0] };
+  if (near.length === 1) return { item: near[0] };
+  if (!near.length && partial.length === 1) return { item: partial[0] };
+
+  const stated = incoming.coloursStated !== false && incoming.colors.length > 0;
+  // One card of this piece, and nothing stated that makes the page another
+  // colourway: the page's colour unknown or only read off the photo, or the
+  // card's own colour never recorded.
+  if (priced.length === 1 && (!stated || unstated.length === 1)) return { item: priced[0] };
+
+  const fits = near.length ? near : partial;
+  if (fits.length > 1) {
+    return { item: null, miss: `several colourways fit: ${fits.map(colourOf).join(", ")}` };
+  }
+  const colourways = priced.map(colourOf).join(", ");
+  if (!stated) {
+    return { item: null, miss: `the page states no colour, and the catalogue has ${priced.length} colourways: ${colourways}` };
+  }
+  return { item: null, miss: `in the catalogue only in ${colourways}` };
 }
 
 /**
@@ -192,9 +243,15 @@ export interface MergeResult {
  *
  * The price range widens to include the new store's price: a product sold at two
  * prices has both, and the lower one is what a shopper is shown. Everything else
- * is filled only where the existing row is empty.
+ * is filled only where the existing row is empty — unless `linksOnly`, when the
+ * store and its price are all the page adds: the admin collecting a second
+ * store for its links has said the card is finished.
  */
-export function mergePatch(row: ExistingItem, incoming: IncomingItem): MergeResult {
+export function mergePatch(
+  row: ExistingItem,
+  incoming: IncomingItem,
+  opts: { linksOnly?: boolean } = {},
+): MergeResult {
   const patch: Record<string, unknown> = {};
   const filled: string[] = [];
 
@@ -214,6 +271,7 @@ export function mergePatch(row: ExistingItem, incoming: IncomingItem): MergeResu
     }
     if (nextMax !== currentMax) patch.price_max = nextMax;
   }
+  if (opts.linksOnly) return { patch, filled };
 
   const fillText = (column: string, current: unknown, value: string | undefined) => {
     if (!value) return;

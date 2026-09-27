@@ -19,9 +19,11 @@
  *   4. nothing.
  *
  * Before any of that, strings that are never a colour are dropped: the product
- * name and brand, badges and prices, Shopify's "Default Title".
+ * name and brand, badges and prices, Shopify's "Default Title", and sizes —
+ * the picked size of a size row built from swatches reads exactly like a
+ * picked colour.
  */
-import { canonicalColor, looksLikeColourLabel } from "@/lib/server/product-fields";
+import { canonicalColor, looksLikeColourLabel, looksLikeSize } from "@/lib/server/product-fields";
 import { MULTICOLOUR_WORDS } from "@/lib/taxonomy/colours";
 
 /**
@@ -89,14 +91,35 @@ export function isNotAColour(value: string, context: { name?: string; brand?: st
   return false;
 }
 
+/**
+ * A variant title's colour part: "Beige/White / XS" is "Beige/White". Only a
+ * spaced slash separates options — "Beige/White" itself is one colourway.
+ */
+function withoutSizes(value: string): string {
+  const parts = value.split(/\s+\/\s+/);
+  return parts.length > 1 ? parts.filter((p) => !looksLikeSize(p)).join(" / ") : value;
+}
+
 /** The colour the candidates agree the page is showing, with where it came from. */
 export function chooseColour(
   candidates: (ColourCandidate | undefined)[],
-  context: { name?: string; brand?: string },
+  context: {
+    name?: string;
+    brand?: string;
+    /**
+     * The sizes the page offers. A picked size sits in a swatch as a picked
+     * colour does, and a store's sizes are not always ones `looksLikeSize`
+     * knows ("Size 2", "T1") — so a candidate that is one of them is dropped.
+     */
+    sizes?: string[];
+  },
 ): ColourCandidate | undefined {
+  const sizeKey = (s: string) => s.toLowerCase().replace(/\s+/g, "");
+  const sizes = new Set((context.sizes ?? []).map(sizeKey));
   const usable = candidates
     .filter((c): c is ColourCandidate => !!c && typeof c.value === "string")
-    .map((c) => ({ ...c, value: c.value.trim().replace(/\s+/g, " ") }))
+    .map((c) => ({ ...c, value: withoutSizes(c.value.trim().replace(/\s+/g, " ")) }))
+    .filter((c) => !sizes.has(sizeKey(c.value)))
     .filter((c) => looksLikeColourLabel(c.value) && !isNotAColour(c.value, context));
 
   return (

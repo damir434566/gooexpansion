@@ -32,6 +32,8 @@ const routes = {
   "/products/jordan-leather-jkt.json": ["application/json", page("jordan-leather-jkt.json")],
   "/meta.json": ["application/json", page("meta.json")],
   "/products/stack-jacket-black-white": ["text/html; charset=utf-8", page("stack.html")],
+  "/products/mia-jacket-a": ["text/html; charset=utf-8", page("size-swatch-a.html")],
+  "/products/mia-jacket-b": ["text/html; charset=utf-8", page("size-swatch-b.html")],
 };
 const server = createServer((req, res) => {
   const hit = routes[req.url.split("?")[0]];
@@ -101,6 +103,25 @@ const cases = [
     check: (r) => [["shopify", r.shopify, null]],
   },
 ];
+
+cases.push(
+  {
+    name: "Размеры-свотчи с подписью «Size: XS» — не цвет",
+    path: "/products/mia-jacket-a",
+    check: (r) => [
+      ["colorText", r.colorText, ""],
+      ["размер среди надёжных кандидатов", (r.colorCandidates || []).filter((c) => ["data", "swatch", "label", "line"].includes(c.origin) && /^(?:xs|s|m|l|xl)$/i.test(c.value)).map((c) => c.value), []],
+    ],
+  },
+  {
+    name: "Классический сниппет swatch для размера — не цвет",
+    path: "/products/mia-jacket-b",
+    check: (r) => [
+      ["colorText", r.colorText, ""],
+      ["размер среди надёжных кандидатов", (r.colorCandidates || []).filter((c) => ["data", "swatch", "label", "line"].includes(c.origin) && /^(?:xs|s|m|l|xl)$/i.test(c.value)).map((c) => c.value), []],
+    ],
+  },
+);
 
 const browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
 let failed = 0;

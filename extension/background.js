@@ -134,17 +134,97 @@ async function studioTab() {
 const NO_TAB =
   "The collect tab is not reachable. Open Goo Studio → Parser → Collect, reload that tab, and try again.";
 
+const SIGNED_OUT =
+  "The collect tab left the collect page — usually a sign-in redirect. Sign in to Goo Studio as an admin, open Parser → Collect, and try again.";
+
+/** Where the collect screen lives; the bridge is only injected there. */
+const COLLECT_URLS = [
+  "http://localhost/goo-studio/parser/collect*",
+  "http://127.0.0.1/goo-studio/parser/collect*",
+  "https://goo-fashion.com/goo-studio/parser/collect*",
+  "https://www.goo-fashion.com/goo-studio/parser/collect*",
+];
+
+/** Does this tab have a live bridge in it? */
+async function answers(tabId) {
+  try {
+    const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type: "ping" });
+    return !!res?.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find a collect tab that can be talked to, mending one that cannot.
+ *
+ * The worker only learns the collect tab when a bridge announces itself, and
+ * that link breaks quietly: the tab reloads, a sign-in redirect carries it off
+ * the collect page, or the extension is updated — which leaves every open tab
+ * with a bridge that belongs to the old copy and can no longer reach us. Each
+ * of those used to end a run with "not reachable" while the tab sat right
+ * there. So the known tab is tried, then every collect tab, and one whose
+ * bridge is dead gets a fresh one.
+ */
+async function reconnect() {
+  const known = await studioTab();
+  if (known != null && (await answers(known))) return known;
+
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: COLLECT_URLS });
+  } catch {
+    tabs = [];
+  }
+  if (known != null && !tabs.some((t) => t.id === known)) {
+    // The tab we knew is no longer on the collect page: most often Clerk sent
+    // it to sign in. Said as such, because reloading will not help.
+    try {
+      const tab = await chrome.tabs.get(known);
+      if (tab && !tabs.length) {
+        await rememberStudioTab(null);
+        return { error: SIGNED_OUT };
+      }
+    } catch {
+      /* closed */
+    }
+  }
+
+  for (const tab of tabs) {
+    if (await answers(tab.id)) {
+      await rememberStudioTab(tab.id);
+      return tab.id;
+    }
+  }
+  for (const tab of tabs) {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["bridge.js"] });
+    } catch {
+      continue;
+    }
+    if (await answers(tab.id)) {
+      await rememberStudioTab(tab.id);
+      return tab.id;
+    }
+  }
+  await rememberStudioTab(null);
+  return { error: NO_TAB };
+}
+
 /** Ask the collect tab to call the API, and wait for what it got back. */
 async function askPage(type, payload) {
-  const tabId = await studioTab();
-  if (tabId == null) return { ok: false, error: NO_TAB };
-  try {
-    const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
-    return res ?? { ok: false, error: "The collect tab did not answer" };
-  } catch {
-    await rememberStudioTab(null);
-    return { ok: false, error: NO_TAB };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const tabId = attempt === 0 ? await studioTab() : await reconnect();
+    if (tabId != null && typeof tabId === "object") return { ok: false, error: tabId.error };
+    if (tabId == null) continue;
+    try {
+      const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
+      return res ?? { ok: false, error: "The collect tab did not answer" };
+    } catch {
+      /* dead bridge or gone tab: reconnect and try once more */
+    }
   }
+  return { ok: false, error: NO_TAB };
 }
 
 /** Tell the collect tab something. Failures here never stop a run. */
@@ -329,7 +409,7 @@ function finish() {
   void tellPage("done", {});
 }
 
-async function run({ storeUrl, limit, linkOnly = false }) {
+async function run({ storeUrl, limit }) {
   let origin;
   try {
     origin = new URL(storeUrl).origin;
@@ -441,11 +521,7 @@ async function run({ storeUrl, limit, linkOnly = false }) {
       const ingested = await askPage("ingest", {
         url,
         html: snap.html,
-        // A link-only store's photos are what is wrong with it: they are not
-        // sent, and the server adds only this page's link to a piece the
-        // catalogue already has.
-        images: linkOnly ? [] : snap.images,
-        linkOnly,
+        images: snap.images,
         priceText: snap.priceText,
         sizes: snap.sizes,
         colorText: snap.colorText,
@@ -519,6 +595,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse(publicState());
       return undefined;
 
+    case "connect":
+      // The popup asks before starting, so a broken link is mended — or named —
+      // while the admin is still looking, not a minute into the run.
+      reconnect().then((res) =>
+        sendResponse(typeof res === "number" ? { ok: true } : { ok: false, error: res?.error ?? NO_TAB }),
+      );
+      return true;
+
     case "stop":
       stop();
       sendResponse({ ok: true });
@@ -531,7 +615,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       const storeUrl = msg.payload?.storeUrl;
       const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, 2_000));
-      run({ storeUrl, limit, linkOnly: msg.payload?.linkOnly === true }).catch((err) => {
+      run({ storeUrl, limit }).catch((err) => {
         halt(err?.message ?? "The run failed unexpectedly.");
       });
       sendResponse({ ok: true });

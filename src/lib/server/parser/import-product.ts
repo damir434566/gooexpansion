@@ -369,11 +369,13 @@ async function findSameItemByName(incoming: {
   brand: string;
   name: string;
   colors: string[];
+  coloursStated: boolean;
   category: string;
   price: number;
   sourceUrl: string | null;
-}): Promise<{ item: NamedItem; unread: string[] } | null> {
-  if (!incoming.brand || !incoming.sourceUrl) return null;
+}): Promise<{ item: NamedItem | null; unread: string[]; miss?: string }> {
+  if (!incoming.brand) return { item: null, unread: [], miss: "no brand to match by" };
+  if (!incoming.sourceUrl) return { item: null, unread: [], miss: "no address to add as a store" };
   try {
     for (const columns of NAME_MATCH_COLUMNS) {
       const { data, error } = await supabase!
@@ -386,15 +388,14 @@ async function findSameItemByName(incoming: {
         name: string | null;
         category: string | null;
       })[]).map((row) => ({ ...toExisting(row), name: row.name ?? "", category: row.category }));
-      const item = pickSameItemByName(incoming, rows);
-      if (!item) return null;
+      const match = pickSameItemByName(incoming, rows);
       const read = columns.split(",").map((c) => c.trim());
-      return { item, unread: FILL_ONLY_COLUMNS.filter((c) => !read.includes(c)) };
+      return { item: match.item, miss: match.miss, unread: FILL_ONLY_COLUMNS.filter((c) => !read.includes(c)) };
     }
   } catch {
     /* no connection — an ordinary insert, as before */
   }
-  return null;
+  return { item: null, unread: [], miss: "the catalogue could not be read" };
 }
 
 /**
@@ -439,25 +440,13 @@ export interface ImportOptions {
   /** Download photos into Supabase Storage and store our URLs instead. */
   mirrorImages?: boolean;
   /**
-   * The store's photos are missing or not the product's, so this page may only
-   * add its link to a piece the catalogue already has — never a card of its own.
-   *
-   * A card is a photo first; a card built from a store that shows none, or shows
-   * a banner and a size chart where the product should be, is worse than no
-   * card. But the price and the address are still worth having: they become one
-   * more "where to buy" line on the product we already show.
+   * The page only adds a place to buy. A piece the catalogue already has gains
+   * this store's link and price and nothing else; a piece it does not have is
+   * skipped rather than created. For collecting a second store's links onto
+   * cards made from the first.
    */
-  linkOnly?: boolean;
+  linksOnly?: boolean;
 }
-
-/** What a link-only page came to. */
-export type LinkOnlyOutcome =
-  /** Its store link was added to the product the catalogue already had. */
-  | "linked"
-  /** The catalogue has no such piece yet, so nothing was written. */
-  | "no-match"
-  /** This very page is already in the catalogue as its own card; left as it is. */
-  | "own-row";
 
 export interface ImportResult {
   ok: boolean;
@@ -488,8 +477,10 @@ export interface ImportResult {
   mergedBy?: "code" | "name";
   /** What the merge filled in on that product. */
   mergedFields?: string[];
-  /** Set on a link-only import: what it did instead of creating a card. */
-  linkOnly?: LinkOnlyOutcome;
+  /** Set when nothing was written, and why: a links-only page with no card to join. */
+  skipped?: string;
+  /** What a links-only page did to a card, when it was not a merge. */
+  linkNote?: string;
 }
 
 export async function importParsedProduct(
@@ -576,18 +567,15 @@ export async function importParsedProduct(
     priceNote = "the page never stated a currency — price taken as dollars";
   }
 
-  // A link-only page's photos are the very thing it cannot be trusted with, so
-  // none of them are kept, mirrored or merged into another product's gallery.
-  let images = opts.linkOnly
-    ? []
-    : (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
-  let imageUrl = opts.linkOnly ? "" : httpUrl(p.imageUrl) || images[0] || "";
+  let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
+  let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
 
   // Mirror photos to our storage before writing the row, so the catalog only
   // ever references URLs we control. A failed download keeps its original URL.
+  // A links-only page writes no photo anywhere, so it copies none.
   let imagesMirrored: number | undefined;
   let imagesFailed: number | undefined;
-  if (opts.mirrorImages && (imageUrl || images.length)) {
+  if (opts.mirrorImages && !opts.linksOnly && (imageUrl || images.length)) {
     const mirror = await mirrorProductImages({ imageUrl, images });
     if (mirror.attempted) {
       imageUrl = mirror.imageUrl;
@@ -604,7 +592,11 @@ export async function importParsedProduct(
     .map((c: unknown) => String(c).trim())
     .filter((c: string) => looksLikeColourLabel(c))
     .slice(0, 10);
-  const sizes = (Array.isArray(p.sizes) ? p.sizes : [])
+  // What the page itself said, kept apart from the photo's reading below: the
+  // same-item test trusts a stated colour to rule a card out, and a reading
+  // only to choose among cards.
+  const coloursStated = colors.length > 0;
+  const sizes =(Array.isArray(p.sizes) ? p.sizes : [])
     .map((s: unknown) => String(s).trim())
     .filter(Boolean)
     .slice(0, 40);
@@ -700,10 +692,12 @@ export async function importParsedProduct(
     }
   }
   const styleProposal = proposeStyles(
-    { brand, keywordStyles: normalizeStyleKeywords(p.styleKeywords), colors, colorGroups: groupNames },
+    { brand, keywordStyles: normalizeStyleKeywords(p.styleKeywords), colors, colorGroups: groupNames, sourceUrl },
     profile,
   );
-  let styleNote = styleProposal.styles.length ? `style ${styleProposal.reasons.join("; ")}` : undefined;
+  let styleNote = styleProposal.styles.length
+    ? `style ${styleProposal.reasons.join("; ")}`
+    : styleProposal.missing;
 
   const product: Partial<Product> = {
     name,
@@ -786,11 +780,29 @@ export async function importParsedProduct(
       existingGendered = !!found?.gender;
     }
 
-    if (existingId && opts.linkOnly) {
-      // This page already has its own card, made when its photos were still
-      // trusted. Rewriting it from a page whose photos are not would empty its
-      // gallery; it keeps its link either way, so it is left alone.
-      return { ok: true, productId: existingId, updated: false, priceNote, linkOnly: "own-row" };
+    if (existingId && opts.linksOnly) {
+      // This page made its own card on an earlier run. A links-only run adds
+      // stores and changes nothing else, so only this store's entry — its
+      // price — is refreshed. Were the card a copy of another store's, the
+      // Duplicates screen is where the two become one.
+      const id = existingId;
+      const patch: Record<string, unknown> = retailers[0]
+        ? { retailers: withRetailer(existingRetailers, retailers[0]) }
+        : {};
+      if (Object.keys(patch).length) {
+        const { error } = await writeProductRow<{ id: string }>(patch, (r) =>
+          supabase!.from("products").update(r).eq("id", id).select("id").maybeSingle(),
+        );
+        if (error) throw new Error(error.message);
+      }
+      return {
+        ok: true,
+        productId: id,
+        updated: true,
+        priceNote,
+        brandNote,
+        linkNote: "this page's own card from an earlier run: only its price here was refreshed",
+      };
     }
 
     if (existingId) {
@@ -845,16 +857,19 @@ export async function importParsedProduct(
       let twin: ExistingItem | null = await findSameItem(incoming, sourceUrl);
       let mergedBy: ImportResult["mergedBy"] = twin ? "code" : undefined;
       let unread: string[] = [];
+      let miss: string | undefined;
       if (!twin) {
         const byName = await findSameItemByName({
           brand,
           name,
           colors,
+          coloursStated,
           category,
           price: incoming.price,
           sourceUrl,
         });
-        if (byName) {
+        miss = byName.miss;
+        if (byName.item) {
           twin = byName.item;
           unread = byName.unread;
           mergedBy = "name";
@@ -863,20 +878,10 @@ export async function importParsedProduct(
 
       if (twin) {
         const twinId = twin.id;
-        const merged = mergePatch(twin, incoming);
+        const merged = mergePatch(twin, incoming, { linksOnly: opts.linksOnly });
         const patch = merged.patch;
         for (const column of unread) delete patch[column];
-        // Link-only: the store's link and its price, nothing else. Its
-        // description and sizes are read off the same page as the photos we
-        // just refused, and the product already has its own.
-        if (opts.linkOnly) {
-          for (const column of Object.keys(patch)) {
-            if (!["retailers", "price_min", "price_max"].includes(column)) delete patch[column];
-          }
-        }
-        const filled = merged.filled.filter(
-          (f) => !unread.includes(f) && (!opts.linkOnly || f === "retailer" || f === "price"),
-        );
+        const filled = merged.filled.filter((f) => !unread.includes(f));
         // Merged prices are dollars on both sides, so the comparable scale is
         // the same number.
         if (patch.price_min !== undefined) patch.price_min_usd = patch.price_min;
@@ -885,6 +890,8 @@ export async function importParsedProduct(
           supabase!.from("products").update(row).eq("id", twinId).select("id").maybeSingle(),
         );
         if (error) throw new Error(error.message);
+        // Gender and style are not in the merge — the card keeps its own — so
+        // they are not reported, and neither is a colour the card did not take.
         return {
           ok: true,
           productId: twinId,
@@ -894,21 +901,21 @@ export async function importParsedProduct(
           images: images.length,
           priceNote,
           brandNote,
-          colorNote,
-          genderNote,
-          styleNote,
           mergedInto: twinId,
           mergedBy,
           mergedFields: filled,
-          ...(opts.linkOnly ? { linkOnly: "linked" as const } : {}),
         };
       }
 
-      // Link-only and nothing to attach to: no card. The piece gets one when a
-      // store that shows it properly is collected; this store's link joins it
-      // then, on a later run.
-      if (opts.linkOnly) {
-        return { ok: true, productId: null, updated: false, priceNote, linkOnly: "no-match" };
+      if (opts.linksOnly) {
+        return {
+          ok: true,
+          productId: null,
+          updated: false,
+          priceNote,
+          brandNote,
+          skipped: `links only: ${miss ?? "not in the catalogue"}`,
+        };
       }
 
       const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);

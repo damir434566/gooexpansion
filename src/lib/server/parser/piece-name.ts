@@ -232,15 +232,35 @@ const LINE_WORDS = new Set([
  *   same       the same colour word ("Black" / "black")
  *   near       different words, the same colours ("Core Black" / "Black",
  *              "grey/white/leather" / "White/Grey")
+ *   partial    one side names some of the other's colours and nothing else
+ *              ("Grey" / "grey/white/leather") — a store naming only the main
+ *              colour, or another colourway; which of the two, only the other
+ *              rows of the piece can tell
  *   different  different colours
  *   unknown    one side states no colour
  *   none       neither side states one
  */
-export type ColourRelation = "same" | "near" | "different" | "unknown" | "none";
+export type ColourRelation = "same" | "near" | "partial" | "different" | "unknown" | "none";
+
+/**
+ * A colour label for comparison: lower case, Latin accents off ("Crème" is
+ * "creme"), Cyrillic whole. `foldBrand` strips every mark, and "й" is "и" with
+ * one — so "Сірий" became "сірии", which no colour dictionary knows, and a
+ * Ukrainian store's grey never met etnies' "grey/white/leather".
+ */
+function foldColour(value: string): string {
+  return (value ?? "")
+    .normalize("NFD")
+    .replace(/([a-z])\p{M}+/giu, "$1")
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 export function colourRelation(a?: string[] | null, b?: string[] | null): ColourRelation {
-  const x = foldBrand(a?.[0] ?? "");
-  const y = foldBrand(b?.[0] ?? "");
+  const x = foldColour(a?.[0] ?? "");
+  const y = foldColour(b?.[0] ?? "");
   if (!x && !y) return "none";
   if (!x || !y) return "unknown";
   if (x === y) return "same";
@@ -252,7 +272,9 @@ export function colourRelation(a?: string[] | null, b?: string[] | null): Colour
   const sx = new Set(colorWordsIn(x, "text"));
   const sy = new Set(colorWordsIn(y, "text"));
   if (sx.size && sy.size) {
-    return sx.size === sy.size && [...sx].every((c) => sy.has(c)) ? "near" : "different";
+    const [small, large] = sx.size <= sy.size ? [sx, sy] : [sy, sx];
+    if (![...small].every((c) => large.has(c))) return "different";
+    return small.size === large.size ? "near" : "partial";
   }
   const cx = canonicalColor(x, "field");
   const cy = canonicalColor(y, "field");

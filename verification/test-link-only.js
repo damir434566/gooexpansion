@@ -1,6 +1,7 @@
 /**
- * A store whose photos are missing or wrong: its pages add their link to a
- * piece the catalogue already has, and never make a card of their own.
+ * Links only (goo-fashion #881, the "Links only" mode on the collect screen, and
+ * every page with no photo at all): a page adds its store's link to a piece the
+ * catalogue already has, and never makes a card of its own.
  *
  * Runs the real `importParsedProduct` against a fake Supabase that answers from
  * a small in-memory catalogue and records every write, so what the importer
@@ -68,9 +69,9 @@ const STOCK_PAGE = {
   console.log("— a piece the catalogue already has: only the link is added —");
   {
     db.reset([EXISTING]);
-    const r = await importParsedProduct(STOCK_PAGE, "https://stock-x.example/p/samba-og", { linkOnly: true });
+    const r = await importParsedProduct(STOCK_PAGE, "https://stock-x.example/p/samba-og", { linksOnly: true });
     check("ok", r.ok, true);
-    check("outcome", r.linkOnly, "linked");
+    check("not skipped", r.skipped, undefined);
     check("into the existing product", r.mergedInto, "p1");
     check("no row inserted", db.inserts().length, 0);
     const updates = db.updates();
@@ -90,21 +91,24 @@ const STOCK_PAGE = {
     const r = await importParsedProduct(
       { ...STOCK_PAGE, name: "Gazelle Indoor Shoes" },
       "https://stock-x.example/p/gazelle",
-      { linkOnly: true },
+      { linksOnly: true },
     );
     check("ok", r.ok, true);
-    check("outcome", r.linkOnly, "no-match");
+    ok("skipped, saying why", typeof r.skipped === "string" && r.skipped.startsWith("links only"), String(r.skipped));
     check("no product id", r.productId, null);
     check("no insert", db.inserts().length, 0);
     check("no update", db.updates().length, 0);
   }
 
-  console.log("— the page already has its own card: left alone —");
+  console.log("— the page already has its own card: only its store entry is refreshed —");
   {
     db.reset([{ ...EXISTING, id: "p2", source_url: "https://stock-x.example/p/samba-og" }]);
-    const r = await importParsedProduct(STOCK_PAGE, "https://stock-x.example/p/samba-og", { linkOnly: true });
-    check("outcome", r.linkOnly, "own-row");
-    check("no write", db.inserts().length + db.updates().length, 0);
+    const r = await importParsedProduct(STOCK_PAGE, "https://stock-x.example/p/samba-og", { linksOnly: true });
+    ok("says what it did", typeof r.linkNote === "string" && r.linkNote.length > 0, String(r.linkNote));
+    check("no insert", db.inserts().length, 0);
+    const own = db.updates();
+    check("one update", own.length, 1);
+    check("of this store's entry alone", Object.keys(own[0]?.row ?? {}), ["retailers"]);
   }
 
   console.log("— without link-only, the same page still makes a card —");
@@ -116,7 +120,7 @@ const STOCK_PAGE = {
       {},
     );
     check("ok", r.ok, true);
-    check("not link-only", r.linkOnly, undefined);
+    check("not skipped", r.skipped, undefined);
     check("one insert", db.inserts().length, 1);
     ok("with its photos", (db.inserts()[0]?.row.images ?? []).length === 2);
   }
