@@ -42,6 +42,8 @@ const FILLER = new Set([
   "колір", "кольору", "цвет", "цвета", "унісекс", "унисекс",
   "чоловічі", "чоловічий", "чоловіча", "чоловіче", "жіночі", "жіночий", "жіноча", "жіноче",
   "мужские", "мужской", "мужская", "мужское", "женские", "женский", "женская", "женское",
+  // A store's sales copy in its titles: "NEW", "Sale", "Exclusive".
+  "new", "sale", "exclusive", "authentic", "новинка", "новинки", "розпродаж", "распродажа",
 ]);
 
 /**
@@ -73,10 +75,65 @@ function phrase(folded: string): RegExp {
 }
 
 export interface PieceName {
-  /** The name with brand, colour and filler removed. */
+  /** The name with brand, colour, filler and article codes removed. */
   full: string;
   /** `full` without garment-type words. Only trusted when `strongCore` says so. */
   core: string;
+  /** Article codes the name carried ("cw2288111"), letters and digits only. */
+  codes: string[];
+}
+
+/**
+ * An article code inside a name: letters then three or more digits, with the
+ * colour part a maker hangs off it — Nike's "CW2288-111", adidas's "GW2871",
+ * New Balance's "U9060EEB" — or a bare number of six digits and more. A store
+ * that prints the code in its title ("Кросівки Nike Air Force 1 '07
+ * CW2288-111") named a piece the brand's own site calls "Air Force 1 '07",
+ * and the extra "cw2288 111" kept the two apart. A model named by digits first
+ * ("2002R", "990v6") is not a code.
+ */
+const ARTICLE_CODE =
+  /(?<![\p{L}\p{N}])(?:[a-z]{1,4}\d{3,}[a-z0-9]*(?:[-‐–/][a-z0-9]{2,4}|\s\d{3}(?![\p{L}\p{N}]))?|\d{6,}(?:[-/]\d{1,4})?)(?![\p{L}\p{N}])/gu;
+
+/** A season, not an article: "SS26", "FW2026". */
+const SEASON_CODE = /^(?:ss|fw|aw|sp|fa|su|ho|pf|re)\d{2,4}$/;
+
+/**
+ * What an `ARTICLE_CODE` match is: an article code, a season (dropped, never
+ * compared), or a model's name — the short ones are models as often as codes,
+ * "ZX750", "P6000", and stay in the name.
+ */
+function codeKind(match: string): "code" | "season" | "name" {
+  const compact = match.replace(/[^\p{L}\p{N}]+/gu, "");
+  if (SEASON_CODE.test(compact)) return "season";
+  const digits = compact.replace(/\D/g, "").length;
+  return compact !== match || digits >= 4 || compact.length >= 7 ? "code" : "name";
+}
+
+/**
+ * The article codes in a text as database patterns: "CW2288-111" is
+ * `cw2288%111`, so a card that stored "CW2288 111" is found by it.
+ */
+export function articleCodePatterns(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of foldBrand(text ?? "").matchAll(ARTICLE_CODE)) {
+    if (codeKind(m[0]) === "code") out.add(m[0].replace(/[^\p{L}\p{N}]+/gu, "%"));
+  }
+  return [...out];
+}
+
+/** A colour label's parts as a name repeats them: "Cloud White / Core Black / Gum" → three. */
+function colourPhrases(colors: string[]): string[] {
+  const out = new Set<string>();
+  for (const label of colors) {
+    const folded = foldBrand(label ?? "");
+    if (folded.length >= 3) out.add(folded);
+    for (const part of folded.split(/\s*[/,&+|()[\]]+\s*|\s+(?:and|і|и)\s+/u)) {
+      const p = part.trim();
+      if (p.length >= 3) out.add(p);
+    }
+  }
+  return [...out].sort((a, b) => b.length - a.length);
 }
 
 /**
@@ -103,10 +160,14 @@ export function pieceName(name: string, brand: string | string[], colors: string
     (p, q) => q.length - p.length,
   );
   for (const b of spellings) text = text.replace(phrase(b), " ");
-  for (const color of colors) {
-    const c = foldBrand(color ?? "");
-    if (c.length >= 3) text = text.replace(phrase(c), " ");
-  }
+  for (const c of colourPhrases(colors)) text = text.replace(phrase(c), " ");
+
+  const codes: string[] = [];
+  text = text.replace(ARTICLE_CODE, (code) => {
+    const kind = codeKind(code);
+    if (kind === "code") codes.push(code.replace(/[^\p{L}\p{N}]+/gu, ""));
+    return kind === "name" ? code : " ";
+  });
 
   let tokens = text
     .split(/[^\p{L}\p{N}]+/u)
@@ -129,7 +190,29 @@ export function pieceName(name: string, brand: string | string[], colors: string
   return {
     full: tokens.join(" "),
     core: tokens.filter((t) => !TYPE_WORDS.has(t)).join(" "),
+    codes,
   };
+}
+
+/**
+ * The article codes a row carries: in its name, and the maker's part number.
+ * Never the store's SKU — two retailers use one SKU string for two things.
+ */
+export function articleCodes(row: { name: string; mpn?: string | null }): string[] {
+  const out = new Set(pieceName(row.name, "").codes);
+  const mpn = (row.mpn ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  if (mpn.length >= 5) out.add(mpn);
+  return [...out];
+}
+
+/**
+ * Do two rows carry the same article code? Letters and digits both, five
+ * characters or more — a number alone is too often a store's own shelf number.
+ * The same code is the same piece; its colour is still asked of the colours.
+ */
+export function shareArticleCode(a: string[], b: string[]): boolean {
+  const theirs = new Set(b);
+  return a.some((c) => theirs.has(c) && c.length >= 5 && /\p{L}/u.test(c) && /\d/.test(c));
 }
 
 /**
@@ -195,6 +278,19 @@ function differentGarments(a: PieceRow, b: PieceRow): boolean {
   return !categoriesAgree(a.category, b.category) && garmentTypesConflict(a.name, b.name);
 }
 
+/** Enough of a model's own words, without its brand, to name one maker's piece. */
+function distinctive(p: PieceName): boolean {
+  const words = p.full
+    .split(" ")
+    .filter((t) => t && !TYPE_WORDS.has(t) && !NOT_A_MODEL.has(t) && !/^(?:19|20)\d\d$/.test(t));
+  return words.length >= 2;
+}
+
+/** A model number of three digits or more in a reduced name — not a year. */
+function numberedModel(full: string): boolean {
+  return full.split(" ").some((t) => /\d{3}/.test(t) && !/^(?:19|20)\d\d$/.test(t));
+}
+
 export interface PieceRow {
   name: string;
   colors?: string[] | null;
@@ -245,15 +341,34 @@ function sameModelLonger(x: PieceName, y: PieceName): boolean {
  * Are two rows one piece? `brand` is every spelling of the maker the two rows
  * use — "Carhartt WIP" and "Carhartt" — so each name loses all of them.
  */
-export function samePiece(brand: string | string[], a: PieceRow, b: PieceRow): boolean {
+export function samePiece(
+  brand: string | string[],
+  a: PieceRow,
+  b: PieceRow,
+  opts: { strict?: boolean } = {},
+): boolean {
   const brands = Array.isArray(brand) ? brand : [brand];
   if (!brands.some((v) => foldBrand(v ?? ""))) return false;
   if (differentGarments(a, b)) return false;
-  const x = pieceName(a.name, brands, a.colors ?? []);
-  const y = pieceName(b.name, brands, b.colors ?? []);
+  // Both rows' colours come out of both names: one store's title carries its
+  // colourway ("Samba OG 'Cloud White Core Black'", "Detroit Jacket Black
+  // Rinsed") and the other's colour label is the only place that says so.
+  const colours = [...(a.colors ?? []), ...(b.colors ?? [])];
+  const x = pieceName(a.name, brands, colours);
+  const y = pieceName(b.name, brands, colours);
+  if (shareArticleCode(x.codes, y.codes)) return true;
+  // Strict is for a row that names no brand at all: only a name that is a
+  // model on its own stands in for the brand — two words that are neither a
+  // garment nor what every brand calls its pieces. "Air Max 90" and "Bullet
+  // Hole Jeans" are; "Classic Logo Tee" and "Detroit Jacket" could be anyone's.
+  if (opts.strict && !(distinctive(x) && distinctive(y))) return false;
   if (x.full.length >= MIN_PIECE_NAME && x.full === y.full) return true;
+  // A maker that names its models by number — New Balance's "9060", "550" —
+  // leaves a name too short for the test above, and the number is the model.
+  if (!opts.strict && x.full && x.full === y.full && numberedModel(x.full)) return true;
   if (strongCore(x.core) && x.core === y.core) return true;
   if (sameModelLonger(x, y)) return true;
+  if (opts.strict) return false;
   return singleWordModel(x, y, a, b);
 }
 

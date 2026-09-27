@@ -1,8 +1,8 @@
 /**
  * A stand-in for `@/lib/supabase` for the importer tests.
  *
- * Answers `products` reads from an in-memory list (eq, ilike on brand, in on
- * source_url) and every other table with nothing, and records inserts and
+ * Answers `products` reads from an in-memory list (eq, ilike, in, and the
+ * jsonb `cs` filter on retailers) and every other table with nothing, and records inserts and
  * updates instead of performing them — the importer's writes are the result.
  */
 let rows = [];
@@ -28,6 +28,12 @@ function builder(table) {
           return new RegExp(`^${pattern}$`, "is").test(String(r[col] ?? ""));
         }
         if (kind === "in") return val.includes(r[col]);
+        if (kind === "cs") {
+          // jsonb containment of an array of objects: each wanted object is
+          // a subset of some element of the row's array.
+          const have = Array.isArray(r[col]) ? r[col] : [];
+          return JSON.parse(val).every((want) => have.some((h) => h && Object.entries(want).every(([k, v]) => h[k] === v)));
+        }
         return true;
       }),
     );
@@ -45,6 +51,7 @@ function builder(table) {
           else if (prop === "eq") q.filters.push(["eq", args[0], args[1]]);
           else if (prop === "ilike") q.filters.push(["ilike", args[0], args[1]]);
           else if (prop === "in") q.filters.push(["in", args[0], args[1]]);
+          else if (prop === "filter") q.filters.push([args[1], args[0], args[2]]);
           else if (prop === "maybeSingle" || prop === "single") q.single = true;
           else if (prop === "limit") q.limit = args[0];
           return b;
