@@ -29,6 +29,9 @@
  * gallery to lose in that case, only one to find.
  */
 
+import { colorWordsIn } from "@/lib/server/product-fields";
+import { matchGarment } from "@/lib/taxonomy/garments";
+
 /**
  * Query parameters that only ask for a smaller rendition. Beyond the plain
  * `width`/`height` pair, the presets the big image CDNs ship with: Scene7
@@ -74,6 +77,15 @@ const NO_EXTENSION = /\/[^/.]+\/?$/;
  */
 const NOISE = /(?:sprite|placeholder|transparent|blank|pixel|spacer|logo|favicon|icon[-_.]|badge|payment|visa|mastercard|paypal|klarna|afterpay|social|instagram|facebook|tiktok|banner|nav[-_.]|menu|header|footer|newsletter|review|rating|star|flag|loader|spinner|swatch|材质)/i;
 
+/**
+ * WordPress (WooCommerce) writes each upload again at every registered size:
+ * `coat.jpg`, `coat-300x300.jpg`, `coat-768x1024.jpg`, and `coat-scaled.jpg`
+ * for a large original. Only read under `/wp-content/uploads/`, where the
+ * shape is WordPress's own — elsewhere `poster-1x1.jpg` may be a real name.
+ */
+const WP_UPLOADS = /\/wp-content\/uploads\//i;
+const WP_SIZE = /-(?:\d{2,5}x\d{2,5}|scaled)(?=\.[a-z0-9]+$)/i;
+
 /** Resolve, upgrade to full resolution, and drop tracking/size noise. */
 export function upgradeImageUrl(src: string, baseUrl: string): string | null {
   if (!src) return null;
@@ -100,17 +112,52 @@ export function upgradeImageUrl(src: string, baseUrl: string): string | null {
     if (kept.length !== u.search.slice(1).split("&").length) u.search = kept.join("&");
   }
   u.pathname = u.pathname.replace(RENDITION_SUFFIX, "");
+  if (WP_UPLOADS.test(u.pathname)) u.pathname = u.pathname.replace(/-\d{2,5}x\d{2,5}(?=\.[a-z0-9]+$)/i, "");
 
   if (NON_IMAGE_EXT.test(u.pathname)) return null;
   if (!IMAGE_EXT.test(u.pathname) && !NO_EXTENSION.test(u.pathname)) return null;
   return u.toString();
 }
 
-/** Identity of a photo irrespective of rendition — the dedupe key. */
+/**
+ * Identity of a photo irrespective of rendition — the dedupe key.
+ *
+ * One photo reaches a page under several addresses, and each one stored is a
+ * duplicate on the card:
+ *
+ *   - Shopify serves every upload both from `cdn.shopify.com/s/files/1/<ids>/`
+ *     and from the store's own `/cdn/shop/`; its product JSON uses the first,
+ *     the theme's markup the second.
+ *   - a size in the name: Shopify's `_600x`, WordPress's `-300x300`/`-scaled`,
+ *     Farfetch's `_480`/`_1000`, a retina `@2x`;
+ *   - a format: `coat.jpg`, `coat.webp`, and the `coat.jpg.webp` an image
+ *     optimiser writes beside it.
+ *
+ * The key drops all of them. A frame number is never touched: `_0010` and
+ * `_0017` stay two photos.
+ */
 export function imageKey(url: string): string {
   try {
     const u = new URL(url);
-    return `${u.hostname}${u.pathname.replace(RENDITION_SUFFIX, "").toLowerCase()}`;
+    let host = u.hostname.replace(/^www\./, "").toLowerCase();
+    let path = decodeURIComponent(u.pathname).toLowerCase();
+
+    const shopify =
+      (host === "cdn.shopify.com" && path.match(/^\/s\/files\/(?:\d+\/)+(files|products)\/(.+)$/)) ||
+      path.match(/^\/cdn\/shop\/(files|products)\/(.+)$/);
+    if (shopify) {
+      host = "shopify";
+      path = `/${shopify[1]}/${shopify[2]}`;
+    }
+
+    path = path.replace(RENDITION_SUFFIX, "");
+    if (WP_UPLOADS.test(path)) path = path.replace(WP_SIZE, "");
+    path = path
+      .replace(/@[23]x(?=\.[a-z0-9]+$)/, "")
+      .replace(/\.(?:jpe?g|png)\.(?:webp|avif)$/, ".jpg")
+      .replace(/\.(?:jpe?g|png|webp|avif)$/, "");
+    if (host.endsWith("farfetch-contents.com")) path = path.replace(/(\d+_\d+)_\d{3,4}$/, "$1");
+    return `${host}${path}`;
   } catch {
     return url.toLowerCase();
   }
@@ -157,6 +204,25 @@ const NAME_TOKEN_MIN = 4;
  * share both `classic` and `tote`, so scattered-word matching filed the
  * insert's photos under the tote. No pair of adjacent words collides.
  */
+/**
+ * Words that describe many pieces, not this one: a colour, a garment, a
+ * material or a cut. "Black Leather Jacket" and "Brown Leather Jacket" share
+ * `leatherjacket`, and a store names its files after its titles — so a phrase
+ * of such words alone matched the jacket beside it in "you may also like".
+ */
+const DESCRIBING_WORDS = new Set([
+  "leather", "suede", "wool", "cotton", "linen", "denim", "nylon", "silk", "cashmere", "fleece",
+  "knit", "knitted", "jersey", "canvas", "velvet", "corduroy", "satin", "mesh", "faux", "vegan",
+  "oversized", "relaxed", "regular", "slim", "straight", "wide", "cropped", "long", "short",
+  "classic", "vintage", "washed", "heavy", "heavyweight", "light", "lightweight", "basic", "essential",
+  "logo", "print", "printed", "graphic", "striped", "stripe", "check", "plain", "zip", "hooded",
+  "mens", "womens", "unisex", "kids", "new", "sale",
+]);
+
+function describesMany(word: string): boolean {
+  return DESCRIBING_WORDS.has(word) || colorWordsIn(word).length > 0 || !!matchGarment(word);
+}
+
 function namePhrases(name: string): string[] {
   const words = name
     .toLowerCase()
@@ -169,9 +235,13 @@ function namePhrases(name: string): string[] {
   if (words.length === 0) return [];
   // A one-word name ("Cruiser") has no pair — use the word, if it is long
   // enough to identify something on its own.
-  if (words.length === 1) return words[0].length >= 6 ? words : [];
+  if (words.length === 1) return words[0].length >= 6 && !describesMany(words[0]) ? words : [];
   const phrases: string[] = [];
-  for (let i = 0; i + 1 < words.length; i++) phrases.push(words[i] + words[i + 1]);
+  for (let i = 0; i + 1 < words.length; i++) {
+    // A pair counts only when one of its words is this piece's own.
+    if (describesMany(words[i]) && describesMany(words[i + 1])) continue;
+    phrases.push(words[i] + words[i + 1]);
+  }
   return [...new Set(phrases)];
 }
 
@@ -199,8 +269,16 @@ function commonPrefixLength(a: string, b: string): number {
 const FRAME_DIFF_MAX = 2;
 const FRAME_STEM_MIN = 8;
 
+/**
+ * A camera's own file name — `DSC01234`, `IMG_4417`, `_MG_0021`, `P1010001`.
+ * Its number counts shots, not products: the next shot of the same session is
+ * as likely the next jacket as the back of this one.
+ */
+const CAMERA_STEM = /^(?:dsc|dscf|dscn|img|mg|imag|dji|gopr|pxl|photo|image)?\d+$|^p\d{7}$/;
+
 function isNumberedFrame(a: string, b: string): boolean {
   if (a.length !== b.length || a.length < FRAME_STEM_MIN) return false;
+  if (CAMERA_STEM.test(a) || CAMERA_STEM.test(b)) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) {
     if (a[i] !== b[i] && ++diff > FRAME_DIFF_MAX) return false;
