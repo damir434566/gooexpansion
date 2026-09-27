@@ -14,6 +14,7 @@ import {
   MAX_PRODUCT_IMAGES,
   matchCategory,
   canonicalColor,
+  colourFromName,
   looksLikeColourLabel,
 } from "@/lib/server/product-fields";
 import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
@@ -301,6 +302,11 @@ function colorFrom(stated: string | undefined, name: string, sourceUrl: string):
   // without passing through the extractor's own check.
   const said = (stated ?? "").trim();
   if (said && looksLikeColourLabel(said)) return said;
+
+  // A colourway the name ends with is the store's own label for it, kept
+  // whole: "Mia Jacket - Beige/White" is "Beige/White", not its last colour.
+  const fromName = colourFromName(name);
+  if (fromName) return fromName;
 
   const slug = (() => {
     try {

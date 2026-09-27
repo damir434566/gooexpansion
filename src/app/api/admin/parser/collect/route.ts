@@ -280,8 +280,9 @@ export async function POST(req: Request) {
   const mirrorImages =
     typeof body?.mirrorImages === "boolean" ? body.mirrorImages : aiSettings.downloadImages;
   const dryRun = body?.dryRun === true;
-  // Set in the popup for a store whose photos are missing or wrong.
-  const requestedLinkOnly = body?.linkOnly === true;
+  // Set by the collect screen, not the extension: the admin chooses there
+  // whether this store's pages make cards or only add links to ours.
+  const requestedLinksOnly = body?.linksOnly === true;
 
   let result: CrawlItemResult;
 
@@ -326,39 +327,29 @@ export async function POST(req: Request) {
     } else if (dryRun) {
       result = { url, status: "skipped", reason: "Dry run", name: product.name, usedAi };
     } else {
-      // Link-only when the admin said the store's photos are not to be trusted,
-      // and when the page yielded none at all: a card without a photo is not a
-      // card, but its price and address still make a "where to buy" line on the
-      // product we already have.
+      // A page with no photo at all is taken as links only whatever the mode:
+      // a card without a photo is not a card, but its price and address still
+      // make a "where to buy" line on the piece we already have.
       const photoless = !product.imageUrl && !(product.images?.length ?? 0);
-      const linkOnly = requestedLinkOnly || photoless;
+      const linksOnly = requestedLinksOnly || photoless;
+      const photolessOnly = photoless && !requestedLinksOnly;
       const imported = await importParsedProduct(
         product as unknown as Record<string, unknown>,
         product.sourceUrl || url,
-        { mirrorImages, linkOnly },
+        { mirrorImages, linksOnly },
       );
-      result = !imported.ok
-        ? { url, status: "failed", reason: imported.error, name: product.name, usedAi }
-        : imported.linkOnly === "no-match"
+      result = imported.skipped
         ? {
             url,
             status: "skipped",
+            reason: photolessOnly
+              ? `no photos on the page — ${imported.skipped.replace(/^links only: /, "")}`
+              : imported.skipped,
             name: product.name,
             usedAi,
-            reason: requestedLinkOnly
-              ? "Link-only store: no such piece in the catalogue yet, so nothing was added"
-              : "No photos on the page, and no such piece in the catalogue to add the link to",
           }
-        : imported.linkOnly === "own-row"
+        : imported.ok
         ? {
-            url,
-            status: "skipped",
-            name: product.name,
-            usedAi,
-            productId: imported.productId ?? undefined,
-            reason: "Already in the catalogue as its own card; left unchanged (link-only)",
-          }
-        : {
             url,
             status: imported.updated ? "updated" : "imported",
             productId: imported.productId ?? undefined,
@@ -375,8 +366,9 @@ export async function POST(req: Request) {
             merged: !!imported.mergedInto,
             mergedBy: imported.mergedBy,
             mergedFields: imported.mergedFields,
-            linkOnly: imported.linkOnly === "linked",
-          };
+            linkNote: imported.linkNote,
+          }
+        : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
     }
   } catch (err) {
     result = {

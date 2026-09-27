@@ -1124,7 +1124,7 @@ export function extractProduct(
         { value: specValue(evidence?.specs, COLOR_KEYS) ?? "", origin: "line" },
         { value: colorFromHtml(html) ?? "", origin: "markup" },
       ],
-      { name, brand },
+      { name, brand, sizes },
     )?.value,
     // Material, which until now came from JSON-LD `material` and nowhere else —
     // a field few stores fill, while the page prints "80% wool, 20% polyamide"

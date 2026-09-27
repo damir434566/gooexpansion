@@ -59,6 +59,20 @@ const Spinner = () => (
 
 type Phase = "idle" | "planning" | "collecting" | "done" | "stopped" | "halted";
 
+/** The two things a run can do with a store's pages. */
+const MODES = [
+  {
+    label: "Make cards",
+    linksOnly: false,
+    says: "New pieces become products. A piece we already have gains this store as a place to buy.",
+  },
+  {
+    label: "Links only",
+    linksOnly: true,
+    says: "Only adds this store's link and price to pieces we already have. Pieces we don't have are skipped.",
+  },
+] as const;
+
 interface RobotsInfo {
   parsed: boolean;
   crawlDelayMs: number | null;
@@ -75,6 +89,14 @@ export default function CollectPage() {
   const [delayMs, setDelayMs] = useState(0);
   const [robots, setRobots] = useState<RobotsInfo | null>(null);
   const [notice, setNotice] = useState("");
+  /**
+   * Whether this run makes cards or only adds this store to the cards we have.
+   * Chosen here rather than in the extension: this tab makes every import
+   * call, so the choice travels with them and the extension needs no change.
+   * Mirrored in a ref for the same reason as Stop below.
+   */
+  const [linksOnly, setLinksOnly] = useState(false);
+  const linksOnlyRef = useRef(false);
 
   /**
    * Stop as a ref, not state: the message handler is registered once and would
@@ -174,6 +196,7 @@ export default function CollectPage() {
               action: "ingest",
               ...payload,
               titles: titlesRef.current,
+              linksOnly: linksOnlyRef.current,
             });
             const result = data.result as CrawlItemResult | undefined;
             if (result) setResults((prev) => [...prev, result]);
@@ -212,6 +235,11 @@ export default function CollectPage() {
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [callApi, reply]);
+
+  function chooseMode(value: boolean) {
+    linksOnlyRef.current = value;
+    setLinksOnly(value);
+  }
 
   function stop() {
     stoppedRef.current = true;
@@ -278,6 +306,39 @@ export default function CollectPage() {
             )
           )}
         </div>
+      </div>
+
+      {/* What the run does with each page — set before starting it */}
+      <div className={`${cardCls} px-5 py-4 flex items-center gap-4 flex-wrap`}>
+        <div
+          role="group"
+          aria-label="What this run does"
+          className="flex gap-0 bg-[var(--surface)] rounded-full p-1 border border-[var(--border)] w-fit"
+        >
+          {MODES.map((m) => {
+            const active = linksOnly === m.linksOnly;
+            return (
+              <button
+                key={m.label}
+                type="button"
+                aria-pressed={active}
+                disabled={running}
+                onClick={() => chooseMode(m.linksOnly)}
+                className={`shrink-0 px-5 py-2 text-[10px] tracking-[0.16em] uppercase font-medium rounded-full transition-colors duration-200 disabled:opacity-40 ${
+                  active
+                    ? "bg-[var(--foreground)] text-[var(--background)]"
+                    : "text-[var(--foreground-muted)] hover:text-[var(--foreground)]"
+                }`}
+              >
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[11px] text-[var(--foreground-muted)] flex-1 min-w-[220px]">
+          {MODES.find((m) => m.linksOnly === linksOnly)?.says}
+          {running && " Change it between runs."}
+        </p>
       </div>
 
       {!connected && (
@@ -386,7 +447,7 @@ export default function CollectPage() {
                   </span>
                   {r.reason && (
                     <span
-                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[220px] flex-shrink-0"
+                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[220px] md:max-w-[480px] flex-shrink-0"
                       title={r.reason}
                     >
                       {r.reason}
@@ -394,7 +455,7 @@ export default function CollectPage() {
                   )}
                   {!r.reason && detailLine(r) && (
                     <span
-                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[260px] flex-shrink-0"
+                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[260px] md:max-w-[480px] flex-shrink-0"
                       title={detailLine(r)}
                     >
                       {detailLine(r)}
@@ -441,6 +502,7 @@ function detailLine(r: CrawlItemResult): string {
   if (r.priceNote) parts.push(r.priceNote);
   if (r.brandNote) parts.push(r.brandNote);
   if (r.colorNote) parts.push(r.colorNote);
+  if (r.linkNote) parts.push(r.linkNote);
   if (r.genderNote) parts.push(r.genderNote);
   if (r.styleNote) parts.push(r.styleNote);
   if (r.variantsLinked) {
@@ -452,11 +514,7 @@ function detailLine(r: CrawlItemResult): string {
     const filled = (r.mergedFields ?? []).filter((f) => f !== "retailer");
     // Said, because a name match is a judgement where a code match is a fact,
     // and the admin is the one who can undo a wrong one.
-    const how = r.mergedBy === "name" ? " (same name and colour)" : "";
-    if (r.linkOnly) {
-      parts.push(`store link added to an existing product${how}, without its photos`);
-      return parts.join(" · ");
-    }
+    const how = r.mergedBy === "name" ? " (same piece by name and colour)" : "";
     parts.push(
       filled.length
         ? `added as a store to an existing product${how}, filling ${filled.join(", ")}`

@@ -659,35 +659,6 @@ async function main() {
 
   collect.close(); popup.close();
 
-  // ── Run F: a link-only store ──────────────────────────────────────────────
-  //
-  // Ticked in the popup for a store whose photos are missing or wrong. Every
-  // page still goes through, with its price and its address, but no photo
-  // leaves the browser and the server is told to add only the link.
-  console.log("\n— run F: a store marked link-only —");
-  await storeControl({ mode: "spa", reset: true });
-  await studioReset();
-  collect = await openCollect();
-  popup = await openPopup(extId);
-  await popup.evaluate(
-    `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:2,linkOnly:true}})`,
-  );
-  const doneF = await waitForEvent("done", 120000);
-  check("run F finished", !!doneF);
-  const ingestsF = (await studioEvents()).events.filter((e) => e.kind === "ingest");
-  check("its pages were still collected", ingestsF.length === 2, `got ${ingestsF.length}`);
-  check(
-    "every page was sent as link-only",
-    ingestsF.length > 0 && ingestsF.every((e) => e.detail.linkOnly === true),
-    JSON.stringify(ingestsF.map((e) => e.detail.linkOnly)),
-  );
-  check(
-    "and not one photo left the browser",
-    ingestsF.every((e) => e.detail.candidates === 0),
-    JSON.stringify(ingestsF.map((e) => e.detail.candidates)),
-  );
-  collect.close(); popup.close();
-
   // ── Run G: the extension is updated while the collect tab stays open ───────
   //
   // What an admin does after installing a new version: ↻ on the extensions

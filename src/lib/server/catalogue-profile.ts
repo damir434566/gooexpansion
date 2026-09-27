@@ -11,6 +11,8 @@
  * works:
  *
  *   brand     the styles the editor gave most of this brand's pieces;
+ *   store     for a brand with no such history — a new one — the styles the
+ *             editor gave most pieces bought from the same store;
  *   words     the style dictionary, per style, only where its tags have agreed
  *             with the editor's often enough (sporty did at 87%, minimal at 6%);
  *   colour    a dark-toned piece is "dark" — overall, or only within brands the
@@ -36,6 +38,8 @@ import { loadLabelledProducts, type LabelledProduct } from "@/lib/server/catalog
 
 /** A brand needs this many style-tagged pieces before its habits count. */
 export const BRAND_MIN_PIECES = 3;
+/** A store's habits count, for a brand with none, from this many style-tagged pieces. */
+export const STORE_STYLE_MIN = 5;
 /** A style is the brand's when at least this share of its pieces carry it. */
 export const BRAND_STYLE_SHARE = 0.6;
 /** A signal is trusted when at least this share of its tags agreed with the editor… */
@@ -69,6 +73,8 @@ export interface CatalogueProfile {
   /** Products carrying at least one style tag. */
   styled: number;
   brandStyles: Map<string, Tally>;
+  /** The styles the editor gave pieces bought from each store, keyed as `storeKey`. */
+  storeStyles: Map<string, Tally>;
   /** Gender the editor chose for pieces whose page stated none. */
   brandGender: Map<string, Tally>;
   storeGender: Map<string, Tally>;
@@ -148,6 +154,7 @@ function pageStatesGender(p: ProfileInput): boolean {
 
 export function buildCatalogueProfile(rows: LabelledProduct[]): CatalogueProfile {
   const brandStyles = new Map<string, Tally>();
+  const storeStyles = new Map<string, Tally>();
   const brandGender = new Map<string, Tally>();
   const storeGender = new Map<string, Tally>();
   const keywordStyles = new Map<StyleKeyword, Agreement>(STYLE_KEYWORD_LIST.map((s) => [s, { tagged: 0, right: 0 }]));
@@ -163,6 +170,14 @@ export function buildCatalogueProfile(rows: LabelledProduct[]): CatalogueProfile
       t.n++;
       for (const s of styles) t.counts[s] = (t.counts[s] ?? 0) + 1;
       if (brand) brandStyles.set(brand, t);
+
+      const store = storeKey(r.sourceUrl);
+      if (store) {
+        const st = storeStyles.get(store) ?? { n: 0, counts: {} };
+        st.n++;
+        for (const s of styles) st.counts[s] = (st.counts[s] ?? 0) + 1;
+        storeStyles.set(store, st);
+      }
 
       for (const s of inferStyleKeywords(`${r.name} ${r.description}`, STYLE_KEYWORD_LIST.length)) {
         const a = keywordStyles.get(s)!;
@@ -191,7 +206,7 @@ export function buildCatalogueProfile(rows: LabelledProduct[]): CatalogueProfile
     }
   }
 
-  return { styled, brandStyles, brandGender, storeGender, keywordStyles, darkTone: { all, inDarkBrands } };
+  return { styled, brandStyles, storeStyles, brandGender, storeGender, keywordStyles, darkTone: { all, inDarkBrands } };
 }
 
 // ── Proposing ────────────────────────────────────────────────────────────────
@@ -200,6 +215,8 @@ export interface StyleProposal {
   styles: StyleKeyword[];
   /** One line per style kept, saying what argued for it. */
   reasons: string[];
+  /** When nothing was proposed: what each signal lacked, so the admin sees why. */
+  missing?: string;
 }
 
 /**
@@ -211,7 +228,14 @@ export interface StyleProposal {
  * tell.
  */
 export function proposeStyles(
-  piece: { brand: string; keywordStyles: StyleKeyword[]; colors: string[]; colorGroups: string[] },
+  piece: {
+    brand: string;
+    keywordStyles: StyleKeyword[];
+    colors: string[];
+    colorGroups: string[];
+    /** The page's address: the store whose habits speak for a brand with none. */
+    sourceUrl?: string | null;
+  },
   profile: CatalogueProfile,
 ): StyleProposal {
   const candidates = new Map<StyleKeyword, { confidence: number; reason: string }>();
@@ -222,11 +246,35 @@ export function proposeStyles(
   const pct = (x: number) => `${Math.round(x * 100)}%`;
 
   const brandTally = profile.brandStyles.get(brandKey(piece.brand));
-  if (brandTally && brandTally.n >= BRAND_MIN_PIECES) {
+  const brandKnown = !!brandTally && brandTally.n >= BRAND_MIN_PIECES;
+  if (brandKnown) {
     for (const [style, count] of Object.entries(brandTally.counts)) {
       const s = count / brandTally.n;
       if (s >= BRAND_STYLE_SHARE && isStyleKeyword(style)) {
         offer(style, s, `${style}: ${pct(s)} of ${piece.brand}'s ${brandTally.n} pieces`);
+      }
+    }
+  }
+
+  // A brand the editor has not styled yet is read through the store it came
+  // from: a boutique carries brands in one manner, as a brand makes pieces in
+  // one. Only for a brand with no history of its own, which is more specific.
+  let storeTally: Tally | undefined;
+  let storeName = storeKey(piece.sourceUrl);
+  if (!brandKnown) {
+    for (const candidate of domainCandidates(storeKey(piece.sourceUrl))) {
+      const tally = profile.storeStyles.get(candidate);
+      if (!tally) continue;
+      storeTally = tally;
+      storeName = candidate;
+      break;
+    }
+    if (storeTally && storeTally.n >= STORE_STYLE_MIN) {
+      for (const [style, count] of Object.entries(storeTally.counts)) {
+        const s = count / storeTally.n;
+        if (s >= BRAND_STYLE_SHARE && isStyleKeyword(style)) {
+          offer(style, s, `${style}: ${pct(s)} of ${storeTally.n} styled pieces from ${storeName}`);
+        }
       }
     }
   }
@@ -255,6 +303,23 @@ export function proposeStyles(
     .sort((a, b) => b[1].confidence - a[1].confidence)
     .slice(0, MAX_STYLES);
   const keptStyles = new Set(kept.map(([s]) => s));
+  if (!kept.length) {
+    // Said on the run's row, because "no style" otherwise reads as a fault.
+    // Nearly always it is a brand the editor has not styled yet.
+    const brandSays = brandKnown
+      ? `${piece.brand}'s ${brandTally!.n} styled pieces share no style`
+      : `${piece.brand || "the brand"} has ${brandTally?.n ?? 0} styled pieces (${BRAND_MIN_PIECES} needed)`;
+    const storeSays = brandKnown
+      ? ""
+      : storeTally && storeTally.n >= STORE_STYLE_MIN
+        ? `, ${storeName}'s pieces share no style`
+        : `, ${storeName || "the store"} has ${storeTally?.n ?? 0} (${STORE_STYLE_MIN} needed)`;
+    return {
+      styles: [],
+      reasons: [],
+      missing: `no style: ${brandSays}${storeSays}, and the page's words named none that has proved reliable`,
+    };
+  }
   return {
     styles: STYLE_KEYWORD_LIST.filter((s) => keptStyles.has(s)),
     reasons: kept.map(([, c]) => c.reason),
