@@ -108,6 +108,37 @@ async function staysApart(title, rows, incoming, url) {
     await joins("card number 601", [...many, target], page("Nike", "Nike Windrunner Hooded Jacket 2026", { colors: ["Black"] }), "https://second.example/windrunner", target.id);
   }
 
+  console.log("— what real catalogues look like —");
+  {
+    const c = card("Nike", "Dunk Low Retro", { category: "footwear", colors: ["White", "Black"], price: 120 });
+    await joins("colours listed in the other order", [c], page("Nike", "Nike Dunk Low Retro", { category: "footwear", colors: ["Black", "White"], price: 130 }), "https://second.example/dunk", c.id);
+  }
+  {
+    const c = card("", "Stussy Basic Logo Hoodie 2026", { category: "tops", colors: ["Black"], price: 150 });
+    await joins("a card saved without a brand", [c], page("Stussy", "Basic Logo Hoodie 2026", { category: "tops", colors: ["Black"], price: 160 }), "https://second.example/stussy-hoodie", c.id);
+  }
+  {
+    const c = card("Stone Island", "Ghost Piece Crewneck Sweatshirt 2026", { category: "knitwear", colors: ["Navy"], price: 400 });
+    await joins("one store says knitwear, the other tops", [c], page("Stone Island", "Ghost Piece Crewneck Sweatshirt 2026", { category: "tops", colors: ["Navy"], price: 420 }), "https://second.example/ghost", c.id);
+  }
+  {
+    const navy = card("Arc'teryx", "Beta LT Jacket", { colors: ["Navy"], price: 450 });
+    const sky = card("Arc'teryx", "Beta LT Jacket", { colors: ["Sky Blue"], price: 450 });
+    await joins("two blue cards: the closer one", [navy, sky], page("Arc'teryx", "Beta LT Jacket", { colors: ["Navy Blue"], price: 460 }), "https://second.example/beta", navy.id);
+  }
+  {
+    const black = card("Arc'teryx", "Atom Hoody", { colors: ["Black"], price: 300 });
+    const green = card("Arc'teryx", "Atom Hoody", { colors: ["Green"], price: 300 });
+    await joins("the page names no colour: the model's first card", [black, green], page("Arc'teryx", "Atom Hoody", { colors: [], price: 310 }), "https://second.example/atom", black.id);
+  }
+  {
+    const c = card("Nike", "Tech Fleece Windrunner Hoodie 2026", { category: "tops", colors: ["Black"], price: 130 });
+    db.reset([c]);
+    const r = await importParsedProduct(page("Nike", "Tech Fleece Windrunner Hoodie 2026", { category: "tops", colors: ["Pink"], price: 130 }), "https://second.example/tf-pink", {});
+    ok("another colour still makes its own card", db.inserts().length === 1);
+    ok("and the run says why it made one", typeof r.linkNote === "string" && /new card/.test(r.linkNote) && /Black/.test(r.linkNote), String(r.linkNote));
+  }
+
   console.log("— and what must stay two cards —");
   {
     const c = card("Jordan", "Jordan 4 Retro", { category: "footwear", colors: ["Red"], price: 210 });

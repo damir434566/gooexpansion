@@ -29,7 +29,7 @@
  */
 import type { Retailer } from "@/lib/types";
 import { colourRelation, samePiece } from "./piece-name";
-import { brandsAgree } from "./brand-from-name";
+import { brandsFit } from "./brand-from-name";
 
 /** The columns the importer needs to decide and to merge. */
 export interface ExistingItem {
@@ -110,7 +110,7 @@ export interface SameItemMatch {
 }
 
 /** A card's colour as the admin would name it. */
-const colourOf = (row: NamedItem) => row.colors?.[0] || "no colour";
+const colourOf = (row: NamedItem) => (row.colors ?? []).filter(Boolean).join("/") || "no colour";
 
 /**
  * The existing row this page is another store's listing of, by name — or none,
@@ -154,19 +154,22 @@ export function pickSameItemByName(
 ): SameItemMatch {
   const ourHost = hostOf(incoming.sourceUrl);
   // Without an address there is no place to buy to add.
-  if (!ourHost || !incoming.brand.trim()) return { item: null, miss: "no brand or address to match by" };
+  if (!ourHost) return { item: null, miss: "no address to add as a store" };
 
   const pieces: NamedItem[] = [];
   for (const row of rows) {
     if (row.sourceUrl && row.sourceUrl === incoming.sourceUrl) continue;
-    // The caller reads by a brand word, but the decision does not lean on it:
-    // one maker under both stores' spellings ("adidas" / "adidas Originals").
-    if (!brandsAgree(row.brand ?? "", incoming.brand)) continue;
-    if (!samePiece([incoming.brand, row.brand ?? ""], incoming, row)) continue;
+    // One maker under both stores' spellings ("adidas" / "adidas Originals"),
+    // or a card saved without a brand whose name spells this one's.
+    if (!brandsFit(row, incoming)) continue;
+    const brands = [incoming.brand, row.brand ?? ""].filter((b) => b.trim());
+    if (!samePiece(brands, incoming, row)) continue;
     if ((row.retailers ?? []).some((r) => r.url && r.url === incoming.sourceUrl)) return { item: row };
     pieces.push(row);
   }
-  if (!pieces.length) return { item: null, miss: "not in the catalogue" };
+  if (!pieces.length) {
+    return { item: null, miss: incoming.brand.trim() ? "no card of this model" : "no brand on the page, and no card whose name matches" };
+  }
 
   const elsewhere = pieces.filter(
     (row) => ![row.sourceUrl, ...(row.retailers ?? []).map((r) => r.url)].map(hostOf).includes(ourHost),
@@ -180,36 +183,33 @@ export function pickSameItemByName(
   });
   if (!priced.length) return { item: null, miss: `price is more than ${MAX_PRICE_RATIO}× away from "${elsewhere[0].name}"` };
 
-  const same: NamedItem[] = [];
-  const near: NamedItem[] = [];
-  const partial: NamedItem[] = [];
-  const unstated: NamedItem[] = [];
-  for (const row of priced) {
-    const relation = colourRelation(incoming.colors, row.colors);
-    if (relation === "same") same.push(row);
-    else if (relation === "near") near.push(row);
-    else if (relation === "partial") partial.push(row);
-    else if (relation === "unknown" || relation === "none") unstated.push(row);
-  }
-  if (same.length) return { item: same[0] };
-  if (near.length === 1) return { item: near[0] };
-  if (!near.length && partial.length === 1) return { item: partial[0] };
-
+  // The page names no colour of its own: the model's first card takes the
+  // link. The store's page is the model's page, whichever colour it opens on,
+  // and a link on the model is what the admin asked for — not a skip.
   const stated = incoming.coloursStated !== false && incoming.colors.length > 0;
-  // One card of this piece, and nothing stated that makes the page another
-  // colourway: the page's colour unknown or only read off the photo, or the
-  // card's own colour never recorded.
-  if (priced.length === 1 && (!stated || unstated.length === 1)) return { item: priced[0] };
+  if (!stated) return { item: priced[0] };
 
-  const fits = near.length ? near : partial;
-  if (fits.length > 1) {
-    return { item: null, miss: `several colourways fit: ${fits.map(colourOf).join(", ")}` };
-  }
-  const colourways = priced.map(colourOf).join(", ");
-  if (!stated) {
-    return { item: null, miss: `the page states no colour, and the catalogue has ${priced.length} colourways: ${colourways}` };
-  }
-  return { item: null, miss: `in the catalogue only in ${colourways}` };
+  // Otherwise the closest colour wins, rather than a tie ending in nothing: the
+  // same words first, then the same colours in other words, then some of them,
+  // then a card that has no colour saved; among equals, the most colour words
+  // in common. A colour none of these reaches is another colourway, which is
+  // a card of its own.
+  const RANK: Record<string, number> = { same: 4, near: 3, partial: 2, unknown: 1, none: 1 };
+  const words = (list?: string[] | null) =>
+    new Set((list ?? []).join(" ").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+  const ours = words(incoming.colors);
+  const scored = priced
+    .map((row, index) => {
+      const rank = RANK[colourRelation(incoming.colors, row.colors)] ?? 0;
+      const theirs = words(row.colors);
+      const shared = [...ours].filter((w) => theirs.has(w)).length;
+      return { row, rank, shared, index };
+    })
+    .filter((c) => c.rank > 0)
+    .sort((a, b) => b.rank - a.rank || b.shared - a.shared || a.index - b.index);
+  if (scored.length) return { item: scored[0].row };
+
+  return { item: null, miss: `in the catalogue only in ${priced.map(colourOf).join(", ")}` };
 }
 
 /**
