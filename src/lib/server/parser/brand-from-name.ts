@@ -38,9 +38,35 @@ export function foldBrand(value: string): string {
 function brandWords(value: string): string {
   return foldBrand(value)
     .replace(/&/g, " and ")
-    .replace(/[\s,.]+/g, " ")
+    // "Levi's" is "Levis", "Off-White" is "Off White".
+    .replace(/['’`´]/g, "")
+    .replace(/[\s,.\-‐–/]+/g, " ")
     .replace(/^the /, "")
     .trim();
+}
+
+/**
+ * One maker under names that share no words. A store selling Jordans files
+ * them under "Nike", the brand's own site under "Jordan"; the same hoodie is
+ * "Essentials" on one site and "Fear of God" on the next. Spelled here as
+ * `brandWords` gives them.
+ */
+const MAKERS: string[][] = [
+  ["nike", "jordan", "air jordan", "nike jordan"],
+  ["fear of god", "essentials", "fear of god essentials"],
+  ["saint laurent", "yves saint laurent", "ysl"],
+  ["ralph lauren", "polo ralph lauren"],
+  ["north face", "tnf"],
+  ["a bathing ape", "bape"],
+  ["comme des garcons", "cdg"],
+  ["dr martens", "doc martens"],
+];
+const MAKER_OF = new Map<string, number>(MAKERS.flatMap((names, i) => names.map((n) => [n, i] as [string, number])));
+
+/** The `MAKERS` entry a brand belongs to, a line after its name included: "Nike SB" is Nike. */
+function makerOf(words: string): number | undefined {
+  const name = [...MAKER_OF.keys()].find((n) => words === n || words.startsWith(`${n} `));
+  return name === undefined ? undefined : MAKER_OF.get(name);
 }
 
 /**
@@ -49,13 +75,17 @@ function brandWords(value: string): string {
  * The same, or one is the other with a line name after it: a reseller writes
  * "adidas Originals" for what adidas.com calls adidas, "Carhartt WIP" for
  * Carhartt, "Nike SB" for Nike. Only a whole-word FRONT counts — "Angels" is
- * not "Palm Angels", and "Off" is not "Off-White" (one word, not two).
+ * not "Palm Angels", and "Off" is not "Off-White" (one word, not two). Or the
+ * two are one maker's names (`MAKERS`): Jordan and Nike.
  */
 export function brandsAgree(a: string, b: string): boolean {
   const x = brandWords(a);
   const y = brandWords(b);
   if (!x || !y) return false;
   if (x === y) return true;
+  if (x.replace(/ /g, "") === y.replace(/ /g, "")) return true;
+  const mx = makerOf(x);
+  if (mx !== undefined && mx === makerOf(y)) return true;
   const [short, long] = x.length <= y.length ? [x, y] : [y, x];
   return short.length >= 3 && long.startsWith(`${short} `);
 }
@@ -76,7 +106,32 @@ export function brandsFit(a: { brand?: string | null; name: string }, b: { brand
 
 /** The word a catalogue search for this brand's cards should look for. */
 export function brandSearchWord(value: string): string {
-  return brandWords(value).split(" ")[0] ?? "";
+  // Its first real word, cut at punctuation, so the read finds every spelling:
+  // "levi" is in "Levi's" and "Levis", "martens" in "Dr. Martens".
+  const words = foldBrand(value)
+    .replace(/^the\s+/, "")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  return words.find((w) => w.length >= 3) ?? words[0] ?? "";
+}
+
+/**
+ * A key under which one maker's cards are compared: its `MAKERS` entry when it
+ * has one, so Jordan and Nike meet, and its search word otherwise.
+ */
+export function makerKey(value: string): string {
+  const maker = makerOf(brandWords(value));
+  return maker !== undefined ? `maker:${maker}` : brandSearchWord(value);
+}
+
+/**
+ * Every name a brand's maker goes by, to take out of a product's name: "Nike"
+ * gives Jordan's names too, so "Nike Air Jordan 1" and "Air Jordan 1" leave
+ * the same words behind. A brand outside `MAKERS` is only itself.
+ */
+export function makerNames(value: string): string[] {
+  const maker = makerOf(brandWords(value));
+  return maker === undefined ? [value] : [value, ...MAKERS[maker]];
 }
 
 /** Letters and digits only, for comparing a brand to the labels of a host. */

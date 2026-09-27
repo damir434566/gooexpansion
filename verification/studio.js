@@ -60,6 +60,8 @@ const HOST = "localhost";
 
 const events = [];
 const imported = [];
+/** Every call that reached the collect API, as the site would read its mode off it. */
+const api = [];
 
 const FETCH_SETTINGS = {
   provider: "direct",
@@ -186,16 +188,24 @@ const server = http.createServer(async (req, res) => {
     return json(200, { ok: true });
   }
 
-  if (p === "/__events") return json(200, { events, imported });
+  if (p === "/__events") return json(200, { events, imported, api });
 
   if (p === "/__reset" && req.method === "POST") {
     events.length = 0;
     imported.length = 0;
+    api.length = 0;
     return json(200, { ok: true });
   }
 
   if (p === "/api/admin/parser/collect" && req.method === "POST") {
     const body = JSON.parse((await readBody(req)) || "{}");
+    api.push({
+      action: body.action === "ingest" ? "ingest" : "plan",
+      has: Object.prototype.hasOwnProperty.call(body, "linksOnly"),
+      linksOnly: body.linksOnly,
+      oldKey: Object.prototype.hasOwnProperty.call(body, "linkOnly"),
+      images: Array.isArray(body.images) ? body.images.length : 0,
+    });
 
     if (body.action === "ingest") {
       try {

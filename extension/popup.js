@@ -21,6 +21,7 @@ const COLLECT_PATH = "/goo-studio/parser/collect";
 const el = {
   store: document.getElementById("store"),
   limit: document.getElementById("limit"),
+  linksOnly: document.getElementById("linksOnly"),
   studio: document.getElementById("studio"),
   start: document.getElementById("start"),
   stop: document.getElementById("stop"),
@@ -35,6 +36,35 @@ const el = {
 };
 
 let activeUrl = "";
+
+/**
+ * "Links only" is a fact about a store, not about a run: a store whose cards
+ * we already have from elsewhere will be a links store next week too. So it is
+ * remembered per store (its host, without `www.`), on this machine, and the
+ * box is ticked again when the admin comes back to it. The key is 1.0.5's, so
+ * stores ticked then come back ticked.
+ */
+const LINK_ONLY_KEY = "linkOnlyStores";
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+async function linksOnlyStores() {
+  const stored = await chrome.storage.local.get(LINK_ONLY_KEY);
+  return Array.isArray(stored[LINK_ONLY_KEY]) ? stored[LINK_ONLY_KEY] : [];
+}
+
+async function rememberLinksOnly(host, on) {
+  if (!host) return;
+  const list = (await linksOnlyStores()).filter((h) => h !== host);
+  if (on) list.push(host);
+  await chrome.storage.local.set({ [LINK_ONLY_KEY]: list.slice(-500) });
+}
 
 function note(message) {
   el.note.textContent = message ?? "";
@@ -57,6 +87,7 @@ async function init() {
 
   if (/^https?:/i.test(activeUrl)) {
     el.store.textContent = activeUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70);
+    el.linksOnly.checked = (await linksOnlyStores()).includes(hostOf(activeUrl));
   } else {
     el.store.textContent = "Open a store page in this tab first.";
     el.start.disabled = true;
@@ -109,7 +140,9 @@ async function start() {
 
   const studioOrigin = (el.studio.value || DEFAULT_STUDIO).replace(/\/+$/, "");
   const limit = Math.max(1, Math.min(Number(el.limit.value) || 30, 2000));
+  const linksOnly = el.linksOnly.checked;
   await chrome.storage.sync.set({ studioOrigin, limit });
+  await rememberLinksOnly(hostOf(activeUrl), linksOnly);
 
   // Must be inside the click: Chrome refuses a permission prompt without one.
   let granted = false;
@@ -137,7 +170,7 @@ async function start() {
     return;
   }
 
-  const res = await send("start", { storeUrl: activeUrl, limit });
+  const res = await send("start", { storeUrl: activeUrl, limit, linksOnly });
   if (res && res.ok === false) {
     note(res.error ?? "Could not start.");
     el.start.disabled = false;
@@ -183,6 +216,11 @@ el.start.addEventListener("click", () => {
     note(err?.message ?? "Could not start.");
     el.start.disabled = false;
   });
+});
+
+// Remembered as soon as it is ticked, not only when a run starts.
+el.linksOnly.addEventListener("change", () => {
+  rememberLinksOnly(hostOf(activeUrl), el.linksOnly.checked).catch(() => {});
 });
 
 el.stop.addEventListener("click", async () => {

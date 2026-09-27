@@ -1,0 +1,941 @@
+diff --git a/src/lib/server/duplicates.ts b/src/lib/server/duplicates.ts
+index 567743b..bb2cc2e 100644
+--- a/src/lib/server/duplicates.ts
++++ b/src/lib/server/duplicates.ts
+@@ -10,7 +10,7 @@
+  *   by name   the same brand, the same piece once reduced, the same colours in
+  *             any order — or some of them ("Grey" beside "grey/white/leather"),
+  *             or none stated where the store has one card of the piece — no
+- *             store in common, and prices within a factor of three. Anything
++ *             store in common, and prices within a factor of four. Anything
+  *             short of the same colour word counts only when a row has exactly
+  *             one such candidate — a model made in two blacks is ambiguous,
+  *             and a wrong merge sends a shopper to the other one.
+@@ -21,10 +21,8 @@
+  */
+ import type { Retailer } from "@/lib/types";
+ import { colourRelation, modelWord, sameModelFamily, samePiece } from "@/lib/server/parser/piece-name";
+-import { brandSearchWord, brandsAgree, foldBrand } from "@/lib/server/parser/brand-from-name";
+-
+-/** Widest gap between two cards' prices for one item — as in `same-item.ts`. */
+-const MAX_PRICE_RATIO = 3;
++import { brandsAgree, foldBrand, makerKey, makerNames } from "@/lib/server/parser/brand-from-name";
++import { isSameRetailer, MAX_PRICE_RATIO } from "@/lib/server/parser/same-item";
+ 
+ export interface CatalogueRow {
+   id: string;
+@@ -122,13 +120,13 @@ export function findDuplicateGroups(rows: CatalogueRow[], dismissed: Set<string>
+   // row against every other one of its brand.
+   const buckets = new Map<string, CatalogueRow[]>();
+   for (const r of rows) {
+-    // By the brand's first word and the model's own word, not the exact brand
+-    // and name: "adidas" / "adidas Originals" and "Toro Bravo" / "Toro Bravo
+-    // (2026)" are one piece, and an exact key put them in different buckets.
+-    // `samePiece` below still decides every pair.
+-    const brand = brandSearchWord(r.brand);
++    // By the maker and the model's own word, not the exact brand and name:
++    // "adidas" / "adidas Originals", "Jordan" / "Nike" and "Toro Bravo" /
++    // "Toro Bravo (2026)" are one piece, and an exact key put them in
++    // different buckets. `samePiece` below still decides every pair.
++    const brand = makerKey(r.brand);
+     if (!brand) continue;
+-    const model = modelWord(r.name, r.brand, r.colors);
++    const model = modelWord(r.name, makerNames(r.brand), r.colors);
+     if (!model) continue;
+     const key = `${brand}|${model}`;
+     buckets.set(key, [...(buckets.get(key) ?? []), r]);
+@@ -329,11 +327,9 @@ export function mergeCardsPatch(keep: DbRow, others: DbRow[]): { patch: DbRow; f
+   const retailers: Retailer[] = Array.isArray(keep.retailers) ? [...(keep.retailers as Retailer[])] : [];
+   for (const other of others) {
+     for (const entry of Array.isArray(other.retailers) ? (other.retailers as Retailer[]) : []) {
+-      const known = retailers.some(
+-        (r) =>
+-          (r.url && entry.url && r.url === entry.url) ||
+-          (r.name && entry.name && r.name.toLowerCase() === entry.name.toLowerCase()),
+-      );
++      // The same store by address — never by name alone, or `nike.ua`'s link
++      // was dropped from a card that had `nike.com`'s, both called "Nike".
++      const known = retailers.some((r) => isSameRetailer(r, entry));
+       if (!known && retailers.length < 20) {
+         retailers.push(entry);
+         filled.add("stores");
+diff --git a/src/lib/server/parser/brand-from-name.ts b/src/lib/server/parser/brand-from-name.ts
+index 8c7f35d..c5dae5a 100644
+--- a/src/lib/server/parser/brand-from-name.ts
++++ b/src/lib/server/parser/brand-from-name.ts
+@@ -38,24 +38,54 @@ export function foldBrand(value: string): string {
+ function brandWords(value: string): string {
+   return foldBrand(value)
+     .replace(/&/g, " and ")
+-    .replace(/[\s,.]+/g, " ")
++    // "Levi's" is "Levis", "Off-White" is "Off White".
++    .replace(/['’`´]/g, "")
++    .replace(/[\s,.\-‐–/]+/g, " ")
+     .replace(/^the /, "")
+     .trim();
+ }
+ 
++/**
++ * One maker under names that share no words. A store selling Jordans files
++ * them under "Nike", the brand's own site under "Jordan"; the same hoodie is
++ * "Essentials" on one site and "Fear of God" on the next. Spelled here as
++ * `brandWords` gives them.
++ */
++const MAKERS: string[][] = [
++  ["nike", "jordan", "air jordan", "nike jordan"],
++  ["fear of god", "essentials", "fear of god essentials"],
++  ["saint laurent", "yves saint laurent", "ysl"],
++  ["ralph lauren", "polo ralph lauren"],
++  ["north face", "tnf"],
++  ["a bathing ape", "bape"],
++  ["comme des garcons", "cdg"],
++  ["dr martens", "doc martens"],
++];
++const MAKER_OF = new Map<string, number>(MAKERS.flatMap((names, i) => names.map((n) => [n, i] as [string, number])));
++
++/** The `MAKERS` entry a brand belongs to, a line after its name included: "Nike SB" is Nike. */
++function makerOf(words: string): number | undefined {
++  const name = [...MAKER_OF.keys()].find((n) => words === n || words.startsWith(`${n} `));
++  return name === undefined ? undefined : MAKER_OF.get(name);
++}
++
+ /**
+  * Do two stores' brand strings name one maker?
+  *
+  * The same, or one is the other with a line name after it: a reseller writes
+  * "adidas Originals" for what adidas.com calls adidas, "Carhartt WIP" for
+  * Carhartt, "Nike SB" for Nike. Only a whole-word FRONT counts — "Angels" is
+- * not "Palm Angels", and "Off" is not "Off-White" (one word, not two).
++ * not "Palm Angels", and "Off" is not "Off-White" (one word, not two). Or the
++ * two are one maker's names (`MAKERS`): Jordan and Nike.
+  */
+ export function brandsAgree(a: string, b: string): boolean {
+   const x = brandWords(a);
+   const y = brandWords(b);
+   if (!x || !y) return false;
+   if (x === y) return true;
++  if (x.replace(/ /g, "") === y.replace(/ /g, "")) return true;
++  const mx = makerOf(x);
++  if (mx !== undefined && mx === makerOf(y)) return true;
+   const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+   return short.length >= 3 && long.startsWith(`${short} `);
+ }
+@@ -76,7 +106,32 @@ export function brandsFit(a: { brand?: string | null; name: string }, b: { brand
+ 
+ /** The word a catalogue search for this brand's cards should look for. */
+ export function brandSearchWord(value: string): string {
+-  return brandWords(value).split(" ")[0] ?? "";
++  // Its first real word, cut at punctuation, so the read finds every spelling:
++  // "levi" is in "Levi's" and "Levis", "martens" in "Dr. Martens".
++  const words = foldBrand(value)
++    .replace(/^the\s+/, "")
++    .split(/[^\p{L}\p{N}]+/u)
++    .filter(Boolean);
++  return words.find((w) => w.length >= 3) ?? words[0] ?? "";
++}
++
++/**
++ * A key under which one maker's cards are compared: its `MAKERS` entry when it
++ * has one, so Jordan and Nike meet, and its search word otherwise.
++ */
++export function makerKey(value: string): string {
++  const maker = makerOf(brandWords(value));
++  return maker !== undefined ? `maker:${maker}` : brandSearchWord(value);
++}
++
++/**
++ * Every name a brand's maker goes by, to take out of a product's name: "Nike"
++ * gives Jordan's names too, so "Nike Air Jordan 1" and "Air Jordan 1" leave
++ * the same words behind. A brand outside `MAKERS` is only itself.
++ */
++export function makerNames(value: string): string[] {
++  const maker = makerOf(brandWords(value));
++  return maker === undefined ? [value] : [value, ...MAKERS[maker]];
+ }
+ 
+ /** Letters and digits only, for comparing a brand to the labels of a host. */
+diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
+index ed2d7e4..31cb7f7 100644
+--- a/src/lib/server/parser/import-product.ts
++++ b/src/lib/server/parser/import-product.ts
+@@ -26,7 +26,9 @@ import {
+   type VariantCandidate,
+ } from "./variant-group";
+ import {
++  gtinSpellings,
+   isSameItem,
++  isSameRetailer,
+   mergePatch,
+   pickSameItemByName,
+   withRetailer,
+@@ -35,7 +37,8 @@ import {
+   type NamedItem,
+ } from "./same-item";
+ import { brandSearchWord, brandVocabulary, decideBrand } from "./brand-from-name";
+-import { modelWord } from "./piece-name";
++import { articleCodePatterns, articleCodes, modelWord, pieceName } from "./piece-name";
++import { listingKey, urlSpellings } from "./listing-url";
+ import { loadRetailerRules, resolveRetailer, storeDefaultGender } from "@/lib/server/retailer-domains";
+ import { loadCatalogueProfile, proposeGender, proposeStyles } from "@/lib/server/catalogue-profile";
+ import { mirrorProductImages } from "@/lib/server/storage/product-images";
+@@ -300,36 +303,35 @@ function toExisting(row: MergeRow): ExistingItem {
+ /**
+  * The product this page is a second listing of, if we already have it.
+  *
+- * Asked by code only — GTIN, or the maker's part number together with the brand.
+- * Returns null on any database complaint, including the one a database without
+- * migration 020 makes, so a catalogue that has not run it keeps importing
+- * exactly as it did before: a second row rather than a second link.
++ * Asked by code only — GTIN in any of its paddings, or the maker's part number
++ * however it is punctuated, within one maker (`isSameItem`). Returns null on
++ * any database complaint, including the one a database without migration 020
++ * makes, so a catalogue that has not run it keeps importing exactly as it did
++ * before: a second row rather than a second link.
+  */
+ async function findSameItem(incoming: IncomingItem, sourceUrl: string | null): Promise<ExistingItem | null> {
+   try {
+     const queries: PromiseLike<{ data: unknown; error: unknown }>[] = [];
+-    if (incoming.gtin) {
+-      queries.push(supabase!.from("products").select(MERGE_COLUMNS).eq("gtin", incoming.gtin).limit(5));
++    const gtins = gtinSpellings(incoming.gtin);
++    if (gtins.length) {
++      queries.push(supabase!.from("products").select(MERGE_COLUMNS).in("gtin", gtins).limit(5));
+     }
+     if (incoming.mpn && incoming.brand) {
+-      queries.push(
+-        supabase!
+-          .from("products")
+-          .select(MERGE_COLUMNS)
+-          .eq("mpn", incoming.mpn)
+-          .eq("brand", incoming.brand)
+-          .limit(5),
+-      );
++      const pattern = incoming.mpn.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).map(escapeLike).join("%");
++      if (pattern) {
++        queries.push(supabase!.from("products").select(MERGE_COLUMNS).ilike("mpn", pattern).limit(50));
++      }
+     }
+     if (!queries.length) return null;
+ 
++    const ours = listingKey(sourceUrl);
+     for (const query of queries) {
+       const { data, error } = await query;
+       if (error || !Array.isArray(data)) continue;
+       for (const row of data as MergeRow[]) {
+         // A row we are re-importing is an update, not a merge; that path has
+         // already run by the time this is asked.
+-        if (sourceUrl && row.source_url === sourceUrl) continue;
++        if (ours && listingKey(row.source_url) === ours) continue;
+         const existing = toExisting(row);
+         if (isSameItem(incoming, existing)) return existing;
+       }
+@@ -374,8 +376,10 @@ async function findSameItemByName(incoming: {
+   category: string;
+   price: number;
+   sourceUrl: string | null;
++  mpn?: string;
+ }): Promise<{ item: NamedItem | null; unread: string[]; miss?: string }> {
+   if (!incoming.sourceUrl) return { item: null, unread: [], miss: "no address to add as a store" };
++  const codes = articleCodes({ name: "", mpn: incoming.mpn });
+   try {
+     // Read by the brand's first word, not its whole spelling: "adidas" and
+     // "adidas Originals", "Carhartt" and "Carhartt WIP" are one maker, and an
+@@ -386,17 +390,35 @@ async function findSameItemByName(incoming: {
+     // And a third read by the model's word alone, whatever the brand column
+     // says: a card saved before its brand was read has none, and a page whose
+     // brand was not read has none either. `brandsFit` then asks the names.
++    //
++    // And by what needs no brand or long word at all: the card that already
++    // carries this page as a store link; the reduced name's words in order
++    // ("Кросівки Air Max 90" finds "Nike Air Max 90"); the article code, in
++    // the card's part number or its name.
+     const word = brandSearchWord(incoming.brand);
+     const model = modelWord(incoming.name, incoming.brand, incoming.colors);
+-    if (!word && !model) return { item: null, unread: [], miss: "no brand and no model word to look up" };
+-    for (const columns of NAME_MATCH_COLUMNS) {
++    const tokens = pieceName(incoming.name, incoming.brand, incoming.colors).full.split(" ").filter(Boolean);
++    const ordered = tokens.length >= 2 || tokens.some((t) => /\d/.test(t)) ? tokens.slice(0, 5).map(escapeLike).join("%") : "";
++    const codePatterns = [...articleCodePatterns(incoming.name), ...articleCodePatterns(incoming.mpn ?? "")].slice(0, 2);
++    const linkedAs = [...new Set([incoming.sourceUrl, `https://${listingKey(incoming.sourceUrl)}`])];
++    for (const [pass, columns] of NAME_MATCH_COLUMNS.entries()) {
+       const products = () => supabase!.from("products").select(columns);
++      // Reads a database may refuse without the catalogue being unreadable —
++      // a JSON containment filter, the code columns — are asked apart, and
++      // their refusal only means they found nothing.
++      const optional = [
++        ...linkedAs.map((url) => products().filter("retailers", "cs", JSON.stringify([{ url }])).limit(5)),
++        // The code columns exist only with migration 020, the first column list.
++        ...(pass === 0 ? codePatterns.map((code) => products().ilike("mpn", code).limit(50)) : []),
++      ];
+       const reads = [
+         ...(word && model
+           ? [products().ilike("brand", `%${escapeLike(word)}%`).ilike("name", `%${escapeLike(model)}%`).limit(BRAND_ROWS)]
+           : []),
+         ...(word ? [products().ilike("brand", `%${escapeLike(word)}%`).limit(BRAND_ROWS)] : []),
+         ...(model ? [products().ilike("name", `%${escapeLike(model)}%`).limit(BRAND_ROWS)] : []),
++        ...(ordered ? [products().ilike("name", `%${ordered}%`).limit(BRAND_ROWS)] : []),
++        ...codePatterns.map((code) => products().ilike("name", `%${code}%`).limit(50)),
+       ];
+       const seen = new Map<string, unknown>();
+       let failed = false;
+@@ -411,11 +433,18 @@ async function findSameItemByName(incoming: {
+         }
+       }
+       if (failed) continue;
++      for (const read of optional) {
++        const { data, error } = await read;
++        if (error) continue;
++        for (const row of (data ?? []) as unknown as { id: string }[]) {
++          if (!seen.has(row.id)) seen.set(row.id, row);
++        }
++      }
+       const rows: NamedItem[] = ([...seen.values()] as (MergeRow & {
+         name: string | null;
+         category: string | null;
+       })[]).map((row) => ({ ...toExisting(row), name: row.name ?? "", category: row.category }));
+-      const match = pickSameItemByName(incoming, rows);
++      const match = pickSameItemByName({ ...incoming, codes }, rows);
+       const read = columns.split(",").map((c) => c.trim());
+       return { item: match.item, miss: match.miss, unread: FILL_ONLY_COLUMNS.filter((c) => !read.includes(c)) };
+     }
+@@ -439,19 +468,18 @@ async function keepOtherStores(
+   dbRow: Record<string, unknown>,
+   existing: Product["retailers"],
+   ours: Product["retailers"][number] | undefined,
+-  sourceUrl: string | null,
+ ): Promise<Record<string, unknown>> {
+   if (!ours) return dbRow;
+-  const others = existing.filter(
+-    (r) => r?.url && r.url !== sourceUrl && r.name?.toLowerCase() !== ours.name.toLowerCase(),
+-  );
++  // Every store that is not this one — told apart by address, not by name:
++  // `nike.com` and `nike.ua` are two stores that both call themselves Nike.
++  const others = existing.filter((r) => r && !isSameRetailer(r, ours));
+   if (!others.length) return dbRow;
+ 
+   const row: Record<string, unknown> = { ...dbRow, retailers: withRetailer(existing, ours) };
+   if (row.currency !== "USD") return row;
+ 
+   const theirs = (
+-    await Promise.all(others.map((r) => toUsd(Number(r.price) || 0, r.currency || "USD")))
++    await Promise.all(others.filter((r) => r.url).map((r) => toUsd(Number(r.price) || 0, r.currency || "USD")))
+   )
+     .map((c) => c?.usd ?? 0)
+     .filter((n) => n > 0);
+@@ -795,8 +823,14 @@ export async function importParsedProduct(
+     let existingStyled = false;
+     let existingGendered = false;
+     if (sourceUrl) {
++      // Every spelling of this page's address: collected once as `…/am90` and
++      // again as `www.…/am90/?srsltid=…`, it is still the card it made.
+       const { data: existing } = await supabase
+-        .from("products").select("id, retailers, style_keywords, gender").eq("source_url", sourceUrl).maybeSingle();
++        .from("products")
++        .select("id, retailers, style_keywords, gender")
++        .in("source_url", urlSpellings(sourceUrl))
++        .limit(1)
++        .maybeSingle();
+       const found = existing as {
+         id: string;
+         retailers: Product["retailers"] | null;
+@@ -836,7 +870,7 @@ export async function importParsedProduct(
+ 
+     if (existingId) {
+       const id = existingId;
+-      const row = await keepOtherStores(dbRow, existingRetailers, retailers[0], sourceUrl);
++      const row = await keepOtherStores(dbRow, existingRetailers, retailers[0]);
+       // Style and gender are the editor's to decide. Re-collecting a page used to
+       // write whatever the importer guessed over them — an empty style list
+       // included — so a store collected twice lost its hand-set tags. They are
+@@ -871,8 +905,9 @@ export async function importParsedProduct(
+         mpn: product.mpn,
+         sku: product.sku,
+         // Dollars or nothing: a price left in a currency with no rate would
+-        // widen a dollar range with a hryvnia number.
+-        price: currency === "USD" ? price : 0,
++        // widen a dollar range with a hryvnia number — and so would one the
++        // page never named a currency for, "4200" taken as dollars.
++        price: currency === "USD" && sourceCurrency ? price : 0,
+         retailer: retailers[0],
+         material: product.material,
+         description: product.description,
+@@ -896,6 +931,7 @@ export async function importParsedProduct(
+           category,
+           price: incoming.price,
+           sourceUrl,
++          mpn,
+         });
+         miss = byName.miss;
+         if (byName.item) {
+diff --git a/src/lib/server/parser/listing-url.ts b/src/lib/server/parser/listing-url.ts
+new file mode 100644
+index 0000000..8a0924c
+--- /dev/null
++++ b/src/lib/server/parser/listing-url.ts
+@@ -0,0 +1,88 @@
++/**
++ * One store's page, whichever way its address is spelled.
++ *
++ * A card and its store links are keyed by address, and addresses were compared
++ * as strings. So the same page collected as `…/am90` and again as
++ * `www.…/am90/?srsltid=…` — the tracking tag Google adds to every result, a
++ * trailing slash, `www.` — was two pages: the second never found the card the
++ * first made, and a second card appeared beside it.
++ *
++ * And a store was known by its name. Two sites that resolve to one name
++ * (`nike.com` and `nike.ua` are both "Nike") were one store, so adding the
++ * second replaced the first's link on the card. A store is its host.
++ */
++
++/** Query parameters that say who sent the visitor, never which page it is. */
++const TRACKING =
++  /^(?:utm_[a-z_]+|srsltid|gclid|gclsrc|gbraid|wbraid|dclid|fbclid|yclid|msclkid|ttclid|twclid|igshid|mc_cid|mc_eid|_ga|_gl|_hsenc|_hsmi|ref|ref_src|referrer|_pos|_sid|_ss|_psq|_fid|_v|pr_prod_strat|pr_rec_id|pr_rec_pid|pr_ref_pid|pr_seq|spm|scm|cmpid|irclickid|irgwc|clickid|click_id|affiliate_id|aff_id)$/i;
++
++/** The store a link belongs to: its host, lower case, without `www.`. */
++export function storeHost(url: string | null | undefined): string {
++  try {
++    return url ? new URL(url).hostname.replace(/^www\./i, "").replace(/\.$/, "").toLowerCase() : "";
++  } catch {
++    return "";
++  }
++}
++
++/** Do two links belong to one store? False when either has no host. */
++export function sameStore(a: string | null | undefined, b: string | null | undefined): boolean {
++  const x = storeHost(a);
++  return !!x && x === storeHost(b);
++}
++
++/**
++ * A page's address with the spelling taken out: host as `storeHost`, no
++ * trailing slash, no tracking parameters, the rest sorted. A Shopify product
++ * reached through a collection (`/collections/men/products/x`) is the product
++ * (`/products/x`). Scheme and fragment are not part of which page it is.
++ */
++export function listingKey(url: string | null | undefined): string {
++  const raw = (url ?? "").trim();
++  if (!raw) return "";
++  try {
++    const u = new URL(raw);
++    let path = u.pathname.replace(/\/{2,}/g, "/").replace(/\/+$/, "") || "/";
++    path = path.replace(/^\/collections\/[^/]+(\/products\/[^/]+)$/i, "$1");
++    const params = [...u.searchParams.entries()]
++      .filter(([k]) => !TRACKING.test(k))
++      .sort(([a, x], [b, y]) => a.localeCompare(b) || x.localeCompare(y));
++    const query = params.length ? `?${new URLSearchParams(params).toString()}` : "";
++    return `${storeHost(raw)}${path}${query}`;
++  } catch {
++    return raw;
++  }
++}
++
++/** Are two links one page? */
++export function sameListing(a: string | null | undefined, b: string | null | undefined): boolean {
++  const x = listingKey(a);
++  return !!x && x === listingKey(b);
++}
++
++/**
++ * The spellings a stored `source_url` may have for this page, for an exact
++ * database lookup: as given, and its clean form with and without `www.`, a
++ * trailing slash and `https`. At most nine.
++ */
++export function urlSpellings(url: string | null | undefined): string[] {
++  const raw = (url ?? "").trim();
++  if (!raw) return [];
++  const out = new Set<string>([raw]);
++  try {
++    const u = new URL(raw);
++    const key = listingKey(raw);
++    const host = storeHost(raw);
++    const rest = key.slice(host.length);
++    const [path, query = ""] = rest.split(/(?=\?)/);
++    const q = query ?? "";
++    for (const scheme of ["https", u.protocol.replace(/:$/, "")]) {
++      for (const h of [host, `www.${host}`]) {
++        for (const p of path === "/" ? ["/"] : [path, `${path}/`]) out.add(`${scheme}://${h}${p}${q}`);
++      }
++    }
++  } catch {
++    /* not an address — only the raw string */
++  }
++  return [...out].slice(0, 9);
++}
+diff --git a/src/lib/server/parser/piece-name.ts b/src/lib/server/parser/piece-name.ts
+index ce1ff0a..d9ee1ae 100644
+--- a/src/lib/server/parser/piece-name.ts
++++ b/src/lib/server/parser/piece-name.ts
+@@ -42,6 +42,8 @@ const FILLER = new Set([
+   "колір", "кольору", "цвет", "цвета", "унісекс", "унисекс",
+   "чоловічі", "чоловічий", "чоловіча", "чоловіче", "жіночі", "жіночий", "жіноча", "жіноче",
+   "мужские", "мужской", "мужская", "мужское", "женские", "женский", "женская", "женское",
++  // A store's sales copy in its titles: "NEW", "Sale", "Exclusive".
++  "new", "sale", "exclusive", "authentic", "новинка", "новинки", "розпродаж", "распродажа",
+ ]);
+ 
+ /**
+@@ -73,10 +75,65 @@ function phrase(folded: string): RegExp {
+ }
+ 
+ export interface PieceName {
+-  /** The name with brand, colour and filler removed. */
++  /** The name with brand, colour, filler and article codes removed. */
+   full: string;
+   /** `full` without garment-type words. Only trusted when `strongCore` says so. */
+   core: string;
++  /** Article codes the name carried ("cw2288111"), letters and digits only. */
++  codes: string[];
++}
++
++/**
++ * An article code inside a name: letters then three or more digits, with the
++ * colour part a maker hangs off it — Nike's "CW2288-111", adidas's "GW2871",
++ * New Balance's "U9060EEB" — or a bare number of six digits and more. A store
++ * that prints the code in its title ("Кросівки Nike Air Force 1 '07
++ * CW2288-111") named a piece the brand's own site calls "Air Force 1 '07",
++ * and the extra "cw2288 111" kept the two apart. A model named by digits first
++ * ("2002R", "990v6") is not a code.
++ */
++const ARTICLE_CODE =
++  /(?<![\p{L}\p{N}])(?:[a-z]{1,4}\d{3,}[a-z0-9]*(?:[-‐–/][a-z0-9]{2,4}|\s\d{3}(?![\p{L}\p{N}]))?|\d{6,}(?:[-/]\d{1,4})?)(?![\p{L}\p{N}])/gu;
++
++/** A season, not an article: "SS26", "FW2026". */
++const SEASON_CODE = /^(?:ss|fw|aw|sp|fa|su|ho|pf|re)\d{2,4}$/;
++
++/**
++ * What an `ARTICLE_CODE` match is: an article code, a season (dropped, never
++ * compared), or a model's name — the short ones are models as often as codes,
++ * "ZX750", "P6000", and stay in the name.
++ */
++function codeKind(match: string): "code" | "season" | "name" {
++  const compact = match.replace(/[^\p{L}\p{N}]+/gu, "");
++  if (SEASON_CODE.test(compact)) return "season";
++  const digits = compact.replace(/\D/g, "").length;
++  return compact !== match || digits >= 4 || compact.length >= 7 ? "code" : "name";
++}
++
++/**
++ * The article codes in a text as database patterns: "CW2288-111" is
++ * `cw2288%111`, so a card that stored "CW2288 111" is found by it.
++ */
++export function articleCodePatterns(text: string): string[] {
++  const out = new Set<string>();
++  for (const m of foldBrand(text ?? "").matchAll(ARTICLE_CODE)) {
++    if (codeKind(m[0]) === "code") out.add(m[0].replace(/[^\p{L}\p{N}]+/gu, "%"));
++  }
++  return [...out];
++}
++
++/** A colour label's parts as a name repeats them: "Cloud White / Core Black / Gum" → three. */
++function colourPhrases(colors: string[]): string[] {
++  const out = new Set<string>();
++  for (const label of colors) {
++    const folded = foldBrand(label ?? "");
++    if (folded.length >= 3) out.add(folded);
++    for (const part of folded.split(/\s*[/,&+|()[\]]+\s*|\s+(?:and|і|и)\s+/u)) {
++      const p = part.trim();
++      if (p.length >= 3) out.add(p);
++    }
++  }
++  return [...out].sort((a, b) => b.length - a.length);
+ }
+ 
+ /**
+@@ -103,10 +160,14 @@ export function pieceName(name: string, brand: string | string[], colors: string
+     (p, q) => q.length - p.length,
+   );
+   for (const b of spellings) text = text.replace(phrase(b), " ");
+-  for (const color of colors) {
+-    const c = foldBrand(color ?? "");
+-    if (c.length >= 3) text = text.replace(phrase(c), " ");
+-  }
++  for (const c of colourPhrases(colors)) text = text.replace(phrase(c), " ");
++
++  const codes: string[] = [];
++  text = text.replace(ARTICLE_CODE, (code) => {
++    const kind = codeKind(code);
++    if (kind === "code") codes.push(code.replace(/[^\p{L}\p{N}]+/gu, ""));
++    return kind === "name" ? code : " ";
++  });
+ 
+   let tokens = text
+     .split(/[^\p{L}\p{N}]+/u)
+@@ -129,9 +190,31 @@ export function pieceName(name: string, brand: string | string[], colors: string
+   return {
+     full: tokens.join(" "),
+     core: tokens.filter((t) => !TYPE_WORDS.has(t)).join(" "),
++    codes,
+   };
+ }
+ 
++/**
++ * The article codes a row carries: in its name, and the maker's part number.
++ * Never the store's SKU — two retailers use one SKU string for two things.
++ */
++export function articleCodes(row: { name: string; mpn?: string | null }): string[] {
++  const out = new Set(pieceName(row.name, "").codes);
++  const mpn = (row.mpn ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
++  if (mpn.length >= 5) out.add(mpn);
++  return [...out];
++}
++
++/**
++ * Do two rows carry the same article code? Letters and digits both, five
++ * characters or more — a number alone is too often a store's own shelf number.
++ * The same code is the same piece; its colour is still asked of the colours.
++ */
++export function shareArticleCode(a: string[], b: string[]): boolean {
++  const theirs = new Set(b);
++  return a.some((c) => theirs.has(c) && c.length >= 5 && /\p{L}/u.test(c) && /\d/.test(c));
++}
++
+ /**
+  * Does a reduced name identify a model without its garment word?
+  * "air max 90" does — a number is a model. "windrunner" alone does not: Nike
+@@ -195,6 +278,19 @@ function differentGarments(a: PieceRow, b: PieceRow): boolean {
+   return !categoriesAgree(a.category, b.category) && garmentTypesConflict(a.name, b.name);
+ }
+ 
++/** Enough of a model's own words, without its brand, to name one maker's piece. */
++function distinctive(p: PieceName): boolean {
++  const words = p.full
++    .split(" ")
++    .filter((t) => t && !TYPE_WORDS.has(t) && !NOT_A_MODEL.has(t) && !/^(?:19|20)\d\d$/.test(t));
++  return words.length >= 2;
++}
++
++/** A model number of three digits or more in a reduced name — not a year. */
++function numberedModel(full: string): boolean {
++  return full.split(" ").some((t) => /\d{3}/.test(t) && !/^(?:19|20)\d\d$/.test(t));
++}
++
+ export interface PieceRow {
+   name: string;
+   colors?: string[] | null;
+@@ -245,15 +341,34 @@ function sameModelLonger(x: PieceName, y: PieceName): boolean {
+  * Are two rows one piece? `brand` is every spelling of the maker the two rows
+  * use — "Carhartt WIP" and "Carhartt" — so each name loses all of them.
+  */
+-export function samePiece(brand: string | string[], a: PieceRow, b: PieceRow): boolean {
++export function samePiece(
++  brand: string | string[],
++  a: PieceRow,
++  b: PieceRow,
++  opts: { strict?: boolean } = {},
++): boolean {
+   const brands = Array.isArray(brand) ? brand : [brand];
+   if (!brands.some((v) => foldBrand(v ?? ""))) return false;
+   if (differentGarments(a, b)) return false;
+-  const x = pieceName(a.name, brands, a.colors ?? []);
+-  const y = pieceName(b.name, brands, b.colors ?? []);
++  // Both rows' colours come out of both names: one store's title carries its
++  // colourway ("Samba OG 'Cloud White Core Black'", "Detroit Jacket Black
++  // Rinsed") and the other's colour label is the only place that says so.
++  const colours = [...(a.colors ?? []), ...(b.colors ?? [])];
++  const x = pieceName(a.name, brands, colours);
++  const y = pieceName(b.name, brands, colours);
++  if (shareArticleCode(x.codes, y.codes)) return true;
++  // Strict is for a row that names no brand at all: only a name that is a
++  // model on its own stands in for the brand — two words that are neither a
++  // garment nor what every brand calls its pieces. "Air Max 90" and "Bullet
++  // Hole Jeans" are; "Classic Logo Tee" and "Detroit Jacket" could be anyone's.
++  if (opts.strict && !(distinctive(x) && distinctive(y))) return false;
+   if (x.full.length >= MIN_PIECE_NAME && x.full === y.full) return true;
++  // A maker that names its models by number — New Balance's "9060", "550" —
++  // leaves a name too short for the test above, and the number is the model.
++  if (!opts.strict && x.full && x.full === y.full && numberedModel(x.full)) return true;
+   if (strongCore(x.core) && x.core === y.core) return true;
+   if (sameModelLonger(x, y)) return true;
++  if (opts.strict) return false;
+   return singleWordModel(x, y, a, b);
+ }
+ 
+diff --git a/src/lib/server/parser/same-item.ts b/src/lib/server/parser/same-item.ts
+index acce641..92bef27 100644
+--- a/src/lib/server/parser/same-item.ts
++++ b/src/lib/server/parser/same-item.ts
+@@ -18,18 +18,19 @@
+  * a guess. "Wool Blend Bomber Jacket" is what four brands call four different
+  * jackets, and a wrong merge is worse than two rows: it puts a link on a
+  * product that sends a shopper to something else, and it reads as correct
+- * while doing it. So the brand must be the same, the piece the same once
+- * reduced (`piece-name.ts`), the colour the one card of that piece it fits,
+- * the store a different one, and the two prices within a factor of three of
+- * each other.
++ * while doing it. So the brand must be the same maker (or the page names none
++ * and its name is a model on its own), the piece the same once reduced
++ * (`piece-name.ts`) or the article code the same, the colour the one card of
++ * that piece it fits, and the two prices within a factor of four.
+  *
+  * The merge itself only ever FILLS: a field the existing row has is left alone.
+  * Two stores describe the same coat differently, and the row that arrived first
+  * is the one an admin may already have edited.
+  */
+ import type { Retailer } from "@/lib/types";
+-import { colourRelation, samePiece } from "./piece-name";
+-import { brandsFit } from "./brand-from-name";
++import { articleCodes, colourRelation, samePiece, shareArticleCode } from "./piece-name";
++import { brandsAgree, brandsFit } from "./brand-from-name";
++import { sameListing, sameStore, storeHost } from "./listing-url";
+ 
+ /** The columns the importer needs to decide and to merge. */
+ export interface ExistingItem {
+@@ -68,19 +69,37 @@ export interface IncomingItem {
+ 
+ /** True when `row` is the same item as `incoming`, by code. */
+ export function isSameItem(incoming: IncomingItem, row: ExistingItem): boolean {
+-  const gtin = (incoming.gtin ?? "").trim();
+-  if (gtin && (row.gtin ?? "").trim() === gtin) return true;
+-
+-  const mpn = (incoming.mpn ?? "").trim().toLowerCase();
+-  if (mpn && (row.mpn ?? "").trim().toLowerCase() === mpn) {
+-    const ours = incoming.brand.trim().toLowerCase();
+-    const theirs = (row.brand ?? "").trim().toLowerCase();
+-    return !!ours && ours === theirs;
+-  }
++  const gtin = gtinKey(incoming.gtin);
++  if (gtin && gtinKey(row.gtin) === gtin) return true;
++
++  const mpn = codeKey(incoming.mpn);
++  if (mpn && codeKey(row.mpn) === mpn) return brandsAgree(incoming.brand, row.brand ?? "");
+ 
+   return false;
+ }
+ 
++/**
++ * A GTIN without its padding. One barcode is written as UPC-12, EAN-13 and
++ * GTIN-14 by different stores — "012345678905", "0012345678905" — and a string
++ * comparison called those three items.
++ */
++export function gtinKey(value: string | null | undefined): string {
++  const digits = String(value ?? "").replace(/\D/g, "").replace(/^0+/, "");
++  return digits.length >= 6 ? digits : "";
++}
++
++/** The spellings of a GTIN a database may hold, for an exact lookup. */
++export function gtinSpellings(value: string | null | undefined): string[] {
++  const key = gtinKey(value);
++  if (!key) return [];
++  return [...new Set([String(value ?? "").replace(/\D/g, ""), key, ...[8, 12, 13, 14].filter((n) => n >= key.length).map((n) => key.padStart(n, "0"))])];
++}
++
++/** A maker's part number as two stores both write it: "CW2288-111", "cw2288 111". */
++function codeKey(value: string | null | undefined): string {
++  return String(value ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
++}
++
+ /** A row as the name test needs it: the merge columns plus what identifies the piece. */
+ export interface NamedItem extends ExistingItem {
+   name: string;
+@@ -92,14 +111,11 @@ export interface NamedItem extends ExistingItem {
+  * half and sometimes to a third; past that, two rows under one name are two
+  * different things — a £90 cap and a £900 coat both called "Logo".
+  */
+-const MAX_PRICE_RATIO = 3;
++export const MAX_PRICE_RATIO = 4;
+ 
+-function hostOf(url: string | null | undefined): string {
+-  try {
+-    return url ? new URL(url).hostname.replace(/^www\./, "").toLowerCase() : "";
+-  } catch {
+-    return "";
+-  }
++/** Every store a card is bought from: its source page and its store links. */
++function storesOf(row: ExistingItem): Set<string> {
++  return new Set([row.sourceUrl, ...(row.retailers ?? []).map((r) => r.url)].map(storeHost).filter(Boolean));
+ }
+ 
+ /** The answer to "which card is this page?", with the reason when there is none. */
+@@ -116,27 +132,30 @@ const colourOf = (row: NamedItem) => (row.colors ?? []).filter(Boolean).join("/"
+  * The existing row this page is another store's listing of, by name — or none,
+  * and why.
+  *
+- * Asked only after the codes found nothing. Among rows of the same brand it
+- * takes the same piece (`samePiece`), sold somewhere else, at a comparable
+- * price, and then decides by colour among that piece's cards:
++ * Asked only after the codes found nothing. A card that already carries this
++ * very page — as its own source or as a store link, however the address is
++ * spelled — is this page's card, whatever its name has since become. Otherwise,
++ * among rows of the same maker it takes the same piece (`samePiece`, or the
++ * same article code), at a comparable price, and then decides by colour among
++ * that piece's cards:
+  *
+  *   - the same colour word wins outright;
+  *   - the same colours in other words ("Core Black" beside "Black"), and then
+  *     some of the card's colours ("Grey" beside "grey/white/leather": stores
+- *     often name only the main one), count when exactly one card fits — a
+- *     piece made in navy and in sky blue has two cards that are "blue";
++ *     often name only the main one); among several, the closest;
+  *   - a colour the page does not state — none at all, or only the photo's
+- *     reading — takes the piece's one card when it has only one;
++ *     reading — takes the model's first card;
+  *   - a colour neither of those finds is another colourway, which is left to
+  *     the colour grouping.
+  *
+- * A card already carrying this store is another listing of the store's own, not
+- * a second place to buy — unless it carries this very page, which is a
+- * re-collect updating its price.
++ * Where the page or the card names no brand at all, only a name that is a
++ * model on its own ("Air Max 90", "Bullet Hole Jeans") matches — a lone word
++ * could be any maker's.
+  *
+- * Before the partial and unstated cases counted, a reseller's "Grey" Emerson
+- * matched nothing, became its own card, and the colour grouping then filed it
+- * beside etnies' "grey/white/leather" as a second colour of the same shoe.
++ * A card already carrying this store under another address is taken only in
++ * the very colour it has: that is the store's same page moved (a collection
++ * path, a tracking tag). In any other colour it is the store's other listing —
++ * a colourway — and gets a card of its own.
+  */
+ export function pickSameItemByName(
+   incoming: {
+@@ -146,54 +165,67 @@ export function pickSameItemByName(
+     /** False when `colors` are a reading of the photo, not the page's word. */
+     coloursStated?: boolean;
+     category?: string | null;
+-    /** Dollars, like `priceMin` on the rows. */
++    /** Dollars, like `priceMin` on the rows; 0 when the page's currency is unknown. */
+     price: number;
+     sourceUrl: string | null;
++    /** Article codes the page carries outside its name: the maker's part number. */
++    codes?: string[];
+   },
+   rows: NamedItem[],
+ ): SameItemMatch {
+-  const ourHost = hostOf(incoming.sourceUrl);
++  const ourHost = storeHost(incoming.sourceUrl);
+   // Without an address there is no place to buy to add.
+   if (!ourHost) return { item: null, miss: "no address to add as a store" };
+ 
++  // This very page, already on a card.
++  for (const row of rows) {
++    if (sameListing(row.sourceUrl, incoming.sourceUrl)) return { item: row };
++    if ((row.retailers ?? []).some((r) => sameListing(r.url, incoming.sourceUrl))) return { item: row };
++  }
++
++  const unbranded = !incoming.brand.trim();
++  const ourCodes = [...new Set([...articleCodes({ name: incoming.name }), ...(incoming.codes ?? [])])];
+   const pieces: NamedItem[] = [];
+   for (const row of rows) {
+-    if (row.sourceUrl && row.sourceUrl === incoming.sourceUrl) continue;
+-    // One maker under both stores' spellings ("adidas" / "adidas Originals"),
+-    // or a card saved without a brand whose name spells this one's.
+-    if (!brandsFit(row, incoming)) continue;
++    // One maker under both stores' spellings ("adidas" / "adidas Originals",
++    // "Jordan" / "Nike"), or a card saved without a brand whose name spells
++    // this one's. Or one side names no brand at all — a brand's own site
++    // often leaves it out of its markup — and the name must then carry it.
++    const fit = brandsFit(row, incoming);
++    const oneUnbranded = unbranded !== !(row.brand ?? "").trim();
++    if (!fit && !oneUnbranded) continue;
+     const brands = [incoming.brand, row.brand ?? ""].filter((b) => b.trim());
+-    if (!samePiece(brands, incoming, row)) continue;
+-    if ((row.retailers ?? []).some((r) => r.url && r.url === incoming.sourceUrl)) return { item: row };
++    const sameCode = fit && shareArticleCode(ourCodes, articleCodes(row));
++    if (!sameCode && !samePiece(brands, incoming, row, { strict: !fit })) continue;
+     pieces.push(row);
+   }
+   if (!pieces.length) {
+-    return { item: null, miss: incoming.brand.trim() ? "no card of this model" : "no brand on the page, and no card whose name matches" };
++    return { item: null, miss: unbranded ? "no brand on the page, and no card whose name matches" : "no card of this model" };
+   }
+ 
+-  const elsewhere = pieces.filter(
+-    (row) => ![row.sourceUrl, ...(row.retailers ?? []).map((r) => r.url)].map(hostOf).includes(ourHost),
+-  );
+-  if (!elsewhere.length) return { item: null, miss: `this store is already on "${pieces[0].name}"` };
+-
+-  const priced = elsewhere.filter((row) => {
++  const priced = pieces.filter((row) => {
+     const theirs = typeof row.priceMin === "number" ? row.priceMin : 0;
+     if (!(incoming.price > 0 && theirs > 0)) return true;
+     return Math.max(incoming.price, theirs) / Math.min(incoming.price, theirs) <= MAX_PRICE_RATIO;
+   });
+-  if (!priced.length) return { item: null, miss: `price is more than ${MAX_PRICE_RATIO}× away from "${elsewhere[0].name}"` };
++  if (!priced.length) return { item: null, miss: `price is more than ${MAX_PRICE_RATIO}× away from "${pieces[0].name}"` };
++
++  const elsewhere = priced.filter((row) => !storesOf(row).has(ourHost));
+ 
+   // The page names no colour of its own: the model's first card takes the
+   // link. The store's page is the model's page, whichever colour it opens on,
+   // and a link on the model is what the admin asked for — not a skip.
+   const stated = incoming.coloursStated !== false && incoming.colors.length > 0;
+-  if (!stated) return { item: priced[0] };
++  if (!stated) {
++    if (elsewhere.length) return { item: elsewhere[0] };
++    return { item: null, miss: `this store is already on "${priced[0].name}", and the page names no colour to tell which` };
++  }
+ 
+   // Otherwise the closest colour wins, rather than a tie ending in nothing: the
+   // same words first, then the same colours in other words, then some of them,
+   // then a card that has no colour saved; among equals, the most colour words
+-  // in common. A colour none of these reaches is another colourway, which is
+-  // a card of its own.
++  // in common, and another store's card before this store's. A colour none of
++  // these reaches is another colourway, which is a card of its own.
+   const RANK: Record<string, number> = { same: 4, near: 3, partial: 2, unknown: 1, none: 1 };
+   const words = (list?: string[] | null) =>
+     new Set((list ?? []).join(" ").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+@@ -203,34 +235,50 @@ export function pickSameItemByName(
+       const rank = RANK[colourRelation(incoming.colors, row.colors)] ?? 0;
+       const theirs = words(row.colors);
+       const shared = [...ours].filter((w) => theirs.has(w)).length;
+-      return { row, rank, shared, index };
++      const own = storesOf(row).has(ourHost);
++      return { row, rank, shared, own, index };
+     })
+-    .filter((c) => c.rank > 0)
+-    .sort((a, b) => b.rank - a.rank || b.shared - a.shared || a.index - b.index);
++    // This store's own card only in its very colour: anything looser from the
++    // same store is its other colourway.
++    .filter((c) => c.rank > 0 && (!c.own || c.rank === RANK.same))
++    .sort((a, b) => b.rank - a.rank || b.shared - a.shared || Number(a.own) - Number(b.own) || a.index - b.index);
+   if (scored.length) return { item: scored[0].row };
+ 
++  if (!elsewhere.length) return { item: null, miss: `this store is already on "${priced[0].name}" in ${priced.map(colourOf).join(", ")}` };
+   return { item: null, miss: `in the catalogue only in ${priced.map(colourOf).join(", ")}` };
+ }
+ 
+ /**
+- * The retailer list with this store's entry in it.
++ * The retailer list with this store's entry in it — every other store's entry
++ * kept as it was.
+  *
+- * Replaced rather than appended when the store is already there, by URL first
+- * and by name second: re-collecting a product must update its price, not give it
+- * the same shop twice.
++ * Replaced rather than appended when the store is already there: the same page
++ * (its address however spelled), or another page of the same store (its host),
++ * because re-collecting a product must update its price, not give it the same
++ * shop twice. A name decides only for an entry with no address. Two sites
++ * sharing a name — `nike.com` and `nike.ua`, both "Nike" — are two stores, and
++ * adding the second used to replace the first's link.
+  */
+ export function withRetailer(existing: Retailer[] | null | undefined, entry: Retailer): Retailer[] {
+   const list = Array.isArray(existing) ? [...existing] : [];
+-  const index = list.findIndex(
+-    (r) =>
+-      (r.url && entry.url && r.url === entry.url) ||
+-      (r.name && entry.name && r.name.toLowerCase() === entry.name.toLowerCase()),
+-  );
++  let index = list.findIndex((r) => sameListing(r.url, entry.url));
++  if (index < 0) index = list.findIndex((r) => sameStore(r.url, entry.url));
++  if (index < 0) {
++    index = list.findIndex(
++      (r) => (!r.url || !entry.url) && !!r.name && !!entry.name && r.name.toLowerCase() === entry.name.toLowerCase(),
++    );
++  }
+   if (index >= 0) list[index] = entry;
+   else list.push(entry);
+   return list.slice(0, 20);
+ }
+ 
++/** Is this entry the same store as `entry` — by address, or by name where either has none? */
++export function isSameRetailer(r: Retailer, entry: Retailer): boolean {
++  if (r.url && entry.url) return sameStore(r.url, entry.url);
++  return !!r.name && !!entry.name && r.name.toLowerCase() === entry.name.toLowerCase();
++}
++
+ export interface MergeResult {
+   /** Database columns to write on the existing row. */
+   patch: Record<string, unknown>;
