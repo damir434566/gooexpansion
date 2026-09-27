@@ -1,11 +1,15 @@
 
 — launching chromium with the unpacked extension —
   extension id pjbcdcadhhapgbljlmbiakkkniiialfa
-  ok   installs with access to no store whatsoever (no <all_urls>)
+  ok   installs with access to no store whatsoever (no <all_urls>) — only goo-fashion itself
   ok   the only pages it may touch at install are our own collect screen
   ok   asks only for the four narrow APIs
   store origin granted (stands in for the popup prompt)
 
+— the popup —
+  ok   the popup starts up without an error
+  ok   and its Stop button runs without an error
+  ok   with the helpers every button uses
 — run A: ordinary store, Crawl-delay 2, one path disallowed —
   ok   the store origin is granted before the run
   ok   run A finished
@@ -69,5 +73,25 @@
   ok   and an article number off a plain Ukrainian line, where nothing is declared
   ok   the piece is tagged with a style, from words only the rendered page had
 
-  56 passed, 0 failed
+— run H: the popup's Links only box —
+  ok   ticked: Start in the popup runs without an error
+  ok   ticked: the run finished
+  ok   ticked: the plan reached the site with linksOnly: true
+  ok   ticked: every page reached the site with linksOnly: true
+  ok   under the new key, not 1.0.5's linkOnly
+  ok   ticked: the photos are still sent
+  ok   the box is remembered for this store
+  ok   the popup opens with the box ticked for this store
+  ok   cleared: Start in the popup runs without an error
+  ok   cleared: the run finished
+  ok   cleared: the plan reached the site with linksOnly: false
+  ok   cleared: every page reached the site with linksOnly: false
+  ok   and the store is forgotten as a links store
+  ok   and the popup opens with it cleared again
+
+— run G: the extension reloaded under an open collect tab —
+  ok   the new worker found the old collect tab and gave it a working bridge
+  ok   and the collect screen hears the extension again
+
+  75 passed, 0 failed
 

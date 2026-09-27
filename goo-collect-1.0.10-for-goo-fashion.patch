@@ -1,0 +1,199 @@
+diff --git a/extension/README.md b/extension/README.md
+index 4da7f87..1467c94 100644
+--- a/extension/README.md
++++ b/extension/README.md
+@@ -45,6 +45,7 @@
+ | Поле | Что это |
+ |---|---|
+ | **Products to collect** | Сколько товаров собрать за прогон. |
++| **Links only** | Только добавить ссылку и цену этого магазина к вещам, которые уже есть в каталоге; новых карточек не создаётся. Запоминается для каждого магазина. Галочка решает режим прогона вместо переключателя на экране Collect (нужен goo-fashion #889). |
+ | **Goo Studio** | Адрес сайта. По умолчанию `https://www.goo-fashion.com`. Для локальной разработки — `http://localhost:3000`. |
+ 
+ ---
+diff --git a/extension/background.js b/extension/background.js
+index 390fb65..85e2a2d 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -409,7 +409,7 @@ function finish() {
+   void tellPage("done", {});
+ }
+ 
+-async function run({ storeUrl, limit }) {
++async function run({ storeUrl, limit, linksOnly = false }) {
+   let origin;
+   try {
+     origin = new URL(storeUrl).origin;
+@@ -474,6 +474,9 @@ async function run({ storeUrl, limit }) {
+       sitemaps: docs,
+       seen,
+       limit: limit - collected,
++      // The popup's "Links only": the site then looks in this store for the
++      // pieces we already have, and opens no other pages.
++      linksOnly,
+     });
+     html = ""; // the start page is only worth sending once
+ 
+@@ -521,7 +524,10 @@ async function run({ storeUrl, limit }) {
+       const ingested = await askPage("ingest", {
+         url,
+         html: snap.html,
++        // Sent in links-only runs too: the site keeps no photo from them, but
++        // may read the colour off one, and the colour picks the right card.
+         images: snap.images,
++        linksOnly,
+         priceText: snap.priceText,
+         sizes: snap.sizes,
+         colorText: snap.colorText,
+@@ -615,7 +621,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+       }
+       const storeUrl = msg.payload?.storeUrl;
+       const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, 2_000));
+-      run({ storeUrl, limit }).catch((err) => {
++      run({ storeUrl, limit, linksOnly: msg.payload?.linksOnly === true }).catch((err) => {
+         halt(err?.message ?? "The run failed unexpectedly.");
+       });
+       sendResponse({ ok: true });
+diff --git a/extension/manifest.json b/extension/manifest.json
+index 004cd63..090172b 100644
+--- a/extension/manifest.json
++++ b/extension/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "Goo Collect",
+-  "version": "1.0.9",
++  "version": "1.0.10",
+   "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
+   "minimum_chrome_version": "116",
+   "permissions": [
+diff --git a/extension/popup.css b/extension/popup.css
+index e8758ee..145da73 100644
+--- a/extension/popup.css
++++ b/extension/popup.css
+@@ -70,6 +70,20 @@ h1 {
+   gap: 8px;
+ }
+ 
++.row.check small {
++  display: block;
++  margin-top: 2px;
++  font-size: 10px;
++  letter-spacing: 0;
++  text-transform: none;
++  color: var(--foreground-subtle);
++}
++
++.row.check input {
++  width: auto;
++  flex: none;
++}
++
+ .row {
+   display: flex;
+   align-items: center;
+diff --git a/extension/popup.html b/extension/popup.html
+index 251c73f..8d28a48 100644
+--- a/extension/popup.html
++++ b/extension/popup.html
+@@ -17,6 +17,14 @@
+         <input id="limit" type="number" min="1" max="2000" value="30" />
+       </label>
+ 
++      <label class="row check" for="linksOnly">
++        <span>
++          Links only
++          <small>Only add this store's link to pieces we already have. Nothing new is created.</small>
++        </span>
++        <input id="linksOnly" type="checkbox" />
++      </label>
++
+       <label class="row" for="studio">
+         <span>Goo Studio</span>
+         <input id="studio" type="url" spellcheck="false" placeholder="https://www.goo-fashion.com" />
+diff --git a/extension/popup.js b/extension/popup.js
+index a02a35c..6650534 100644
+--- a/extension/popup.js
++++ b/extension/popup.js
+@@ -21,6 +21,7 @@ const COLLECT_PATH = "/goo-studio/parser/collect";
+ const el = {
+   store: document.getElementById("store"),
+   limit: document.getElementById("limit"),
++  linksOnly: document.getElementById("linksOnly"),
+   studio: document.getElementById("studio"),
+   start: document.getElementById("start"),
+   stop: document.getElementById("stop"),
+@@ -36,6 +37,35 @@ const el = {
+ 
+ let activeUrl = "";
+ 
++/**
++ * "Links only" is a fact about a store, not about a run: a store whose cards
++ * we already have from elsewhere will be a links store next week too. So it is
++ * remembered per store (its host, without `www.`), on this machine, and the
++ * box is ticked again when the admin comes back to it. The key is 1.0.5's, so
++ * stores ticked then come back ticked.
++ */
++const LINK_ONLY_KEY = "linkOnlyStores";
++
++function hostOf(url) {
++  try {
++    return new URL(url).hostname.replace(/^www\./, "");
++  } catch {
++    return "";
++  }
++}
++
++async function linksOnlyStores() {
++  const stored = await chrome.storage.local.get(LINK_ONLY_KEY);
++  return Array.isArray(stored[LINK_ONLY_KEY]) ? stored[LINK_ONLY_KEY] : [];
++}
++
++async function rememberLinksOnly(host, on) {
++  if (!host) return;
++  const list = (await linksOnlyStores()).filter((h) => h !== host);
++  if (on) list.push(host);
++  await chrome.storage.local.set({ [LINK_ONLY_KEY]: list.slice(-500) });
++}
++
+ function note(message) {
+   el.note.textContent = message ?? "";
+   el.note.hidden = !message;
+@@ -57,6 +87,7 @@ async function init() {
+ 
+   if (/^https?:/i.test(activeUrl)) {
+     el.store.textContent = activeUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70);
++    el.linksOnly.checked = (await linksOnlyStores()).includes(hostOf(activeUrl));
+   } else {
+     el.store.textContent = "Open a store page in this tab first.";
+     el.start.disabled = true;
+@@ -109,7 +140,9 @@ async function start() {
+ 
+   const studioOrigin = (el.studio.value || DEFAULT_STUDIO).replace(/\/+$/, "");
+   const limit = Math.max(1, Math.min(Number(el.limit.value) || 30, 2000));
++  const linksOnly = el.linksOnly.checked;
+   await chrome.storage.sync.set({ studioOrigin, limit });
++  await rememberLinksOnly(hostOf(activeUrl), linksOnly);
+ 
+   // Must be inside the click: Chrome refuses a permission prompt without one.
+   let granted = false;
+@@ -137,7 +170,7 @@ async function start() {
+     return;
+   }
+ 
+-  const res = await send("start", { storeUrl: activeUrl, limit });
++  const res = await send("start", { storeUrl: activeUrl, limit, linksOnly });
+   if (res && res.ok === false) {
+     note(res.error ?? "Could not start.");
+     el.start.disabled = false;
+@@ -185,6 +218,11 @@ el.start.addEventListener("click", () => {
+   });
+ });
+ 
++// Remembered as soon as it is ticked, not only when a run starts.
++el.linksOnly.addEventListener("change", () => {
++  rememberLinksOnly(hostOf(activeUrl), el.linksOnly.checked).catch(() => {});
++});
++
+ el.stop.addEventListener("click", async () => {
+   await send("stop");
+   render(await send("state"));

@@ -409,7 +409,7 @@ function finish() {
   void tellPage("done", {});
 }
 
-async function run({ storeUrl, limit }) {
+async function run({ storeUrl, limit, linksOnly = false }) {
   let origin;
   try {
     origin = new URL(storeUrl).origin;
@@ -474,6 +474,9 @@ async function run({ storeUrl, limit }) {
       sitemaps: docs,
       seen,
       limit: limit - collected,
+      // The popup's "Links only": the site then looks in this store for the
+      // pieces we already have, and opens no other pages.
+      linksOnly,
     });
     html = ""; // the start page is only worth sending once
 
@@ -521,7 +524,10 @@ async function run({ storeUrl, limit }) {
       const ingested = await askPage("ingest", {
         url,
         html: snap.html,
+        // Sent in links-only runs too: the site keeps no photo from them, but
+        // may read the colour off one, and the colour picks the right card.
         images: snap.images,
+        linksOnly,
         priceText: snap.priceText,
         sizes: snap.sizes,
         colorText: snap.colorText,
@@ -615,7 +621,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       const storeUrl = msg.payload?.storeUrl;
       const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, 2_000));
-      run({ storeUrl, limit }).catch((err) => {
+      run({ storeUrl, limit, linksOnly: msg.payload?.linksOnly === true }).catch((err) => {
         halt(err?.message ?? "The run failed unexpectedly.");
       });
       sendResponse({ ok: true });

@@ -99,11 +99,14 @@ class Session {
       }, 180000);
     });
   }
-  async evaluate(expression) {
+  async evaluate(expression, { userGesture = false } = {}) {
     const r = await this.send("Runtime.evaluate", {
       expression,
       awaitPromise: true,
       returnByValue: true,
+      // A click the way an admin makes one: permissions.request and the popup's
+      // Start need a user gesture, and CDP can lend one.
+      userGesture,
     });
     if (r.exceptionDetails) {
       throw new Error(r.exceptionDetails.exception?.description ?? "evaluate threw");
@@ -683,6 +686,88 @@ async function main() {
   );
 
   collect.close(); popup.close();
+
+  // ── Run H: the popup's "Links only" box ────────────────────────────────────
+  //
+  // 1.0.10 puts the box back. The site takes the mode from the extension when
+  // it sends one, so what matters is what reaches /api/admin/parser/collect:
+  // linksOnly true on the plan and on every page when ticked, false when not,
+  // and the photos still sent (the site reads the colour off them). And the
+  // box is remembered for the store. Driven through the popup's own Start
+  // button, as a click drives it — not by messaging the worker.
+  console.log("\n— run H: the popup's Links only box —");
+  const STORE_TAB = `${STORE}/collections/all`;
+  // The popup reads the store from the active tab; opened as a tab here, that
+  // would be itself, so the tab it is asked about is the store's. And the
+  // permission prompt, which headless Chrome leaves pending forever, answers
+  // with the grant seeded above — the admin's "Allow". The rest of Start runs
+  // as it does under a real click.
+  const asIfOn =
+    `chrome.tabs.query = async () => [{ url: ${JSON.stringify(STORE_TAB)} }];` +
+    "chrome.permissions.request = (q) => chrome.permissions.contains(q);";
+  const popupRun = async (tick) => {
+    await storeControl({ mode: "normal", reset: true });
+    await studioReset();
+    const c = await openCollect();
+    const p = await openPopup(extId);
+    await p.evaluate(`(async () => { ${asIfOn} await init(); })()`);
+    const restored = await p.evaluate("document.getElementById('linksOnly').checked");
+    const errors = await p.evaluate(
+      `(async () => {
+        const errors = [];
+        window.addEventListener("error", (e) => errors.push(String(e.message)));
+        window.addEventListener("unhandledrejection", (e) => errors.push(String(e.reason)));
+        const box = document.getElementById("linksOnly");
+        if (box.checked !== ${tick}) box.click();
+        document.getElementById("start").click();
+        // Start asks for the store, reaches the collect tab, then starts the
+        // worker: done when the worker runs, or when the popup says why not.
+        for (let i = 0; i < 60; i++) {
+          await new Promise((r) => setTimeout(r, 500));
+          const noteEl = document.getElementById("note");
+          if (!noteEl.hidden) return errors.concat([noteEl.textContent]);
+          const st = await send("state");
+          if (st && st.running) return errors;
+        }
+        return errors.concat(["the run never started"]);
+      })()`,
+      { userGesture: true },
+    );
+    const done = await waitForEvent("done", 120000);
+    const stored = await p.evaluate("chrome.storage.local.get('linkOnlyStores').then((s) => s.linkOnlyStores || [])");
+    const { api } = await studioEvents();
+    c.close(); p.close();
+    return { restored, errors, done, stored, api };
+  };
+
+  {
+    const on = await popupRun(true);
+    check("ticked: Start in the popup runs without an error", on.errors.length === 0, JSON.stringify(on.errors));
+    check("ticked: the run finished", !!on.done);
+    const plans = on.api.filter((a) => a.action === "plan");
+    const pages = on.api.filter((a) => a.action === "ingest");
+    check("ticked: the plan reached the site with linksOnly: true", plans.length > 0 && plans.every((a) => a.linksOnly === true), JSON.stringify(plans));
+    check("ticked: every page reached the site with linksOnly: true", pages.length > 0 && pages.every((a) => a.linksOnly === true), JSON.stringify(pages));
+    check("under the new key, not 1.0.5's linkOnly", on.api.every((a) => !a.oldKey));
+    check("ticked: the photos are still sent", pages.every((a) => a.images > 0), JSON.stringify(pages.map((a) => a.images)));
+    check("the box is remembered for this store", on.stored.includes("127.0.0.1"), JSON.stringify(on.stored));
+
+    const off = await popupRun(false);
+    check("the popup opens with the box ticked for this store", off.restored === true, String(off.restored));
+    check("cleared: Start in the popup runs without an error", off.errors.length === 0, JSON.stringify(off.errors));
+    check("cleared: the run finished", !!off.done);
+    const plansOff = off.api.filter((a) => a.action === "plan");
+    const pagesOff = off.api.filter((a) => a.action === "ingest");
+    check("cleared: the plan reached the site with linksOnly: false", plansOff.length > 0 && plansOff.every((a) => a.has && a.linksOnly === false), JSON.stringify(plansOff));
+    check("cleared: every page reached the site with linksOnly: false", pagesOff.length > 0 && pagesOff.every((a) => a.has && a.linksOnly === false), JSON.stringify(pagesOff));
+    check("and the store is forgotten as a links store", !off.stored.includes("127.0.0.1"), JSON.stringify(off.stored));
+
+    const p = await openPopup(extId);
+    await p.evaluate(`(async () => { ${asIfOn} await init(); })()`);
+    const after = await p.evaluate("document.getElementById('linksOnly').checked");
+    check("and the popup opens with it cleared again", after === false, String(after));
+    p.close();
+  }
 
   // ── Run G: the extension is updated while the collect tab stays open ───────
   //
