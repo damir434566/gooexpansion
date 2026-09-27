@@ -302,6 +302,31 @@ async function main() {
   await sleep(2500);
   console.log("  store origin granted (stands in for the popup prompt)\n");
 
+  // ── The popup itself ───────────────────────────────────────────────────────
+  // Every run below talks to the worker directly, which is how 1.0.7 shipped a
+  // popup whose own helpers were gone: Start threw "note is not a function"
+  // and nothing here noticed. So the popup's code is run as a click runs it.
+  console.log("— the popup —");
+  {
+    const p = await openPopup(extId);
+    const initRun = await p.evaluate(
+      "(async () => { try { await init(); return 'ok'; } catch (e) { return String(e); } })()",
+    );
+    check("the popup starts up without an error", initRun === "ok", initRun);
+    const stopClick = await p.evaluate(`(async () => {
+      const errors = [];
+      window.addEventListener("error", (e) => errors.push(String(e.message)));
+      window.addEventListener("unhandledrejection", (e) => errors.push(String(e.reason)));
+      document.getElementById("stop").click();
+      await new Promise((r) => setTimeout(r, 800));
+      return errors;
+    })()`);
+    check("and its Stop button runs without an error", Array.isArray(stopClick) && stopClick.length === 0, JSON.stringify(stopClick));
+    const helpers = await p.evaluate("typeof note + ' ' + typeof send");
+    check("with the helpers every button uses", helpers === "function function", helpers);
+    p.close();
+  }
+
   // ── Run A: a normal store ─────────────────────────────────────────────────
   console.log("— run A: ordinary store, Crawl-delay 2, one path disallowed —");
   await storeControl({ mode: "normal", reset: true });
