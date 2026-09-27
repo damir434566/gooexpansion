@@ -29,7 +29,7 @@
  */
 import type { Retailer } from "@/lib/types";
 import { colourRelation, samePiece } from "./piece-name";
-import { foldBrand } from "./brand-from-name";
+import { brandsAgree } from "./brand-from-name";
 
 /** The columns the importer needs to decide and to merge. */
 export interface ExistingItem {
@@ -156,13 +156,13 @@ export function pickSameItemByName(
   // Without an address there is no place to buy to add.
   if (!ourHost || !incoming.brand.trim()) return { item: null, miss: "no brand or address to match by" };
 
-  const brand = foldBrand(incoming.brand);
   const pieces: NamedItem[] = [];
   for (const row of rows) {
     if (row.sourceUrl && row.sourceUrl === incoming.sourceUrl) continue;
-    // The caller reads one brand's rows, but the decision does not lean on it.
-    if (foldBrand(row.brand ?? "") !== brand) continue;
-    if (!samePiece(incoming.brand, incoming, row)) continue;
+    // The caller reads by a brand word, but the decision does not lean on it:
+    // one maker under both stores' spellings ("adidas" / "adidas Originals").
+    if (!brandsAgree(row.brand ?? "", incoming.brand)) continue;
+    if (!samePiece([incoming.brand, row.brand ?? ""], incoming, row)) continue;
     if ((row.retailers ?? []).some((r) => r.url && r.url === incoming.sourceUrl)) return { item: row };
     pieces.push(row);
   }

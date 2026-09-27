@@ -85,11 +85,24 @@ export interface PieceName {
  * `colors` are the row's stated colours: "Core Black" is removed as a phrase,
  * so the "Core" goes with it rather than staying behind as part of the name.
  */
-export function pieceName(name: string, brand: string, colors: string[] = []): PieceName {
+/**
+ * How a brand's own line appears in a product's name, beyond the brand itself.
+ * Jordan's shoes are "Air Jordan 4" on one store and "Jordan 4" on the next.
+ */
+const BRAND_LINES: Record<string, string[]> = {
+  jordan: ["air jordan"],
+};
+
+export function pieceName(name: string, brand: string | string[], colors: string[] = []): PieceName {
   let text = foldBrand(cleanName(name ?? ""));
 
-  const b = foldBrand(brand ?? "");
-  if (b) text = text.replace(phrase(b), " ");
+  // Every spelling of the maker comes out, longest first, so "Carhartt WIP"
+  // leaves nothing behind where "Carhartt" alone would leave "wip".
+  const brands = (Array.isArray(brand) ? brand : [brand]).map((v) => foldBrand(v ?? "")).filter(Boolean);
+  const spellings = [...new Set(brands.flatMap((b) => [...(BRAND_LINES[b] ?? []), b]))].sort(
+    (p, q) => q.length - p.length,
+  );
+  for (const b of spellings) text = text.replace(phrase(b), " ");
   for (const color of colors) {
     const c = foldBrand(color ?? "");
     if (c.length >= 3) text = text.replace(phrase(c), " ");
@@ -179,13 +192,58 @@ export interface PieceRow {
 }
 
 /** Are these two rows, of one brand, the same piece (in any colour)? */
-export function samePiece(brand: string, a: PieceRow, b: PieceRow): boolean {
-  if (!foldBrand(brand)) return false;
+/**
+ * The word that best picks this model out of its brand's cards: the longest
+ * word of the reduced name that has letters in it — "windrunner", "nuptse" —
+ * never the brand, a colour or the garment word. Ties go alphabetically, so
+ * two spellings of one model pick the same word. Empty when there is none.
+ */
+export function modelWord(name: string, brand: string | string[], colors: string[] = []): string {
+  const piece = pieceName(name, brand, colors);
+  const words = (piece.core || piece.full).split(" ").filter((w) => /\p{L}/u.test(w) && w.length >= 4);
+  return words.sort((a, b) => b.length - a.length || a.localeCompare(b))[0] ?? "";
+}
+
+/**
+ * Words a second store adds to a model's name without making it another model:
+ * the year of a release, the garment word, filler, a colour.
+ */
+function addsNothing(token: string): boolean {
+  return /^(?:19|20)\d\d$/.test(token) || TYPE_WORDS.has(token) || FILLER.has(token) || colorWordsIn(token).length > 0;
+}
+
+/**
+ * One store's name is the other's with only words that add nothing: "Jordan 4
+ * Retro Toro Bravo" and StockX's "Air Jordan 4 Retro 'Toro Bravo' (2026)".
+ * The shorter must still name a model — three words, or two with a number —
+ * so "Jordan 4 Retro" never takes in "Jordan 4 Retro Toro Bravo": the extra
+ * "toro bravo" is a colourway, which adds everything.
+ */
+function sameModelLonger(x: PieceName, y: PieceName): boolean {
+  const a = x.full.split(" ").filter(Boolean);
+  const b = y.full.split(" ").filter(Boolean);
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  const shortSet = new Set(short);
+  if (shortSet.size < 2 || short.join(" ").length < MIN_PIECE_NAME) return false;
+  if (shortSet.size < 3 && !short.some((t) => /\d/.test(t))) return false;
+  const longSet = new Set(long);
+  if (![...shortSet].every((t) => longSet.has(t))) return false;
+  return [...longSet].every((t) => shortSet.has(t) || addsNothing(t));
+}
+
+/**
+ * Are two rows one piece? `brand` is every spelling of the maker the two rows
+ * use — "Carhartt WIP" and "Carhartt" — so each name loses all of them.
+ */
+export function samePiece(brand: string | string[], a: PieceRow, b: PieceRow): boolean {
+  const brands = Array.isArray(brand) ? brand : [brand];
+  if (!brands.some((v) => foldBrand(v ?? ""))) return false;
   if (!categoriesAgree(a.category, b.category)) return false;
-  const x = pieceName(a.name, brand, a.colors ?? []);
-  const y = pieceName(b.name, brand, b.colors ?? []);
+  const x = pieceName(a.name, brands, a.colors ?? []);
+  const y = pieceName(b.name, brands, b.colors ?? []);
   if (x.full.length >= MIN_PIECE_NAME && x.full === y.full) return true;
   if (strongCore(x.core) && x.core === y.core) return true;
+  if (sameModelLonger(x, y)) return true;
   return singleWordModel(x, y, a, b);
 }
 

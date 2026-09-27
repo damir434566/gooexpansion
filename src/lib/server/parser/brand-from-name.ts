@@ -31,6 +31,40 @@ export function foldBrand(value: string): string {
     .trim();
 }
 
+/**
+ * A brand as two stores both spell it: folded, "&" read as "and", and a
+ * leading "The" dropped — "The North Face" and "North Face" are one maker.
+ */
+function brandWords(value: string): string {
+  return foldBrand(value)
+    .replace(/&/g, " and ")
+    .replace(/[\s,.]+/g, " ")
+    .replace(/^the /, "")
+    .trim();
+}
+
+/**
+ * Do two stores' brand strings name one maker?
+ *
+ * The same, or one is the other with a line name after it: a reseller writes
+ * "adidas Originals" for what adidas.com calls adidas, "Carhartt WIP" for
+ * Carhartt, "Nike SB" for Nike. Only a whole-word FRONT counts — "Angels" is
+ * not "Palm Angels", and "Off" is not "Off-White" (one word, not two).
+ */
+export function brandsAgree(a: string, b: string): boolean {
+  const x = brandWords(a);
+  const y = brandWords(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  return short.length >= 3 && long.startsWith(`${short} `);
+}
+
+/** The word a catalogue search for this brand's cards should look for. */
+export function brandSearchWord(value: string): string {
+  return brandWords(value).split(" ")[0] ?? "";
+}
+
 /** Letters and digits only, for comparing a brand to the labels of a host. */
 function compact(value: string): string {
   return foldBrand(value).replace(/[^\p{L}\p{N}]+/gu, "");
