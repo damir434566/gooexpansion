@@ -36,6 +36,15 @@ const el = {
 
 let activeUrl = "";
 
+function note(message) {
+  el.note.textContent = message ?? "";
+  el.note.hidden = !message;
+}
+
+function send(type, payload) {
+  return chrome.runtime.sendMessage({ type, payload }).catch(() => null);
+}
+
 // ── Setup ────────────────────────────────────────────────────────────────────
 
 async function init() {
