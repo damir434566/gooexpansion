@@ -375,7 +375,6 @@ async function findSameItemByName(incoming: {
   price: number;
   sourceUrl: string | null;
 }): Promise<{ item: NamedItem | null; unread: string[]; miss?: string }> {
-  if (!incoming.brand) return { item: null, unread: [], miss: "no brand to match by" };
   if (!incoming.sourceUrl) return { item: null, unread: [], miss: "no address to add as a store" };
   try {
     // Read by the brand's first word, not its whole spelling: "adidas" and
@@ -383,21 +382,21 @@ async function findSameItemByName(incoming: {
     // exact match never showed a card to the other spelling. And read twice:
     // once narrowed by the model's own word, because a brand with more cards
     // than one read returns hid the very card this page belongs to.
+    //
+    // And a third read by the model's word alone, whatever the brand column
+    // says: a card saved before its brand was read has none, and a page whose
+    // brand was not read has none either. `brandsFit` then asks the names.
     const word = brandSearchWord(incoming.brand);
     const model = modelWord(incoming.name, incoming.brand, incoming.colors);
+    if (!word && !model) return { item: null, unread: [], miss: "no brand and no model word to look up" };
     for (const columns of NAME_MATCH_COLUMNS) {
+      const products = () => supabase!.from("products").select(columns);
       const reads = [
-        ...(model
-          ? [
-              supabase!
-                .from("products")
-                .select(columns)
-                .ilike("brand", `%${escapeLike(word)}%`)
-                .ilike("name", `%${escapeLike(model)}%`)
-                .limit(BRAND_ROWS),
-            ]
+        ...(word && model
+          ? [products().ilike("brand", `%${escapeLike(word)}%`).ilike("name", `%${escapeLike(model)}%`).limit(BRAND_ROWS)]
           : []),
-        supabase!.from("products").select(columns).ilike("brand", `%${escapeLike(word)}%`).limit(BRAND_ROWS),
+        ...(word ? [products().ilike("brand", `%${escapeLike(word)}%`).limit(BRAND_ROWS)] : []),
+        ...(model ? [products().ilike("name", `%${escapeLike(model)}%`).limit(BRAND_ROWS)] : []),
       ];
       const seen = new Map<string, unknown>();
       let failed = false;
@@ -788,6 +787,8 @@ export async function importParsedProduct(
 
   let productId: string | null = null;
   let updated = false;
+  /** Why a new card was made rather than a link added, for the run's row. */
+  let newCardNote: string | undefined;
   try {
     let existingId: string | null = null;
     let existingRetailers: Product["retailers"] = [];
@@ -949,6 +950,7 @@ export async function importParsedProduct(
       const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);
       if (error) throw new Error(error.message);
       productId = data?.id ?? null;
+      if (miss) newCardNote = `new card — ${miss}`;
     }
   } catch (err) {
     return {
@@ -1010,5 +1012,6 @@ export async function importParsedProduct(
     genderNote,
     styleNote,
     variantsLinked,
+    ...(newCardNote ? { linkNote: newCardNote } : {}),
   };
 }

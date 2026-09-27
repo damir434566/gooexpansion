@@ -60,6 +60,20 @@ export function brandsAgree(a: string, b: string): boolean {
   return short.length >= 3 && long.startsWith(`${short} `);
 }
 
+/**
+ * Does one row's brand hold for the other? The same maker (`brandsAgree`), or
+ * one row has no brand saved and its name spells the other's — cards made
+ * before the brand was read carry "Stussy Basic Logo Hoodie" with no brand.
+ */
+export function brandsFit(a: { brand?: string | null; name: string }, b: { brand?: string | null; name: string }): boolean {
+  const x = (a.brand ?? "").trim();
+  const y = (b.brand ?? "").trim();
+  if (x && y) return brandsAgree(x, y);
+  if (x) return positionIn(b.name, x) >= 0;
+  if (y) return positionIn(a.name, y) >= 0;
+  return false;
+}
+
 /** The word a catalogue search for this brand's cards should look for. */
 export function brandSearchWord(value: string): string {
   return brandWords(value).split(" ")[0] ?? "";

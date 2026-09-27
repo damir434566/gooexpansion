@@ -185,6 +185,16 @@ function categoriesAgree(a?: string | null, b?: string | null): boolean {
   return a === b;
 }
 
+/**
+ * Two rows' categories, as evidence that they are different pieces. Two stores
+ * file one sweatshirt under "knitwear" and "tops", so a category alone is not
+ * enough to tell pieces apart: it counts only when the names also name two
+ * different garments — a Windrunner jacket and Windrunner trousers.
+ */
+function differentGarments(a: PieceRow, b: PieceRow): boolean {
+  return !categoriesAgree(a.category, b.category) && garmentTypesConflict(a.name, b.name);
+}
+
 export interface PieceRow {
   name: string;
   colors?: string[] | null;
@@ -238,7 +248,7 @@ function sameModelLonger(x: PieceName, y: PieceName): boolean {
 export function samePiece(brand: string | string[], a: PieceRow, b: PieceRow): boolean {
   const brands = Array.isArray(brand) ? brand : [brand];
   if (!brands.some((v) => foldBrand(v ?? ""))) return false;
-  if (!categoriesAgree(a.category, b.category)) return false;
+  if (differentGarments(a, b)) return false;
   const x = pieceName(a.name, brands, a.colors ?? []);
   const y = pieceName(b.name, brands, b.colors ?? []);
   if (x.full.length >= MIN_PIECE_NAME && x.full === y.full) return true;
@@ -317,8 +327,11 @@ function foldColour(value: string): string {
 }
 
 export function colourRelation(a?: string[] | null, b?: string[] | null): ColourRelation {
-  const x = foldColour(a?.[0] ?? "");
-  const y = foldColour(b?.[0] ?? "");
+  // Every colour a row lists, not its first: a card saved as ["White", "Black"]
+  // and a page saying ["Black", "White"] are one colourway, and comparing the
+  // first entries called them two.
+  const x = foldColour((a ?? []).filter(Boolean).join(" / "));
+  const y = foldColour((b ?? []).filter(Boolean).join(" / "));
   if (!x && !y) return "none";
   if (!x || !y) return "unknown";
   if (x === y) return "same";
