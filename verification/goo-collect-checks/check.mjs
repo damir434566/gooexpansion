@@ -32,6 +32,7 @@ const routes = {
   "/products/jordan-leather-jkt.json": ["application/json", page("jordan-leather-jkt.json")],
   "/meta.json": ["application/json", page("meta.json")],
   "/products/stack-jacket-black-white": ["text/html; charset=utf-8", page("stack.html")],
+  "/products/wool-coat-gallery": ["text/html; charset=utf-8", page("gallery-noise.html")],
   "/products/mia-jacket-a": ["text/html; charset=utf-8", page("size-swatch-a.html")],
   "/products/mia-jacket-b": ["text/html; charset=utf-8", page("size-swatch-b.html")],
 };
@@ -122,6 +123,18 @@ cases.push(
     ],
   },
 );
+
+cases.push({
+  name: "Фото: только галерея товара — без шапки, подвала, свотчей, иконок и «похожих»",
+  path: "/products/wool-coat-gallery",
+  check: (r) => {
+    const names = (r.images || []).map((u) => u.split("/").pop());
+    return [
+      ["обе фото товара", ["wool-coat-front.jpg", "wool-coat-back.jpg"].every((n) => names.includes(n)), true],
+      ["чужие и мебель страницы", names.filter((n) => /logo|swatch|visa|trench|long|badge/.test(n)), []],
+    ];
+  },
+});
 
 const browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
 let failed = 0;

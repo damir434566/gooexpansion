@@ -222,7 +222,11 @@ export function rawFromShopifyProduct(
 export function mergeShopifyIntoRaw(raw: RawExtract, product: unknown, pageUrl: string, currency?: string): RawExtract {
   if (!isShopifyProduct(product)) return raw;
   const shop = rawFromShopifyProduct(product, pageUrl, currency);
-  const images = [...new Set([...(shop.images ?? []), ...(raw.images ?? [])])];
+  // The store's own list of this product's photos is the gallery. Adding what
+  // the page showed brought in the "you may also like" rail — other products
+  // on the same CDN, named in the same house style — and each photo a second
+  // time under the store's /cdn/shop/ address.
+  const images = shop.images?.length ? shop.images : (raw.images ?? []);
   const type = typeof product.product_type === "string" ? product.product_type.trim() : "";
   const trail = raw.breadcrumbs ?? [];
   const priced = !!shop.price && !!shop.currency;

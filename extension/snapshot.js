@@ -123,6 +123,39 @@
   }
 
   /**
+   * Parts of a page whose pictures are never this product's: the other
+   * products (recommendation rails, listing cards — `OTHER_PRODUCTS` below),
+   * the site's own furniture, the cart drawer, and the colour swatches, which
+   * are small photos of the OTHER colourways. Every one of them sat on the same
+   * CDN as the gallery, named in the same house style, and reached the card.
+   */
+  const NOT_THIS_PRODUCT = [
+    "header", "footer", "nav", '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+    '[class*="mega-menu" i]', '[class*="megamenu" i]', '[class*="cart-drawer" i]', '[id*="cart-drawer" i]',
+    '[class*="minicart" i]', '[class*="mini-cart" i]', '[class*="swatch" i]', '[class*="announcement" i]',
+  ].join(",");
+
+  /** A picture smaller than this on both sides is an icon, a badge or a swatch. */
+  const MIN_PHOTO_PX = 64;
+
+  /** Is this `<img>` (or `<source>`) part of the product's own gallery, as far as the page shows? */
+  function ownImage(el) {
+    try {
+      if (el.closest(OTHER_PRODUCTS) || el.closest(NOT_THIS_PRODUCT)) return false;
+    } catch {
+      // A selector this browser cannot parse: keep the picture rather than lose the gallery.
+    }
+    if (el.tagName === "IMG") {
+      // The file's own size once loaded, else the size the page lays it out at.
+      // Zero is "not known yet" — a lazy slide — and never a reason to drop it.
+      const w = el.naturalWidth || el.width;
+      const h = el.naturalHeight || el.height;
+      if (w && h && w < MIN_PHOTO_PX && h < MIN_PHOTO_PX) return false;
+    }
+    return true;
+  }
+
+  /**
    * Every address on the page that could be a photo of this product.
    *
    * Deliberately greedy: it costs a few hundred strings, and the server rejects
@@ -146,6 +179,7 @@
     // `currentSrc` first: on a responsive image it is the rendition the browser
     // actually chose and loaded, which no attribute in the markup states.
     for (const img of document.images) {
+      if (!ownImage(img)) continue;
       add(img.currentSrc);
       add(img.getAttribute("src"));
       addSrcset(img.getAttribute("srcset"));
@@ -159,6 +193,7 @@
     }
 
     for (const source of document.querySelectorAll("picture source")) {
+      if (!ownImage(source)) continue;
       addSrcset(source.getAttribute("srcset"));
       addSrcset(source.getAttribute("data-srcset"));
     }
