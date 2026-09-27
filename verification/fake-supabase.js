@@ -9,7 +9,7 @@ let rows = [];
 let writes = [];
 
 function builder(table) {
-  const q = { table, filters: [], op: "select", row: null, single: false };
+  const q = { table, filters: [], op: "select", row: null, single: false, limit: 0 };
   const run = () => {
     if (q.op === "insert" || q.op === "update") {
       writes.push({ table, op: q.op, row: q.row, filters: q.filters });
@@ -19,11 +19,19 @@ function builder(table) {
     let out = rows.filter((r) =>
       q.filters.every(([kind, col, val]) => {
         if (kind === "eq") return r[col] === val;
-        if (kind === "ilike") return String(r[col] ?? "").toLowerCase() === String(val).replace(/\\/g, "").toLowerCase();
+        if (kind === "ilike") {
+          // PostgREST ilike: % is any run, \% and \_ are literal.
+          const pattern = String(val)
+            .split(/(\\[%_]|%)/)
+            .map((part) => (part === "%" ? ".*" : part.replace(/^\\/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+            .join("");
+          return new RegExp(`^${pattern}$`, "is").test(String(r[col] ?? ""));
+        }
         if (kind === "in") return val.includes(r[col]);
         return true;
       }),
     );
+    if (q.limit) out = out.slice(0, q.limit);
     return { data: q.single ? out[0] ?? null : out, error: null };
   };
   const b = new Proxy(
@@ -38,6 +46,7 @@ function builder(table) {
           else if (prop === "ilike") q.filters.push(["ilike", args[0], args[1]]);
           else if (prop === "in") q.filters.push(["in", args[0], args[1]]);
           else if (prop === "maybeSingle" || prop === "single") q.single = true;
+          else if (prop === "limit") q.limit = args[0];
           return b;
         };
       },

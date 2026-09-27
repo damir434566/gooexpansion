@@ -34,7 +34,8 @@ import {
   type IncomingItem,
   type NamedItem,
 } from "./same-item";
-import { brandVocabulary, decideBrand } from "./brand-from-name";
+import { brandSearchWord, brandVocabulary, decideBrand } from "./brand-from-name";
+import { modelWord } from "./piece-name";
 import { loadRetailerRules, resolveRetailer, storeDefaultGender } from "@/lib/server/retailer-domains";
 import { loadCatalogueProfile, proposeGender, proposeStyles } from "@/lib/server/catalogue-profile";
 import { mirrorProductImages } from "@/lib/server/storage/product-images";
@@ -377,14 +378,41 @@ async function findSameItemByName(incoming: {
   if (!incoming.brand) return { item: null, unread: [], miss: "no brand to match by" };
   if (!incoming.sourceUrl) return { item: null, unread: [], miss: "no address to add as a store" };
   try {
+    // Read by the brand's first word, not its whole spelling: "adidas" and
+    // "adidas Originals", "Carhartt" and "Carhartt WIP" are one maker, and an
+    // exact match never showed a card to the other spelling. And read twice:
+    // once narrowed by the model's own word, because a brand with more cards
+    // than one read returns hid the very card this page belongs to.
+    const word = brandSearchWord(incoming.brand);
+    const model = modelWord(incoming.name, incoming.brand, incoming.colors);
     for (const columns of NAME_MATCH_COLUMNS) {
-      const { data, error } = await supabase!
-        .from("products")
-        .select(columns)
-        .ilike("brand", escapeLike(incoming.brand))
-        .limit(BRAND_ROWS);
-      if (error) continue;
-      const rows: NamedItem[] = ((data ?? []) as unknown as (MergeRow & {
+      const reads = [
+        ...(model
+          ? [
+              supabase!
+                .from("products")
+                .select(columns)
+                .ilike("brand", `%${escapeLike(word)}%`)
+                .ilike("name", `%${escapeLike(model)}%`)
+                .limit(BRAND_ROWS),
+            ]
+          : []),
+        supabase!.from("products").select(columns).ilike("brand", `%${escapeLike(word)}%`).limit(BRAND_ROWS),
+      ];
+      const seen = new Map<string, unknown>();
+      let failed = false;
+      for (const read of reads) {
+        const { data, error } = await read;
+        if (error) {
+          failed = true;
+          break;
+        }
+        for (const row of (data ?? []) as unknown as { id: string }[]) {
+          if (!seen.has(row.id)) seen.set(row.id, row);
+        }
+      }
+      if (failed) continue;
+      const rows: NamedItem[] = ([...seen.values()] as (MergeRow & {
         name: string | null;
         category: string | null;
       })[]).map((row) => ({ ...toExisting(row), name: row.name ?? "", category: row.category }));
