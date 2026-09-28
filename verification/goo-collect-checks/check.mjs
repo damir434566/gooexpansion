@@ -35,6 +35,9 @@ const routes = {
   "/products/wool-coat-gallery": ["text/html; charset=utf-8", page("gallery-noise.html")],
   "/products/mia-jacket-a": ["text/html; charset=utf-8", page("size-swatch-a.html")],
   "/products/mia-jacket-b": ["text/html; charset=utf-8", page("size-swatch-b.html")],
+  "/products/aj4-bred": ["text/html; charset=utf-8", page("size-price-grid.html")],
+  "/products/samba-og": ["text/html; charset=utf-8", page("size-price-inline.html")],
+  "/products/basic-tee": ["text/html; charset=utf-8", page("price-european.html")],
 };
 const server = createServer((req, res) => {
   const hit = routes[req.url.split("?")[0]];
@@ -135,6 +138,24 @@ cases.push({
     ];
   },
 });
+
+cases.push(
+  {
+    name: "Цена не размер: плитки «18 / $215» — цена товара из блока покупки, $199",
+    path: "/products/aj4-bred",
+    check: (r) => [["priceText", r.priceText, "$199"]],
+  },
+  {
+    name: "Цена не размер: кнопка «18 $120» в одну строку — это $120",
+    path: "/products/samba-og",
+    check: (r) => [["priceText", r.priceText, "$120"]],
+  },
+  {
+    name: "Настоящая цена 18 евро остаётся 18 евро, пробел-NBSP внутри цены не рвёт её",
+    path: "/products/basic-tee",
+    check: (r) => [["priceText", r.priceText.replace(/\u00a0/g, " "), "18,00 €"]],
+  },
+);
 
 const browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
 let failed = 0;

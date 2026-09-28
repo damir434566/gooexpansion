@@ -15,6 +15,7 @@ import { chooseColour } from "./colour-choice";
 import {
   canonicalColor,
   extractCurrencyFromDisplay,
+  priceInDisplay,
   pickSizes,
   specValue,
   compositionFromText,
@@ -964,6 +965,24 @@ function applyRule(html: string, regex: string | undefined): string | undefined 
  * Run every strategy and merge with the documented precedence.
  * `config` is the matched per-site recipe (optional).
  */
+/**
+ * Is the rendered price a size the extension misread?
+ *
+ * Up to 1.0.10 it cut a size tile's "18 $120" to "18 $", which reads as a
+ * price on its own — so it is told by the page's sizes: a dollar amount
+ * written before its "$", and equal to one of the sizes, is that size. Only
+ * the dollar: "18 €" is how half of Europe prints a real price, "18 $" is not
+ * how a store in dollars prints one.
+ */
+function sizeReadAsPrice(evidence?: PageEvidence): boolean {
+  const m = (evidence?.priceText ?? "").trim().match(/^(\d+(?:[.,]\d+)?)\s*\$$/);
+  if (!m || !evidence?.sizes?.length) return false;
+  const amount = Number(m[1].replace(",", "."));
+  return evidence.sizes.some((size) =>
+    (String(size).match(/\d+(?:[.,]\d+)?/g) ?? []).some((n) => Number(n.replace(",", ".")) === amount),
+  );
+}
+
 export function extractProduct(
   html: string,
   config?: ParserSiteConfig | null,
@@ -989,6 +1008,7 @@ export function extractProduct(
     vals.find((v) => v !== undefined && v !== "");
 
   const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
+  const shownPrice = sizeReadAsPrice(evidence) ? "" : evidence?.priceText ? priceInDisplay(evidence.priceText) : "";
 
   // Sizes, in order of how directly the page said it: a recipe rule an admin
   // wrote, then the store's own structured data, then the size control a
@@ -1079,14 +1099,17 @@ export function extractProduct(
     // the common case rather than the exception — plenty of stores put a bare
     // number in their markup and leave the symbol to the text a shopper reads,
     // and assuming dollars there is how a hryvnia price became a dollar one.
-    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price, evidence?.priceText),
+    //
+    // Only the one price in it, with its marker beside it: "18\n$" off a size
+    // picker is a size, not $18 (`priceInDisplay`).
+    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price, shownPrice),
     priceOriginal: jsonld.priceOriginal,
     currency: pick(
       ruleVal("currency"),
       jsonld.currency,
       meta.currency,
       micro.currency,
-      evidence?.priceText ? extractCurrencyFromDisplay(evidence.priceText) : undefined,
+      evidence?.priceText ? extractCurrencyFromDisplay(shownPrice || evidence.priceText) : undefined,
     ),
     // Not a currency — the page's language, for `normalize` to fall back on
     // when neither the markup nor the rendered price named one.
@@ -1177,15 +1200,6 @@ export function partitionProducts(html: string): PageProducts {
     standaloneItems: dedupeRaw(standalone.map(nodeToRaw)),
     listItems: dedupeRaw(listItems.map(nodeToRaw)),
   };
-}
-
-/**
- * Extract EVERY product embedded in the page (listing / category pages).
- * Returns one RawExtract per schema.org Product node found. A node is kept only
- * if it carries enough to be a real product card (a name, or a price+image).
- */
-export function extractProductNodes(html: string): RawExtract[] {
-  return dedupeRaw(findAllProductNodes(parseJsonLdBlocks(html)).map(nodeToRaw));
 }
 
 // ── Product-link discovery ────────────────────────────────────────────────────
