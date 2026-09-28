@@ -97,14 +97,29 @@
     /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
 
   /**
-   * A price: a currency marker with digits next to it, either order.
+   * A price: a currency marker with an amount right beside it, either order.
+   *
+   * Right beside it means on the same line, with at most a space between — and
+   * an amount is digits grouped as money is ("4 000", "1.299,00"), not any run
+   * of digits and spaces. A size picker is where the difference shows: a tile
+   * reads "18" with "$215" under it, and a pattern that let a line break sit
+   * inside a price read "18 $" — the size, sold as the price. A marker that
+   * has an amount AFTER it belongs to that amount ("18 $120" is $120), so the
+   * amount-first form only takes a marker with nothing after it.
    *
    * Case-insensitive, because a Ukrainian store is as likely to print "4 000 ГРН"
    * as "4 000 грн", and a price whose marker is missed here reaches the server as
    * a bare number with no currency at all.
    */
-  const PRICE_TEXT =
-    /(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)\s*[\d][\d\s.,]*|[\d][\d\s.,]*\s*(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)/i;
+  const PRICE_SPACE = "[ \\u00A0\\u202F\\u2009]";
+  const PRICE_AMOUNT = `\\d{1,3}(?:(?:${PRICE_SPACE}|[.,'’])\\d{3})+(?:[.,]\\d{1,2})?|\\d+(?:[.,]\\d{1,2})?`;
+  const PRICE_MARKER =
+    `(?:(?<![A-Za-z])(?:US|CA|C|AU|A|NZ|HK|SG|S|R)${PRICE_SPACE}?)?\\$|[€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\\b`;
+  const PRICE_TEXT = new RegExp(
+    `(?:${PRICE_MARKER})${PRICE_SPACE}*(?:${PRICE_AMOUNT})` +
+      `|(?<![\\d.,])(?:${PRICE_AMOUNT})${PRICE_SPACE}*(?:${PRICE_MARKER})(?!${PRICE_SPACE}*\\d)`,
+    "i",
+  );
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -1075,10 +1090,27 @@
    * puts nearest the top, which on a product page is the product's price.
    */
   function collectPriceText() {
-    const named = document.querySelectorAll(
-      '[itemprop="price"],[data-price],[class*="price" i],[id*="price" i],[data-testid*="price" i]',
-    );
-    for (const el of named) {
+    const named = [
+      ...document.querySelectorAll(
+        '[itemprop="price"],[data-price],[class*="price" i],[id*="price" i],[data-testid*="price" i]',
+      ),
+    ];
+    // A size picker that prices every size is not where the product's price
+    // is: its tiles are asked only when nothing outside them states one.
+    const inSizePicker = (el) => {
+      for (let n = el, depth = 0; n && n !== document.body && depth < 8; n = n.parentElement, depth++) {
+        const attrs = [
+          typeof n.className === "string" ? n.className : "",
+          n.id || "",
+          n.getAttribute("data-testid") || "",
+          n.getAttribute("aria-label") || "",
+        ].join(" ");
+        if (SIZE_HINT.test(attrs)) return true;
+      }
+      return false;
+    };
+    const ordered = [...named.filter((el) => !inSizePicker(el)), ...named.filter(inSizePicker)];
+    for (const el of ordered) {
       // Skip the containers that merely wrap a price block: their text carries
       // the delivery estimate and the instalment offer along with it.
       const text = (el.innerText || el.textContent || "").trim();

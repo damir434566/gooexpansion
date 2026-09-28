@@ -1,0 +1,185 @@
+diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
+index 6b37ab7..283fa45 100644
+--- a/src/lib/server/parser/extract.ts
++++ b/src/lib/server/parser/extract.ts
+@@ -15,6 +15,7 @@ import { chooseColour } from "./colour-choice";
+ import {
+   canonicalColor,
+   extractCurrencyFromDisplay,
++  priceInDisplay,
+   pickSizes,
+   specValue,
+   compositionFromText,
+@@ -964,6 +965,24 @@ function applyRule(html: string, regex: string | undefined): string | undefined
+  * Run every strategy and merge with the documented precedence.
+  * `config` is the matched per-site recipe (optional).
+  */
++/**
++ * Is the rendered price a size the extension misread?
++ *
++ * Up to 1.0.10 it cut a size tile's "18 $120" to "18 $", which reads as a
++ * price on its own — so it is told by the page's sizes: a dollar amount
++ * written before its "$", and equal to one of the sizes, is that size. Only
++ * the dollar: "18 €" is how half of Europe prints a real price, "18 $" is not
++ * how a store in dollars prints one.
++ */
++function sizeReadAsPrice(evidence?: PageEvidence): boolean {
++  const m = (evidence?.priceText ?? "").trim().match(/^(\d+(?:[.,]\d+)?)\s*\$$/);
++  if (!m || !evidence?.sizes?.length) return false;
++  const amount = Number(m[1].replace(",", "."));
++  return evidence.sizes.some((size) =>
++    (String(size).match(/\d+(?:[.,]\d+)?/g) ?? []).some((n) => Number(n.replace(",", ".")) === amount),
++  );
++}
++
+ export function extractProduct(
+   html: string,
+   config?: ParserSiteConfig | null,
+@@ -989,6 +1008,7 @@ export function extractProduct(
+     vals.find((v) => v !== undefined && v !== "");
+ 
+   const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
++  const shownPrice = sizeReadAsPrice(evidence) ? "" : evidence?.priceText ? priceInDisplay(evidence.priceText) : "";
+ 
+   // Sizes, in order of how directly the page said it: a recipe rule an admin
+   // wrote, then the store's own structured data, then the size control a
+@@ -1079,14 +1099,17 @@ export function extractProduct(
+     // the common case rather than the exception — plenty of stores put a bare
+     // number in their markup and leave the symbol to the text a shopper reads,
+     // and assuming dollars there is how a hryvnia price became a dollar one.
+-    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price, evidence?.priceText),
++    //
++    // Only the one price in it, with its marker beside it: "18\n$" off a size
++    // picker is a size, not $18 (`priceInDisplay`).
++    price: pick(ruleVal("price"), jsonld.price, meta.price, micro.price, shownPrice),
+     priceOriginal: jsonld.priceOriginal,
+     currency: pick(
+       ruleVal("currency"),
+       jsonld.currency,
+       meta.currency,
+       micro.currency,
+-      evidence?.priceText ? extractCurrencyFromDisplay(evidence.priceText) : undefined,
++      evidence?.priceText ? extractCurrencyFromDisplay(shownPrice || evidence.priceText) : undefined,
+     ),
+     // Not a currency — the page's language, for `normalize` to fall back on
+     // when neither the markup nor the rendered price named one.
+diff --git a/src/lib/server/product-fields.ts b/src/lib/server/product-fields.ts
+index 776e699..ed4669d 100644
+--- a/src/lib/server/product-fields.ts
++++ b/src/lib/server/product-fields.ts
+@@ -307,6 +307,33 @@ export function extractCurrencyFromDisplay(raw: string): string {
+   return "";
+ }
+ 
++// ── The price in a rendered price text ───────────────────────────────────────
++// The collect extension sends the price as the shopper reads it, and a size
++// picker that prices every size is where that reading went wrong: a tile reads
++// "18" with "$215" under it, and "18\n$" — the size — arrived as the price and
++// was stored as $18. `parsePrice` keeps every digit it is given, so the one
++// price is picked out first: an amount grouped as money is ("4 000",
++// "1.299,00") with a currency marker right beside it on the same line, and a
++// marker that has an amount after it belongs to that amount ("18 $120" is
++// $120). The extension reads the same way since 1.0.11; this also covers the
++// versions before it.
++
++const PRICE_SPACE = "[ \\u00A0\\u202F\\u2009]";
++const PRICE_AMOUNT = `\\d{1,3}(?:(?:${PRICE_SPACE}|[.,'’])\\d{3})+(?:[.,]\\d{1,2})?|\\d+(?:[.,]\\d{1,2})?`;
++const PRICE_MARKER =
++  `(?:(?<![A-Za-z])(?:US|CA|C|AU|A|NZ|HK|SG|S|R)${PRICE_SPACE}?)?\\$|[€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\\b`;
++const PRICE_IN_TEXT = new RegExp(
++  `(?:${PRICE_MARKER})${PRICE_SPACE}*(?:${PRICE_AMOUNT})` +
++    `|(?<![\\d.,])(?:${PRICE_AMOUNT})${PRICE_SPACE}*(?:${PRICE_MARKER})(?!${PRICE_SPACE}*\\d)`,
++  "i",
++);
++
++/** The first price in a rendered text, its marker included ("$215", "4 000 ₴"), or "" when there is none. */
++export function priceInDisplay(raw: string): string {
++  const match = String(raw ?? "").match(PRICE_IN_TEXT);
++  return match ? match[0].trim() : "";
++}
++
+ // ── The currency a store charges in, when no price says it ───────────────────
+ // Last resort, and a better one than the one it replaces. A page whose markup
+ // carries a bare "4000" and whose rendered price the extension could not read
+diff --git a/extension/manifest.json b/extension/manifest.json
+index 090172b..443e8e9 100644
+--- a/extension/manifest.json
++++ b/extension/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "Goo Collect",
+-  "version": "1.0.10",
++  "version": "1.0.11",
+   "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
+   "minimum_chrome_version": "116",
+   "permissions": [
+diff --git a/extension/snapshot.js b/extension/snapshot.js
+index 7c35cf4..6956b80 100644
+--- a/extension/snapshot.js
++++ b/extension/snapshot.js
+@@ -97,14 +97,29 @@
+     /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
+ 
+   /**
+-   * A price: a currency marker with digits next to it, either order.
++   * A price: a currency marker with an amount right beside it, either order.
++   *
++   * Right beside it means on the same line, with at most a space between — and
++   * an amount is digits grouped as money is ("4 000", "1.299,00"), not any run
++   * of digits and spaces. A size picker is where the difference shows: a tile
++   * reads "18" with "$215" under it, and a pattern that let a line break sit
++   * inside a price read "18 $" — the size, sold as the price. A marker that
++   * has an amount AFTER it belongs to that amount ("18 $120" is $120), so the
++   * amount-first form only takes a marker with nothing after it.
+    *
+    * Case-insensitive, because a Ukrainian store is as likely to print "4 000 ГРН"
+    * as "4 000 грн", and a price whose marker is missed here reaches the server as
+    * a bare number with no currency at all.
+    */
+-  const PRICE_TEXT =
+-    /(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)\s*[\d][\d\s.,]*|[\d][\d\s.,]*\s*(?:[$€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\b)/i;
++  const PRICE_SPACE = "[ \\u00A0\\u202F\\u2009]";
++  const PRICE_AMOUNT = `\\d{1,3}(?:(?:${PRICE_SPACE}|[.,'’])\\d{3})+(?:[.,]\\d{1,2})?|\\d+(?:[.,]\\d{1,2})?`;
++  const PRICE_MARKER =
++    `(?:(?<![A-Za-z])(?:US|CA|C|AU|A|NZ|HK|SG|S|R)${PRICE_SPACE}?)?\\$|[€£₴₽¥₺₹₩₪]|zł|Kč|грн|руб|CHF|\\b(?:USD|EUR|GBP|UAH|RUB|PLN|CZK|SEK|NOK|DKK|CAD|AUD|JPY|CNY|TRY)\\b`;
++  const PRICE_TEXT = new RegExp(
++    `(?:${PRICE_MARKER})${PRICE_SPACE}*(?:${PRICE_AMOUNT})` +
++      `|(?<![\\d.,])(?:${PRICE_AMOUNT})${PRICE_SPACE}*(?:${PRICE_MARKER})(?!${PRICE_SPACE}*\\d)`,
++    "i",
++  );
+ 
+   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+ 
+@@ -1075,10 +1090,27 @@
+    * puts nearest the top, which on a product page is the product's price.
+    */
+   function collectPriceText() {
+-    const named = document.querySelectorAll(
+-      '[itemprop="price"],[data-price],[class*="price" i],[id*="price" i],[data-testid*="price" i]',
+-    );
+-    for (const el of named) {
++    const named = [
++      ...document.querySelectorAll(
++        '[itemprop="price"],[data-price],[class*="price" i],[id*="price" i],[data-testid*="price" i]',
++      ),
++    ];
++    // A size picker that prices every size is not where the product's price
++    // is: its tiles are asked only when nothing outside them states one.
++    const inSizePicker = (el) => {
++      for (let n = el, depth = 0; n && n !== document.body && depth < 8; n = n.parentElement, depth++) {
++        const attrs = [
++          typeof n.className === "string" ? n.className : "",
++          n.id || "",
++          n.getAttribute("data-testid") || "",
++          n.getAttribute("aria-label") || "",
++        ].join(" ");
++        if (SIZE_HINT.test(attrs)) return true;
++      }
++      return false;
++    };
++    const ordered = [...named.filter((el) => !inSizePicker(el)), ...named.filter(inSizePicker)];
++    for (const el of ordered) {
+       // Skip the containers that merely wrap a price block: their text carries
+       // the delivery estimate and the instalment offer along with it.
+       const text = (el.innerText || el.textContent || "").trim();
