@@ -4,6 +4,8 @@
  * Modes:
  *   normal — 5 products, Crawl-delay 2, one product disallowed by robots.txt
  *   refuse — every product answers 403
+ *   check  — every product answers 200 with a bot check (Akamai's "Access Denied")
+ *   soldout — "beta" is sold out: its address redirects to a category
  *   many   — 21 products, no Crawl-delay (so the 1.5s floor applies)
  *   spa    — two pages built the way a single-page storefront builds them:
  *            the gallery lives in a hydration payload rather than in markup,
@@ -296,6 +298,7 @@ const server = http.createServer((req, res) => {
   if (p === "/robots.txt") return send(200, "text/plain", robots());
   if (p === "/sitemap.xml") return send(200, "application/xml", sitemap());
   if (p === "/collections/all" || p === "/") return send(200, "text/html", categoryPage());
+  if (p === "/collections/women") return send(200, "text/html", categoryPage());
 
   if (mode === "spa") {
     if (p === SPA_PATHS[0]) return send(200, "text/html", spaProductPage());
@@ -304,6 +307,17 @@ const server = http.createServer((req, res) => {
 
   if (p.startsWith("/product/")) {
     if (mode === "refuse") return send(403, "text/html", "<html><body>Go away</body></html>");
+    if (mode === "check") {
+      return send(
+        200,
+        "text/html",
+        `<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1>You don't have permission to access "${ORIGIN}${p}" on this server.<p>Reference #18.6a2c1002</p></body></html>`,
+      );
+    }
+    if (mode === "soldout" && p === "/product/beta") {
+      res.writeHead(302, { location: "/collections/women" });
+      return res.end();
+    }
     const slug = p.slice("/product/".length);
     if (!products().includes(slug)) return send(404, "text/html", "<html>no</html>");
     return send(200, "text/html", productPage(slug));

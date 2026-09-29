@@ -38,6 +38,9 @@ const routes = {
   "/products/aj4-bred": ["text/html; charset=utf-8", page("size-price-grid.html")],
   "/products/samba-og": ["text/html; charset=utf-8", page("size-price-inline.html")],
   "/products/basic-tee": ["text/html; charset=utf-8", page("price-european.html")],
+  "/ua/shopping/women/gucci-horsebit-1955-shoulder-bag-item-19356833.aspx": ["text/html; charset=utf-8", page("ff-product.html")],
+  "/ua/shopping/women/denied-item-19356833.aspx": ["text/html; charset=utf-8", page("bot-check.html")],
+  "/ua/shopping/women/hold-item-19356833.aspx": ["text/html; charset=utf-8", page("press-hold.html")],
 };
 const server = createServer((req, res) => {
   const hit = routes[req.url.split("?")[0]];
@@ -154,6 +157,32 @@ cases.push(
     name: "Настоящая цена 18 евро остаётся 18 евро, пробел-NBSP внутри цены не рвёт её",
     path: "/products/basic-tee",
     check: (r) => [["priceText", r.priceText.replace(/\u00a0/g, " "), "18,00 €"]],
+  },
+);
+
+cases.push(
+  {
+    name: "Farfetch: только галерея вещи — без окна выбора страны, cookies, рассылки и «похожих»",
+    path: "/ua/shopping/women/gucci-horsebit-1955-shoulder-bag-item-19356833.aspx",
+    check: (r) => {
+      const names = (r.images || []).map((u) => u.split("/").pop());
+      return [
+        ["все три фото вещи", ["19356833_42560043_1000.jpg", "19356833_42560044_1000.jpg", "19356833_42560051_1000.jpg"].every((n) => names.includes(n)), true],
+        ["чужие и баннеры", names.filter((n) => !n.startsWith("19356833_")), []],
+        ["не проверка, хотя в форме рассылки есть reCAPTCHA", r.botCheck || "", ""],
+        ["адрес вкладки уходит с результатом", typeof r.url === "string" && r.url.endsWith("-item-19356833.aspx"), true],
+      ];
+    },
+  },
+  {
+    name: "Заглушка Akamai «Access Denied» — не товар",
+    path: "/ua/shopping/women/denied-item-19356833.aspx",
+    check: (r) => [["botCheck", r.botCheck, "Access Denied"], ["html не отправляется", r.html, ""]],
+  },
+  {
+    name: "PerimeterX «Press & Hold» — не товар",
+    path: "/ua/shopping/women/hold-item-19356833.aspx",
+    check: (r) => [["botCheck найден", !!r.botCheck, true], ["html не отправляется", r.html, ""]],
   },
 );
 

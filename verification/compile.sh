@@ -55,6 +55,7 @@ cat > "$CONFIG" <<JSON
     "src/lib/server/duplicates.ts",
     "src/lib/server/parser/variant-group.ts",
     "src/lib/server/parser/same-item.ts",
+    "src/lib/server/parser/page-guards.ts",
     "src/lib/style-keywords.ts",
     "src/lib/taxonomy/styles.ts",
     "src/lib/data/db.ts"

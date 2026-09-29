@@ -148,6 +148,11 @@
     "header", "footer", "nav", '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
     '[class*="mega-menu" i]', '[class*="megamenu" i]', '[class*="cart-drawer" i]', '[id*="cart-drawer" i]',
     '[class*="minicart" i]', '[class*="mini-cart" i]', '[class*="swatch" i]', '[class*="announcement" i]',
+    // What a store lays over the page: the country and currency chooser, the
+    // cookie banner, the newsletter offer with its campaign photo.
+    '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', '[class*="modal" i]', '[class*="popup" i]',
+    '[class*="cookie" i]', '[id*="cookie" i]', '[id*="onetrust" i]', '[class*="consent" i]',
+    '[class*="newsletter" i]', '[id*="newsletter" i]',
   ].join(",");
 
   /** A picture smaller than this on both sides is an icon, a badge or a swatch. */
@@ -346,6 +351,12 @@
     '[class*="you-may" i]', '[class*="recently" i]', '[class*="complete-the-look" i]', '[class*="shop-the-look" i]',
     '[class*="product-card" i]', '[class*="card-product" i]', '[class*="productcard" i]', '[class*="product-item" i]',
     '[class*="grid-product" i]', '[class*="product-tile" i]', '[class*="product-grid" i]', '[class*="products-grid" i]',
+    // Stores whose class names are generated (Farfetch, most React builds) name
+    // their parts in test and component attributes instead.
+    '[data-testid*="product-card" i]', '[data-testid*="productcard" i]', '[data-component*="productcard" i]',
+    '[data-component*="product-card" i]', '[data-testid*="recommend" i]', '[data-component*="recommend" i]',
+    '[data-testid*="related" i]', '[data-testid*="complete-the-look" i]', '[data-testid*="completethelook" i]',
+    '[aria-label*="recommend" i]', '[aria-label*="you may also like" i]', '[aria-label*="complete the look" i]',
   ].join(",");
 
   /**
@@ -1125,7 +1136,45 @@
     return match ? match[0].trim().slice(0, 120) : "";
   }
 
+  /**
+   * A bot check shown instead of the page — Akamai's "Access Denied",
+   * Cloudflare's "Just a moment…", PerimeterX's "Press & Hold", DataDome and
+   * Imperva. They often answer 200, so the status says nothing, and the page
+   * went out as a product named after the check. The server asks the same
+   * question of the markup (`page-guards.ts`).
+   */
+  const CHECK_TITLE =
+    /^\s*(?:access denied|just a moment\.*|attention required!?(?:\s*\|\s*cloudflare)?|pardon our interruption|are you a (?:robot|human)\??|robot or human\??|please verify you are (?:a )?human|verify you are human|human verification|security check|checking your browser.*|one more step|access to this page has been denied\.?|request unsuccessful\..*|you have been blocked|error 1020|403 forbidden|forbidden|too many requests)\s*$/i;
+  const CHECK_TEXT =
+    /press\s*&\s*hold|confirm you are a human|verify (?:that )?you are (?:a )?human|checking (?:if the site connection is secure|your browser before accessing)|enable javascript and cookies to continue|you don't have permission to access|this request was blocked by (?:our|the) security service|please enable js and disable any ad blocker/i;
+  const CHECK_MARKUP =
+    '#px-captcha,#challenge-form,#cf-challenge-running,iframe[src*="captcha-delivery.com"],iframe[src*="challenges.cloudflare.com"],iframe[src*="_Incapsula_Resource"]';
+
+  function botCheck() {
+    const title = (document.title || "").trim();
+    if (CHECK_TITLE.test(title)) return title;
+    // A product page can carry a reCAPTCHA in its newsletter form; a page that
+    // describes a product is not a check, whatever else it holds.
+    const product =
+      !!document.querySelector('meta[property="og:type"][content^="product" i],[itemtype*="schema.org/Product" i]') ||
+      [...document.querySelectorAll('script[type="application/ld+json"]')].some((s) =>
+        /"@type"\s*:\s*"(?:Product|ProductGroup)"/.test(s.textContent || ""),
+      );
+    if (product) return "";
+    try {
+      if (document.querySelector(CHECK_MARKUP)) return "a captcha";
+    } catch {
+      /* a selector this browser cannot parse */
+    }
+    const text = ((document.body && document.body.innerText) || "").slice(0, 4000);
+    const said = text.match(CHECK_TEXT);
+    return said ? said[0] : "";
+  }
+
   try {
+    const check = botCheck();
+    if (check) return { ok: true, url: location.href, botCheck: check, html: "" };
+
     // Walk the page so lazy images commit to a real `src`. Four steps is enough
     // for the galleries this is aimed at without turning a snapshot into a
     // visible scroll animation the admin has to wait through.

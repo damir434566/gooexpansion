@@ -24,18 +24,20 @@
  * extension is a key under the doormat. It talks to the collect screen instead,
  * which calls this with the admin's ordinary session.
  */
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/server/admin-auth";
 import { logAdminAction } from "@/lib/server/audit";
 import { clerkClient } from "@clerk/nextjs/server";
 import { parsePage } from "@/lib/server/parser/parse-page";
 import { loadCategoryTree } from "@/lib/server/category-tree";
-import { importParsedProduct } from "@/lib/server/parser/import-product";
+import { droppedColumnsWarning, importParsedProduct, loadCatalogueIndex } from "@/lib/server/parser/import-product";
 import { COLOUR_ORIGINS, type ColourOrigin } from "@/lib/server/parser/colour-choice";
 import { isShopifyProduct } from "@/lib/server/parser/shopify";
+import { notAProductPage } from "@/lib/server/parser/page-guards";
 import { planCollection, type FetchedSitemap } from "@/lib/server/parser/plan-collection";
 import { commonTitleSuffix } from "@/lib/server/product-fields";
+import { measurePendingBackdrops } from "@/lib/server/bg-color";
 import {
   getFetchSettings,
   getFetchApiKey,
@@ -172,6 +174,11 @@ export async function POST(req: Request) {
       .filter((u: unknown): u is string => typeof u === "string")
       .slice(0, MAX_SEEN);
 
+    // A links-only run looks for the pieces we have among the store's pages
+    // rather than opening them in the store's order. Without a readable
+    // catalogue it opens them in that order, as before, and says so.
+    const catalogue = body?.linksOnly === true ? await loadCatalogueIndex() : undefined;
+
     const plan = planCollection({
       startUrl: url,
       html: html || undefined,
@@ -179,9 +186,14 @@ export async function POST(req: Request) {
       sitemaps,
       seen,
       limit: Number(body?.limit) || 60,
+      catalogue: catalogue ?? undefined,
     });
 
-    return NextResponse.json({ ok: true, ...plan });
+    return NextResponse.json({
+      ok: true,
+      ...plan,
+      ...(catalogue === null ? { linksNote: "the catalogue could not be read — pages are opened in the store's order" } : {}),
+    });
   }
 
   // ── ingest ─────────────────────────────────────────────────────────────────
@@ -201,6 +213,16 @@ export async function POST(req: Request) {
       },
       { status: 413 },
     );
+  }
+
+  // Not the product at all: a bot check shown in its place, or the category a
+  // sold-out piece was redirected to. Either came in as a piece named "Access
+  // Denied" or "Women's Dresses" with a shelf of photos. `finalUrl` is where
+  // the tab ended up (extension 1.0.12); older versions send the markup only.
+  const notProduct = notAProductPage({ url, finalUrl: str(body?.finalUrl).slice(0, MAX_IMAGE_URL), html });
+  if (notProduct) {
+    const skipped: CrawlItemResult = { url, status: "skipped", reason: notProduct };
+    return NextResponse.json({ ok: true, result: skipped });
   }
 
   // What the page showed that its stripped markup no longer says. Both are
@@ -366,6 +388,7 @@ export async function POST(req: Request) {
             merged: !!imported.mergedInto,
             mergedBy: imported.mergedBy,
             mergedFields: imported.mergedFields,
+            ...(imported.droppedColumns?.length && { warning: droppedColumnsWarning(imported.droppedColumns) }),
             linkNote: imported.linkNote,
           }
         : { url, status: "failed", reason: imported.error, name: product.name, usedAi };
@@ -381,6 +404,9 @@ export async function POST(req: Request) {
   if (result.status === "imported" || result.status === "updated") {
     revalidatePath("/goo-studio/products");
     revalidatePath("/");
+    // Cards still without a measured backdrop, a few at a time, after the
+    // answer has gone: nothing is slowed and no button has to be pressed.
+    after(() => measurePendingBackdrops());
     try {
       const cc = await clerkClient();
       const adminUser = await cc.users.getUser(admin.userId);
