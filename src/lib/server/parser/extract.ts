@@ -1209,7 +1209,7 @@ export function partitionProducts(html: string): PageProducts {
  * segments, so `/products/silk-shirt` counts and `/product-care` does not.
  */
 const STRONG_SEGMENTS = new Set([
-  "product", "products", "prod", "pdp", "pd", "dp", "prd", "item", "items", "shopping", "buy",
+  "product", "products", "prod", "pdp", "pd", "dp", "prd", "item", "buy",
 ]);
 
 /**
@@ -1217,7 +1217,12 @@ const STRONG_SEGMENTS = new Set([
  * `/p/…`. They only count when the URL also carries a product code, otherwise
  * every one-letter route on the site would look like a product.
  */
-const WEAK_SEGMENTS = new Set(["p", "t", "a", "i", "style", "styles", "sku", "article"]);
+// `items` and `shopping` are here and not above: they name a whole section.
+// Farfetch keeps every page under `/shopping/` and calls every category
+// `items.aspx`, and as strong markers they made each category, designer and
+// sale page a "product" — a run started on a category imported the category.
+// Beside a code they still count: `/items/12345678` is a piece.
+const WEAK_SEGMENTS = new Set(["p", "t", "a", "i", "style", "styles", "sku", "article", "items", "shopping"]);
 
 /**
  * Segments that are never a product. Without this the code heuristic below
@@ -1232,6 +1237,16 @@ const NON_PRODUCT_SEGMENTS = new Set([
   "giftcard", "blog", "news", "magazine", "editorial", "journal", "stories", "search", "sitemap",
   "newsletter", "subscribe", "feedback", "reviews",
 ]);
+
+/** An ASP.NET shop's own name for its product page: `product.aspx?id=…`, `productdetails.aspx`. */
+const ASPNET_PRODUCT_PAGE = /^(?:product|products?details?|product-details?|itemdetails?|item-details?)\.aspx$/;
+
+/**
+ * A page that is a list by its very file name — Farfetch's `items.aspx` under
+ * every category, a `search.php`, a `listing.html`. Never a piece, whatever
+ * sitemap names it.
+ */
+const LISTING_PAGE = /^(?:items|list|listing|listings|search|results|category|categories|catalog|catalogue)\.(?:aspx?|html?|php|jsp)$/;
 
 /**
  * Does this path segment look like a product code? Covers the shapes stores
@@ -1301,11 +1316,15 @@ export function looksLikeProductPath(pathname: string): boolean {
   const segments = pathname.split("/").filter(Boolean).map((s) => s.toLowerCase());
   if (!segments.length) return false;
   if (segments.some((s) => NON_PRODUCT_SEGMENTS.has(s))) return false;
+  if (LISTING_PAGE.test(segments[segments.length - 1])) return false;
 
   // 1. An explicit product segment, or the shapes we already relied on:
-  //    Farfetch's `-item-…​.aspx`, H&M's `productpage.…`.
+  //    Farfetch's `-item-<id>.aspx`, H&M's `productpage.…`, an ASP.NET shop's
+  //    `productdetail.aspx`. Not `.aspx` on its own: Farfetch ends every
+  //    address in it, its categories (`items.aspx`) included.
   if (segments.some((s) => STRONG_SEGMENTS.has(s) || s.startsWith("productpage"))) return true;
-  if (/-item-/i.test(pathname) || /\.aspx$/i.test(pathname)) return true;
+  if (/-item-\d{5,}(?:\.[a-z]+)?$/i.test(segments[segments.length - 1])) return true;
+  if (ASPNET_PRODUCT_PAGE.test(segments[segments.length - 1])) return true;
 
   // 2. A weak segment backed by a product code somewhere in the path.
   const hasCode = segments.some(looksLikeProductCode);
@@ -1335,7 +1354,7 @@ export function looksLikeProductPath(pathname: string): boolean {
 export function isNonProductPath(pathname: string): boolean {
   const segments = pathname.split("/").filter(Boolean).map((s) => s.toLowerCase());
   if (!segments.length) return true;
-  return segments.some((s) => NON_PRODUCT_SEGMENTS.has(s));
+  return segments.some((s) => NON_PRODUCT_SEGMENTS.has(s)) || LISTING_PAGE.test(segments[segments.length - 1]);
 }
 
 /**

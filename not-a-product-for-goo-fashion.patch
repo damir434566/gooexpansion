@@ -1,0 +1,361 @@
+diff --git a/extension/background.js b/extension/background.js
+index 85e2a2d..73f3e5a 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -52,6 +52,9 @@ const REFUSAL_LIMIT = 2;
+  */
+ const REFUSAL_STATUSES = new Set([403, 429]);
+ 
++/** How long a bot check is given to pass on its own before it counts as a refusal. */
++const CHECK_WAIT_MS = 6_000;
++
+ /** Give up on a page that will not finish loading. */
+ const PAGE_TIMEOUT_MS = 45_000;
+ /** Let a loaded page settle before reading it. */
+@@ -354,11 +357,28 @@ async function snapshotPage(url) {
+     await sleep(SETTLE_MS);
+     if (state.stopped) return { error: "Stopped" };
+ 
+-    const [injected] = await chrome.scripting.executeScript({
+-      target: { tabId },
+-      files: ["snapshot.js"],
+-    });
+-    const result = injected?.result;
++    const read = async () => {
++      const [injected] = await chrome.scripting.executeScript({
++        target: { tabId },
++        files: ["snapshot.js"],
++      });
++      return injected?.result;
++    };
++    let result = await read();
++    // A bot check in the page's place. Some pass on their own in a few seconds
++    // (Cloudflare's "Just a moment…" reloads into the page), so it is given
++    // that long; one that is still there is the store refusing us, counted as
++    // a 403 would be, and never sent as a product.
++    if (result && result.ok && result.botCheck) {
++      await sleep(CHECK_WAIT_MS);
++      if (state.stopped) return { error: "Stopped" };
++      await waitForLoad(tabId);
++      await sleep(SETTLE_MS);
++      result = await read();
++      if (result && result.ok && result.botCheck) {
++        return { refused: true, status, check: String(result.botCheck).slice(0, 80) };
++      }
++    }
+     if (!result || !result.ok) {
+       return { error: result?.error ?? "Could not read the page" };
+     }
+@@ -380,6 +400,9 @@ async function snapshotPage(url) {
+       breadcrumbs: Array.isArray(result.breadcrumbs) ? result.breadcrumbs : [],
+       brandText: typeof result.brandText === "string" ? result.brandText : "",
+       pageTitle: typeof result.pageTitle === "string" ? result.pageTitle : "",
++      // Where the tab ended up: a sold-out piece redirected to its category is
++      // not that piece, and the site checks.
++      finalUrl: typeof result.url === "string" ? result.url : "",
+       status,
+     };
+   } catch (err) {
+@@ -449,7 +472,9 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+   const first = await snapshotPage(storeUrl);
+   if (first.refused) {
+     halt(
+-      `The store refused the first page (HTTP ${first.status}). Nothing else was requested. Open it in a normal tab, clear whatever check it is showing, and try again.`,
++      first.check
++        ? `The store showed a bot check instead of the first page ("${first.check}"). Nothing else was requested. Open it in a normal tab, pass the check, and try again.`
++        : `The store refused the first page (HTTP ${first.status}). Nothing else was requested. Open it in a normal tab, clear whatever check it is showing, and try again.`,
+     );
+     return;
+   }
+@@ -507,7 +532,9 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+         state.failed++;
+         if (refusals >= REFUSAL_LIMIT) {
+           halt(
+-            `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
++            snap.check
++              ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
++              : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
+           );
+           return;
+         }
+@@ -540,6 +567,7 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+         breadcrumbs: snap.breadcrumbs,
+         brandText: snap.brandText,
+         pageTitle: snap.pageTitle,
++        finalUrl: snap.finalUrl,
+       });
+       collected++;
+       state.done = collected;
+diff --git a/extension/manifest.json b/extension/manifest.json
+index 443e8e9..5e65ffa 100644
+--- a/extension/manifest.json
++++ b/extension/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "Goo Collect",
+-  "version": "1.0.11",
++  "version": "1.0.12",
+   "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
+   "minimum_chrome_version": "116",
+   "permissions": [
+diff --git a/extension/snapshot.js b/extension/snapshot.js
+index 6956b80..a906491 100644
+--- a/extension/snapshot.js
++++ b/extension/snapshot.js
+@@ -148,6 +148,11 @@
+     "header", "footer", "nav", '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+     '[class*="mega-menu" i]', '[class*="megamenu" i]', '[class*="cart-drawer" i]', '[id*="cart-drawer" i]',
+     '[class*="minicart" i]', '[class*="mini-cart" i]', '[class*="swatch" i]', '[class*="announcement" i]',
++    // What a store lays over the page: the country and currency chooser, the
++    // cookie banner, the newsletter offer with its campaign photo.
++    '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', '[class*="modal" i]', '[class*="popup" i]',
++    '[class*="cookie" i]', '[id*="cookie" i]', '[id*="onetrust" i]', '[class*="consent" i]',
++    '[class*="newsletter" i]', '[id*="newsletter" i]',
+   ].join(",");
+ 
+   /** A picture smaller than this on both sides is an icon, a badge or a swatch. */
+@@ -346,6 +351,12 @@
+     '[class*="you-may" i]', '[class*="recently" i]', '[class*="complete-the-look" i]', '[class*="shop-the-look" i]',
+     '[class*="product-card" i]', '[class*="card-product" i]', '[class*="productcard" i]', '[class*="product-item" i]',
+     '[class*="grid-product" i]', '[class*="product-tile" i]', '[class*="product-grid" i]', '[class*="products-grid" i]',
++    // Stores whose class names are generated (Farfetch, most React builds) name
++    // their parts in test and component attributes instead.
++    '[data-testid*="product-card" i]', '[data-testid*="productcard" i]', '[data-component*="productcard" i]',
++    '[data-component*="product-card" i]', '[data-testid*="recommend" i]', '[data-component*="recommend" i]',
++    '[data-testid*="related" i]', '[data-testid*="complete-the-look" i]', '[data-testid*="completethelook" i]',
++    '[aria-label*="recommend" i]', '[aria-label*="you may also like" i]', '[aria-label*="complete the look" i]',
+   ].join(",");
+ 
+   /**
+@@ -1125,7 +1136,45 @@
+     return match ? match[0].trim().slice(0, 120) : "";
+   }
+ 
++  /**
++   * A bot check shown instead of the page — Akamai's "Access Denied",
++   * Cloudflare's "Just a moment…", PerimeterX's "Press & Hold", DataDome and
++   * Imperva. They often answer 200, so the status says nothing, and the page
++   * went out as a product named after the check. The server asks the same
++   * question of the markup (`page-guards.ts`).
++   */
++  const CHECK_TITLE =
++    /^\s*(?:access denied|just a moment\.*|attention required!?(?:\s*\|\s*cloudflare)?|pardon our interruption|are you a (?:robot|human)\??|robot or human\??|please verify you are (?:a )?human|verify you are human|human verification|security check|checking your browser.*|one more step|access to this page has been denied\.?|request unsuccessful\..*|you have been blocked|error 1020|403 forbidden|forbidden|too many requests)\s*$/i;
++  const CHECK_TEXT =
++    /press\s*&\s*hold|confirm you are a human|verify (?:that )?you are (?:a )?human|checking (?:if the site connection is secure|your browser before accessing)|enable javascript and cookies to continue|you don't have permission to access|this request was blocked by (?:our|the) security service|please enable js and disable any ad blocker/i;
++  const CHECK_MARKUP =
++    '#px-captcha,#challenge-form,#cf-challenge-running,iframe[src*="captcha-delivery.com"],iframe[src*="challenges.cloudflare.com"],iframe[src*="_Incapsula_Resource"]';
++
++  function botCheck() {
++    const title = (document.title || "").trim();
++    if (CHECK_TITLE.test(title)) return title;
++    // A product page can carry a reCAPTCHA in its newsletter form; a page that
++    // describes a product is not a check, whatever else it holds.
++    const product =
++      !!document.querySelector('meta[property="og:type"][content^="product" i],[itemtype*="schema.org/Product" i]') ||
++      [...document.querySelectorAll('script[type="application/ld+json"]')].some((s) =>
++        /"@type"\s*:\s*"(?:Product|ProductGroup)"/.test(s.textContent || ""),
++      );
++    if (product) return "";
++    try {
++      if (document.querySelector(CHECK_MARKUP)) return "a captcha";
++    } catch {
++      /* a selector this browser cannot parse */
++    }
++    const text = ((document.body && document.body.innerText) || "").slice(0, 4000);
++    const said = text.match(CHECK_TEXT);
++    return said ? said[0] : "";
++  }
++
+   try {
++    const check = botCheck();
++    if (check) return { ok: true, url: location.href, botCheck: check, html: "" };
++
+     // Walk the page so lazy images commit to a real `src`. Four steps is enough
+     // for the galleries this is aimed at without turning a snapshot into a
+     // visible scroll animation the admin has to wait through.
+diff --git a/src/app/api/admin/parser/collect/route.ts b/src/app/api/admin/parser/collect/route.ts
+index a276d02..edd829d 100644
+--- a/src/app/api/admin/parser/collect/route.ts
++++ b/src/app/api/admin/parser/collect/route.ts
+@@ -34,6 +34,7 @@ import { loadCategoryTree } from "@/lib/server/category-tree";
+ import { droppedColumnsWarning, importParsedProduct, loadCatalogueIndex } from "@/lib/server/parser/import-product";
+ import { COLOUR_ORIGINS, type ColourOrigin } from "@/lib/server/parser/colour-choice";
+ import { isShopifyProduct } from "@/lib/server/parser/shopify";
++import { notAProductPage } from "@/lib/server/parser/page-guards";
+ import { planCollection, type FetchedSitemap } from "@/lib/server/parser/plan-collection";
+ import { commonTitleSuffix } from "@/lib/server/product-fields";
+ import { measurePendingBackdrops } from "@/lib/server/bg-color";
+@@ -214,6 +215,16 @@ export async function POST(req: Request) {
+     );
+   }
+ 
++  // Not the product at all: a bot check shown in its place, or the category a
++  // sold-out piece was redirected to. Either came in as a piece named "Access
++  // Denied" or "Women's Dresses" with a shelf of photos. `finalUrl` is where
++  // the tab ended up (extension 1.0.12); older versions send the markup only.
++  const notProduct = notAProductPage({ url, finalUrl: str(body?.finalUrl).slice(0, MAX_IMAGE_URL), html });
++  if (notProduct) {
++    const skipped: CrawlItemResult = { url, status: "skipped", reason: notProduct };
++    return NextResponse.json({ ok: true, result: skipped });
++  }
++
+   // What the page showed that its stripped markup no longer says. Both are
+   // candidates at the lowest precedence: every structured source wins over
+   // them, and the image list still has to pass the gallery harvester's
+diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
+index 283fa45..c7ed935 100644
+--- a/src/lib/server/parser/extract.ts
++++ b/src/lib/server/parser/extract.ts
+@@ -1209,7 +1209,7 @@ export function partitionProducts(html: string): PageProducts {
+  * segments, so `/products/silk-shirt` counts and `/product-care` does not.
+  */
+ const STRONG_SEGMENTS = new Set([
+-  "product", "products", "prod", "pdp", "pd", "dp", "prd", "item", "items", "shopping", "buy",
++  "product", "products", "prod", "pdp", "pd", "dp", "prd", "item", "buy",
+ ]);
+ 
+ /**
+@@ -1217,7 +1217,12 @@ const STRONG_SEGMENTS = new Set([
+  * `/p/…`. They only count when the URL also carries a product code, otherwise
+  * every one-letter route on the site would look like a product.
+  */
+-const WEAK_SEGMENTS = new Set(["p", "t", "a", "i", "style", "styles", "sku", "article"]);
++// `items` and `shopping` are here and not above: they name a whole section.
++// Farfetch keeps every page under `/shopping/` and calls every category
++// `items.aspx`, and as strong markers they made each category, designer and
++// sale page a "product" — a run started on a category imported the category.
++// Beside a code they still count: `/items/12345678` is a piece.
++const WEAK_SEGMENTS = new Set(["p", "t", "a", "i", "style", "styles", "sku", "article", "items", "shopping"]);
+ 
+ /**
+  * Segments that are never a product. Without this the code heuristic below
+@@ -1233,6 +1238,16 @@ const NON_PRODUCT_SEGMENTS = new Set([
+   "newsletter", "subscribe", "feedback", "reviews",
+ ]);
+ 
++/** An ASP.NET shop's own name for its product page: `product.aspx?id=…`, `productdetails.aspx`. */
++const ASPNET_PRODUCT_PAGE = /^(?:product|products?details?|product-details?|itemdetails?|item-details?)\.aspx$/;
++
++/**
++ * A page that is a list by its very file name — Farfetch's `items.aspx` under
++ * every category, a `search.php`, a `listing.html`. Never a piece, whatever
++ * sitemap names it.
++ */
++const LISTING_PAGE = /^(?:items|list|listing|listings|search|results|category|categories|catalog|catalogue)\.(?:aspx?|html?|php|jsp)$/;
++
+ /**
+  * Does this path segment look like a product code? Covers the shapes stores
+  * actually ship: a long digit run (Zara `p04387400`, H&M `productpage.1234567890`,
+@@ -1301,11 +1316,15 @@ export function looksLikeProductPath(pathname: string): boolean {
+   const segments = pathname.split("/").filter(Boolean).map((s) => s.toLowerCase());
+   if (!segments.length) return false;
+   if (segments.some((s) => NON_PRODUCT_SEGMENTS.has(s))) return false;
++  if (LISTING_PAGE.test(segments[segments.length - 1])) return false;
+ 
+   // 1. An explicit product segment, or the shapes we already relied on:
+-  //    Farfetch's `-item-…​.aspx`, H&M's `productpage.…`.
++  //    Farfetch's `-item-<id>.aspx`, H&M's `productpage.…`, an ASP.NET shop's
++  //    `productdetail.aspx`. Not `.aspx` on its own: Farfetch ends every
++  //    address in it, its categories (`items.aspx`) included.
+   if (segments.some((s) => STRONG_SEGMENTS.has(s) || s.startsWith("productpage"))) return true;
+-  if (/-item-/i.test(pathname) || /\.aspx$/i.test(pathname)) return true;
++  if (/-item-\d{5,}(?:\.[a-z]+)?$/i.test(segments[segments.length - 1])) return true;
++  if (ASPNET_PRODUCT_PAGE.test(segments[segments.length - 1])) return true;
+ 
+   // 2. A weak segment backed by a product code somewhere in the path.
+   const hasCode = segments.some(looksLikeProductCode);
+@@ -1335,7 +1354,7 @@ export function looksLikeProductPath(pathname: string): boolean {
+ export function isNonProductPath(pathname: string): boolean {
+   const segments = pathname.split("/").filter(Boolean).map((s) => s.toLowerCase());
+   if (!segments.length) return true;
+-  return segments.some((s) => NON_PRODUCT_SEGMENTS.has(s));
++  return segments.some((s) => NON_PRODUCT_SEGMENTS.has(s)) || LISTING_PAGE.test(segments[segments.length - 1]);
+ }
+ 
+ /**
+diff --git a/src/lib/server/parser/page-guards.ts b/src/lib/server/parser/page-guards.ts
+new file mode 100644
+index 0000000..99ba3c3
+--- /dev/null
++++ b/src/lib/server/parser/page-guards.ts
+@@ -0,0 +1,79 @@
++/**
++ * Pages the collect extension sends that are not the product it was sent for.
++ *
++ * The extension opens a product's address and sends whatever the tab shows.
++ * Two things can stand in the product's place, and both were imported as a
++ * piece — with the name "Access Denied" or "Women's Dresses" and the photos of
++ * a logo or a whole shelf:
++ *
++ *   - a bot check. Akamai, Cloudflare, PerimeterX, DataDome and Imperva answer
++ *     a browser they are unsure of with a page of their own, often with status
++ *     200, so the extension's refusal count never saw it;
++ *   - a redirect. A sold-out or removed piece sends the tab to its category,
++ *     and the category's markup arrived under the piece's address.
++ *
++ * Pure: the collect route asks before it parses anything, and says why.
++ */
++import { looksLikeProductPath } from "./extract";
++import { sameListing } from "./listing-url";
++
++/** Titles a bot check gives its page, as each vendor ships it. */
++const CHECK_TITLE =
++  /^\s*(?:access denied|just a moment\.*|attention required!?(?:\s*\|\s*cloudflare)?|pardon our interruption|are you a (?:robot|human)\??|robot or human\??|please verify you are (?:a )?human|verify you are human|human verification|security check|checking your browser.*|one more step|access to this page has been denied\.?|request unsuccessful\..*|you have been blocked|error 1020|403 forbidden|forbidden|too many requests)\s*$/i;
++
++/**
++ * What a bot check says or carries in its body. Matched only on a page that
++ * does not also describe a product — a real product page can have a reCAPTCHA
++ * in its newsletter form.
++ */
++const CHECK_BODY =
++  /press\s*(?:&amp;|&)\s*hold|confirm you are a human|verify (?:that )?you are (?:a )?human|checking (?:if the site connection is secure|your browser before accessing)|enable javascript and cookies to continue|you don't have permission to access|captcha-delivery\.com|px-captcha|_incapsula_resource|incapsula incident|cf-browser-verification|cf-challenge|challenge-platform|this request was blocked by (?:our|the) security service|please enable js and disable any ad blocker/i;
++
++/** Does the markup describe a product of its own? */
++function describesProduct(html: string): boolean {
++  return (
++    /<meta[^>]+property=["']og:type["'][^>]+content=["']product/i.test(html) ||
++    /"@type"\s*:\s*"(?:Product|ProductGroup)"/i.test(html) ||
++    /itemtype=["']https?:\/\/schema\.org\/Product["']/i.test(html)
++  );
++}
++
++function titleOf(html: string): string {
++  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
++  return m ? m[1].replace(/\s+/g, " ").trim() : "";
++}
++
++/** The bot check a page is, by its title or its body, or "" when it is not one. */
++export function botCheckIn(html: string): string {
++  const title = titleOf(html);
++  if (title && CHECK_TITLE.test(title)) return title;
++  if (describesProduct(html)) return "";
++  const body = html.match(CHECK_BODY);
++  return body ? body[0] : "";
++}
++
++/**
++ * Why this page must not be imported as the product at `url`, or null when it
++ * may be. `finalUrl` is where the tab ended up (extension 1.0.12 and later);
++ * without it only the markup is judged.
++ */
++export function notAProductPage(input: { url: string; finalUrl?: string; html: string }): string | null {
++  const check = botCheckIn(input.html);
++  if (check) {
++    return `the store showed a bot check instead of the page ("${check.slice(0, 60)}") — open the store in a normal tab, pass the check, then collect again`;
++  }
++
++  const final = (input.finalUrl ?? "").trim();
++  if (final && !sameListing(final, input.url)) {
++    let path = "";
++    try {
++      path = new URL(final).pathname;
++    } catch {
++      return null;
++    }
++    if (!looksLikeProductPath(path)) {
++      return `the store sent this address to ${path}, which is not a product page — sold out or removed`;
++    }
++  }
++  return null;
++}

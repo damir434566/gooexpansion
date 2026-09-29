@@ -89,9 +89,20 @@
   ok   and the store is forgotten as a links store
   ok   and the popup opens with it cleared again
 
+— run I: the store shows a bot check instead of its products —
+  ok   the run stopped at the check
+  ok   after two pages, not all of them
+  ok   no check page was sent to the site as a product
+
+— run J: a sold-out piece sends the tab to a category —
+  ok   run J finished
+  ok   the page says where the tab ended up
+  ok   and the category is not imported as the piece
+  ok   the other pieces are
+
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
 
-  75 passed, 0 failed
+  82 passed, 0 failed
 

@@ -52,6 +52,9 @@ const REFUSAL_LIMIT = 2;
  */
 const REFUSAL_STATUSES = new Set([403, 429]);
 
+/** How long a bot check is given to pass on its own before it counts as a refusal. */
+const CHECK_WAIT_MS = 6_000;
+
 /** Give up on a page that will not finish loading. */
 const PAGE_TIMEOUT_MS = 45_000;
 /** Let a loaded page settle before reading it. */
@@ -354,11 +357,28 @@ async function snapshotPage(url) {
     await sleep(SETTLE_MS);
     if (state.stopped) return { error: "Stopped" };
 
-    const [injected] = await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["snapshot.js"],
-    });
-    const result = injected?.result;
+    const read = async () => {
+      const [injected] = await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["snapshot.js"],
+      });
+      return injected?.result;
+    };
+    let result = await read();
+    // A bot check in the page's place. Some pass on their own in a few seconds
+    // (Cloudflare's "Just a moment…" reloads into the page), so it is given
+    // that long; one that is still there is the store refusing us, counted as
+    // a 403 would be, and never sent as a product.
+    if (result && result.ok && result.botCheck) {
+      await sleep(CHECK_WAIT_MS);
+      if (state.stopped) return { error: "Stopped" };
+      await waitForLoad(tabId);
+      await sleep(SETTLE_MS);
+      result = await read();
+      if (result && result.ok && result.botCheck) {
+        return { refused: true, status, check: String(result.botCheck).slice(0, 80) };
+      }
+    }
     if (!result || !result.ok) {
       return { error: result?.error ?? "Could not read the page" };
     }
@@ -380,6 +400,9 @@ async function snapshotPage(url) {
       breadcrumbs: Array.isArray(result.breadcrumbs) ? result.breadcrumbs : [],
       brandText: typeof result.brandText === "string" ? result.brandText : "",
       pageTitle: typeof result.pageTitle === "string" ? result.pageTitle : "",
+      // Where the tab ended up: a sold-out piece redirected to its category is
+      // not that piece, and the site checks.
+      finalUrl: typeof result.url === "string" ? result.url : "",
       status,
     };
   } catch (err) {
@@ -449,7 +472,9 @@ async function run({ storeUrl, limit, linksOnly = false }) {
   const first = await snapshotPage(storeUrl);
   if (first.refused) {
     halt(
-      `The store refused the first page (HTTP ${first.status}). Nothing else was requested. Open it in a normal tab, clear whatever check it is showing, and try again.`,
+      first.check
+        ? `The store showed a bot check instead of the first page ("${first.check}"). Nothing else was requested. Open it in a normal tab, pass the check, and try again.`
+        : `The store refused the first page (HTTP ${first.status}). Nothing else was requested. Open it in a normal tab, clear whatever check it is showing, and try again.`,
     );
     return;
   }
@@ -507,7 +532,9 @@ async function run({ storeUrl, limit, linksOnly = false }) {
         state.failed++;
         if (refusals >= REFUSAL_LIMIT) {
           halt(
-            `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
+            snap.check
+              ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
+              : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
           );
           return;
         }
@@ -540,6 +567,7 @@ async function run({ storeUrl, limit, linksOnly = false }) {
         breadcrumbs: snap.breadcrumbs,
         brandText: snap.brandText,
         pageTitle: snap.pageTitle,
+        finalUrl: snap.finalUrl,
       });
       collected++;
       state.done = collected;

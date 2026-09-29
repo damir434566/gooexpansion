@@ -28,6 +28,7 @@ Module._resolveFilename = function (request, ...rest) {
 const PARSER = path.join(COMPILED, "lib", "server", "parser");
 const { planCollection } = require(path.join(PARSER, "plan-collection.js"));
 const { parsePage } = require(path.join(PARSER, "parse-page.js"));
+const { notAProductPage } = require(path.join(PARSER, "page-guards.js"));
 const { toUsd } = require(path.join(COMPILED, "lib", "server", "fx.js"));
 
 /**
@@ -205,9 +206,14 @@ const server = http.createServer(async (req, res) => {
       linksOnly: body.linksOnly,
       oldKey: Object.prototype.hasOwnProperty.call(body, "linkOnly"),
       images: Array.isArray(body.images) ? body.images.length : 0,
+      url: body.url,
+      finalUrl: body.finalUrl,
     });
 
     if (body.action === "ingest") {
+      // The route's own first question: is this the product at all?
+      const notProduct = notAProductPage({ url: body.url, finalUrl: body.finalUrl, html: body.html || "" });
+      if (notProduct) return json(200, { ok: true, result: { url: body.url, status: "skipped", reason: notProduct } });
       try {
         // The real extractor, over the DOM the extension actually captured —
         // and over the evidence it read before stripping the page, exactly as

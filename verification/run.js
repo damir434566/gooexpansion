@@ -769,6 +769,55 @@ async function main() {
     p.close();
   }
 
+  // ── Run I: a bot check in the products' place ─────────────────────────────
+  //
+  // Akamai, Cloudflare and the rest answer 200 with a page of their own. It
+  // went out as a product named "Access Denied". Now it is a refusal: waited
+  // on once, then counted, and two in a row stop the run — nothing is sent.
+  console.log("\n— run I: the store shows a bot check instead of its products —");
+  await storeControl({ mode: "check", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  popup = await openPopup(extId);
+  await popup.evaluate(
+    `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:10}})`,
+  );
+  {
+    let st = null;
+    for (let i = 0; i < 90; i++) {
+      await sleep(1000);
+      st = await popup.evaluate("chrome.runtime.sendMessage({type:'state'})");
+      if (st && !st.running) break;
+    }
+    const { api } = await studioEvents();
+    const opened = (await storeLog()).log.filter((l) => l.path.startsWith("/product/"));
+    check("the run stopped at the check", !!st && st.phase === "halted" && /bot check/i.test(st.message || ""), JSON.stringify(st && { phase: st.phase, message: st.message }));
+    check("after two pages, not all of them", opened.length === 2, JSON.stringify(opened.map((l) => l.path)));
+    check("no check page was sent to the site as a product", api.filter((a) => a.action === "ingest").length === 0, JSON.stringify(api));
+  }
+  collect.close(); popup.close();
+
+  // ── Run J: a sold-out piece redirected to its category ───────────────────
+  console.log("\n— run J: a sold-out piece sends the tab to a category —");
+  await storeControl({ mode: "soldout", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  popup = await openPopup(extId);
+  await popup.evaluate(
+    `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:10}})`,
+  );
+  {
+    const doneJ = await waitForEvent("done", 120000);
+    check("run J finished", !!doneJ);
+    const { api, imported: importedJ, events: eventsJ } = await studioEvents();
+    const beta = api.find((a) => a.action === "ingest" && /\/product\/beta$/.test(a.url || ""));
+    check("the page says where the tab ended up", !!beta && /\/collections\/women$/.test(beta.finalUrl || ""), JSON.stringify(beta));
+    const betaResult = eventsJ.find((e) => e.kind === "ingest" && /\/product\/beta$/.test(e.detail.url))?.detail.result;
+    check("and the category is not imported as the piece", !!betaResult && betaResult.status === "skipped" && /not a product page/.test(betaResult.reason || ""), JSON.stringify(betaResult));
+    check("the other pieces are", importedJ.length === 3, JSON.stringify(importedJ.map((i) => i.url)));
+  }
+  collect.close(); popup.close();
+
   // ── Run G: the extension is updated while the collect tab stays open ───────
   //
   // What an admin does after installing a new version: ↻ on the extensions
