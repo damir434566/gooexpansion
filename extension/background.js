@@ -31,6 +31,8 @@
  * page already in flight cannot land after the button.
  */
 
+import { sitemapPieces, takePieces, queuedBytes, PLAN_SITEMAP_BUDGET, PLAN_SITEMAP_DOCS } from "./sitemap-pieces.js";
+
 // ── Politeness constants ─────────────────────────────────────────────────────
 
 /** Never faster than this, whatever robots.txt does or does not ask for. */
@@ -59,8 +61,12 @@ const CHECK_WAIT_MS = 6_000;
 const PAGE_TIMEOUT_MS = 45_000;
 /** Let a loaded page settle before reading it. */
 const SETTLE_MS = 500;
-/** Planning rounds before we call a store done. */
-const MAX_ROUNDS = 12;
+/**
+ * Planning rounds before we call a store done. A round is one plan call, and a
+ * large store's sitemap now takes several of them (sitemap-pieces.js). They
+ * cost the store nothing: a plan call goes only to our site.
+ */
+const MAX_ROUNDS = 24;
 /** Pause between sitemap fetches — cheap requests, but still requests. */
 const SITEMAP_GAP_MS = 400;
 
@@ -214,8 +220,17 @@ async function reconnect() {
   return { error: NO_TAB };
 }
 
-/** Ask the collect tab to call the API, and wait for what it got back. */
+/**
+ * Ask the collect tab to call the API, and wait for what it got back.
+ *
+ * The second attempt goes through `reconnect`, which only hands back a tab
+ * whose bridge has just answered. So a send that fails after that is not about
+ * reaching the tab: the tab is there, and Chrome refused this one message. Up
+ * to 1.0.12 that was reported as "not reachable" too, which sent the admin off
+ * reloading a tab that was fine.
+ */
 async function askPage(type, payload) {
+  let refused = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     const tabId = attempt === 0 ? await studioTab() : await reconnect();
     if (tabId != null && typeof tabId === "object") return { ok: false, error: tabId.error };
@@ -223,9 +238,16 @@ async function askPage(type, payload) {
     try {
       const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
       return res ?? { ok: false, error: "The collect tab did not answer" };
-    } catch {
+    } catch (err) {
       /* dead bridge or gone tab: reconnect and try once more */
+      if (attempt === 1) refused = err?.message || "no reason given";
     }
+  }
+  if (refused) {
+    return {
+      ok: false,
+      error: `The collect tab is open, but Chrome would not pass it the ${type} request (${refused}). Reloading the tab will not help: this is a fault in Goo Collect, not in the tab.`,
+    };
   }
   return { ok: false, error: NO_TAB };
 }
@@ -482,6 +504,10 @@ async function run({ storeUrl, limit, linksOnly = false }) {
   let html = first.html ?? "";
   let docs = [];
   const readDocs = new Set();
+  /** Sitemaps the site has asked for and we have not fetched yet, best first. */
+  let toFetch = [];
+  /** Fetched sitemaps not yet sent, in pieces that each fit one plan call. */
+  const pieces = [];
   const seen = [];
   let collected = 0;
   let refusals = 0;
@@ -586,20 +612,33 @@ async function run({ storeUrl, limit, linksOnly = false }) {
 
     if (state.stopped || collected >= limit) break;
 
-    // Sitemaps for the next round. The server names them; we fetch them.
-    const next = (Array.isArray(plan.fetchNext) ? plan.fetchNext : []).filter(
-      (u) => !readDocs.has(u),
+    // Sitemaps for the next round. The server names them, best first; we
+    // fetch them. Newly named ones go ahead of older ones, because the server
+    // ranks the products sitemap out of an index above everything else.
+    const named = (Array.isArray(plan.fetchNext) ? plan.fetchNext : []).filter(
+      (u) => typeof u === "string" && !readDocs.has(u) && !toFetch.includes(u),
     );
-    if (!next.length) break;
+    toFetch = [...named, ...toFetch];
 
-    docs = [];
-    for (const docUrl of next) {
-      if (state.stopped) break;
+    // Only as much as one plan call can take. A store whose first sitemap
+    // holds more products than the run asked for is never asked for the rest.
+    // Fetching every named sitemap at once is how a Farfetch run ended up
+    // handing Chrome a message bigger than it will carry.
+    while (
+      toFetch.length &&
+      !state.stopped &&
+      queuedBytes(pieces) < PLAN_SITEMAP_BUDGET &&
+      pieces.length < PLAN_SITEMAP_DOCS
+    ) {
+      const docUrl = toFetch.shift();
       readDocs.add(docUrl);
       const xml = await fetchText(docUrl);
-      if (xml) docs.push({ url: docUrl, xml });
+      if (xml) pieces.push(...sitemapPieces(docUrl, xml));
       await sleep(SITEMAP_GAP_MS);
     }
+    if (state.stopped) break;
+
+    docs = takePieces(pieces);
     if (!docs.length) break;
   }
 

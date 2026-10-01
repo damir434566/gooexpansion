@@ -59,6 +59,9 @@ globalThis.fetch = async (input, init) => {
 const PORT = Number(process.env.STUDIO_PORT || 3302);
 const HOST = "localhost";
 
+/** Largest request body a Vercel function accepts. */
+const VERCEL_BODY_LIMIT = 4_500_000;
+
 const events = [];
 const imported = [];
 /** Every call that reached the collect API, as the site would read its mode off it. */
@@ -107,8 +110,9 @@ async function callApi(payload) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await res.json();
-  if (!res.ok || !data.ok) throw new Error(data.error || ("HTTP " + res.status));
+  // As the real screen reads it: a refusal from the platform is not JSON.
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || ("Request failed (" + res.status + ")"));
   return data;
 }
 
@@ -165,9 +169,11 @@ window.__gooStop = function () {
 
 function readBody(req) {
   return new Promise((resolve) => {
-    let b = "";
-    req.on("data", (c) => (b += c));
-    req.on("end", () => resolve(b));
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    // Joined as bytes, then decoded: a multi-byte character split across two
+    // chunks would otherwise turn into two replacement characters.
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
   });
 }
 
@@ -199,8 +205,20 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === "/api/admin/parser/collect" && req.method === "POST") {
-    const body = JSON.parse((await readBody(req)) || "{}");
+    const raw = await readBody(req);
+    const bytes = Buffer.byteLength(raw);
+    // Vercel refuses a function body over 4.5 MB before our route sees it, with
+    // a plain-text page rather than JSON. The real collect route lives there,
+    // so the stand-in refuses the same way.
+    if (bytes > VERCEL_BODY_LIMIT) {
+      api.push({ action: "refused", bytes });
+      res.writeHead(413, { "content-type": "text/plain" });
+      return res.end("Request Entity Too Large\n\nFUNCTION_PAYLOAD_TOO_LARGE\n");
+    }
+    const body = JSON.parse(raw || "{}");
     api.push({
+      bytes,
+      sitemaps: Array.isArray(body.sitemaps) ? body.sitemaps.length : 0,
       action: body.action === "ingest" ? "ingest" : "plan",
       has: Object.prototype.hasOwnProperty.call(body, "linksOnly"),
       linksOnly: body.linksOnly,

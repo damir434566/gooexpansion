@@ -10,6 +10,10 @@
  *   spa    — two pages built the way a single-page storefront builds them:
  *            the gallery lives in a hydration payload rather than in markup,
  *            and one of them never states its currency outside rendered text
+ *   bigmap — sitemaps the size Farfetch's are: an index naming three product
+ *            sitemaps that list every address in ten languages, about 90 MB
+ *            between them. The category page links two products; the other
+ *            two are only in the first sitemap.
  *
  * Records every request with a timestamp so the test can assert on pacing.
  */
@@ -195,12 +199,57 @@ function robots() {
   const lines = ["User-agent: Googlebot", "Disallow:", "", "User-agent: *"];
   // A path the run must never open. If it does, the test fails loudly.
   lines.push("Disallow: /product/secret-");
-  if (mode !== "many" && mode !== "spa") lines.push("Crawl-delay: 2");
+  if (mode !== "many" && mode !== "spa" && mode !== "bigmap") lines.push("Crawl-delay: 2");
   lines.push("", `Sitemap: ${ORIGIN}/sitemap.xml`);
   return lines.join("\n") + "\n";
 }
 
+/** The `bigmap` store's product sitemaps, and how many addresses each lists. */
+const BIGMAP_CHILDREN = 3;
+const BIGMAP_ENTRIES = 25_000;
+/** Locales every address is repeated in, the way Farfetch's sitemaps repeat them. */
+const BIGMAP_LOCALES = Array.from({ length: 10 }, (_, i) => `l${String(i).padStart(2, "0")}-xx`);
+/** The two products only the sitemap knows, at the top of the first one. */
+const BIGMAP_SITEMAP_ONLY = ["gamma", "delta"];
+const bigmapCache = new Map();
+
+function bigmapIndex() {
+  const children = Array.from(
+    { length: BIGMAP_CHILDREN },
+    (_, i) => `  <sitemap><loc>${ORIGIN}/sitemap-products-${i + 1}.xml</loc></sitemap>`,
+  ).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${children}\n</sitemapindex>\n`;
+}
+
+/**
+ * One product sitemap of the `bigmap` store, around 30 MB.
+ *
+ * Built once and kept: the run fetches each child once, but generating 80 MB
+ * of XML per request would make the fixture the slow part of the test.
+ */
+function bigmapChild(n) {
+  if (bigmapCache.has(n)) return bigmapCache.get(n);
+  const entry = (pathname, title) =>
+    `<url><loc>${ORIGIN}${pathname}</loc>` +
+    BIGMAP_LOCALES.map(
+      (l) => `<xhtml:link rel="alternate" hreflang="${l}" href="${ORIGIN}/${l}${pathname}"/>`,
+    ).join("") +
+    `<image:image><image:loc>${ORIGIN}/img${pathname}.jpg</image:loc><image:title>${title}</image:title></image:image></url>`;
+  const parts = [];
+  if (n === 1) for (const slug of BIGMAP_SITEMAP_ONLY) parts.push(entry(`/product/${slug}`, `Fixture ${slug} Coat`));
+  // Addresses nobody opens: the run asks for four products and finds them first.
+  for (let i = 0; i < BIGMAP_ENTRIES; i++) parts.push(entry(`/product/gone-${n}-${i}`, `Gone ${n}-${i} Coat`));
+  const xml =
+    `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" ` +
+    `xmlns:xhtml="http://www.w3.org/1999/xhtml" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">\n` +
+    parts.join("\n") +
+    `\n</urlset>\n`;
+  bigmapCache.set(n, xml);
+  return xml;
+}
+
 function sitemap() {
+  if (mode === "bigmap") return bigmapIndex();
   const locs = (mode === "spa" ? SPA_PATHS : products().map((slug) => `/product/${slug}`))
     .map((pathname) => `  <url><loc>${ORIGIN}${pathname}</loc></url>`)
     .join("\n");
@@ -251,7 +300,9 @@ function productPage(slug) {
 }
 
 function categoryPage() {
-  const links = (mode === "spa" ? SPA_PATHS : products().map((s) => `/product/${s}`))
+  const shown =
+    mode === "bigmap" ? products().filter((s) => !BIGMAP_SITEMAP_ONLY.includes(s) && !s.startsWith("secret")) : products();
+  const links = (mode === "spa" ? SPA_PATHS : shown.map((s) => `/product/${s}`))
     .map((href) => `<a href="${href}">${href}</a>`)
     .join("\n");
   return `<!doctype html><html><head><title>All</title></head><body>
@@ -297,6 +348,10 @@ const server = http.createServer((req, res) => {
 
   if (p === "/robots.txt") return send(200, "text/plain", robots());
   if (p === "/sitemap.xml") return send(200, "application/xml", sitemap());
+  const child = mode === "bigmap" && /^\/sitemap-products-(\d+)\.xml$/.exec(p);
+  if (child && Number(child[1]) >= 1 && Number(child[1]) <= BIGMAP_CHILDREN) {
+    return send(200, "application/xml", bigmapChild(Number(child[1])));
+  }
   if (p === "/collections/all" || p === "/") return send(200, "text/html", categoryPage());
   if (p === "/collections/women") return send(200, "text/html", categoryPage());
 

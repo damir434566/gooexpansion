@@ -100,9 +100,17 @@
   ok   and the category is not imported as the piece
   ok   the other pieces are
 
+— run K: the sitemaps are far bigger than one message can carry —
+  ok   run K finished rather than halting
+  ok   it collected the two products on the page and the two only the sitemap names
+  ok   a plan carried the sitemap
+  ok   and no request to the site was over Vercel's 4.5 MB limit
+  ok   the first sitemap had enough, so the other two were never downloaded
+  ok   no address only a sitemap's padding names was opened
+
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
 
-  82 passed, 0 failed
+  88 passed, 0 failed
 
