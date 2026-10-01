@@ -1,0 +1,280 @@
+diff --git a/extension/README.md b/extension/README.md
+index b36df98..1dccfc3 100644
+--- a/extension/README.md
++++ b/extension/README.md
+@@ -108,7 +108,8 @@ Collect catalog и Parse URL).
+ |---|---|
+ | **«Waiting for the extension»** и ничего не происходит | Перезагрузи вкладку приёмника (F5). Так бывает, если она была открыта раньше, чем поставили или обновили расширение. Не помогло — адреса сайта нет в `manifest.json` (см. «Установка»). |
+ | В popup: **«Could not reach …/goo-studio/parser/collect»** | Приёмник не ответил за 10 секунд. Ты не вошёл как админ в этом Chrome, в popup неверный адрес Goo Studio, или этого адреса нет в `manifest.json`. Открой приёмник сам, войди, обнови вкладку и попробуй снова. |
+-| **«The collect tab is not reachable»** | С версии 1.0.6 расширение само находит вкладку приёмника и чинит связь, в том числе после обновления расширения. Если сообщение всё же появилось — открой Goo Studio → Parser → Collect, обнови её (F5) и нажми «Collect this store» ещё раз. |
++| **«The collect tab is not reachable»** | С версии 1.0.6 расширение само находит вкладку приёмника и чинит связь, в том числе после обновления расширения. Если сообщение всё же появилось — открой Goo Studio → Parser → Collect, обнови её (F5) и нажми «Collect this store» ещё раз. До 1.0.13 так же писалось, когда вкладка была на месте, а Chrome не пропускал слишком большое сообщение с сайтмапами (Farfetch: прогон вставал после первой порции товаров). С 1.0.13 сайтмапы уходят кусками до 2 МБ, и этого больше нет. |
++| **«The collect tab is open, but Chrome would not pass it the … request»** | Вкладка на месте, но Chrome отказался передать ей именно этот запрос (причина в скобках). Перезагрузка вкладки не поможет: это ошибка расширения, пришли текст сообщения разработчику. |
+ | **«…usually a sign-in redirect»** | Вкладку приёмника увело на вход. Войди в Goo Studio админом, открой Parser → Collect и запусти снова. |
+ | **«The store refused the first page»** | Магазин отказал уже на первой странице; больше ничего не запрашивалось. Открой её в обычной вкладке, пройди проверку, если она есть, и запусти снова. |
+ | **«The store refused two pages in a row»** | Магазин отбивается (ответ 403 или 429 два раза подряд). Прогон остановился сам, чтобы не поймать бан. Попробуй через час. |
+@@ -162,4 +163,5 @@ Collect catalog и Parse URL).
+ | `background.js` | Фоновый работник: robots.txt и sitemap, открытие страниц, темп, отказы, Stop. |
+ | `snapshot.js` | Вставляется в страницу магазина: прокручивает, очищает, собирает фото, цену, размеры, цвет и остальное. |
+ | `bridge.js` | Работает на вкладке-приёмнике: передаёт сообщения между расширением и страницей. |
++| `sitemap-pieces.js` | Сжимает сайтмап до того, что читает планировщик (`<loc>`, `<image:title>`), и режет на куски до 2 МБ, чтобы каждый план прошёл и в сообщении Chrome, и в запросе к сайту. |
+ | `icons/` | Иконки. |
+diff --git a/extension/background.js b/extension/background.js
+index 73f3e5a..c7ff4f5 100644
+--- a/extension/background.js
++++ b/extension/background.js
+@@ -31,6 +31,8 @@
+  * page already in flight cannot land after the button.
+  */
+ 
++import { sitemapPieces, takePieces, queuedBytes, PLAN_SITEMAP_BUDGET, PLAN_SITEMAP_DOCS } from "./sitemap-pieces.js";
++
+ // ── Politeness constants ─────────────────────────────────────────────────────
+ 
+ /** Never faster than this, whatever robots.txt does or does not ask for. */
+@@ -59,8 +61,12 @@ const CHECK_WAIT_MS = 6_000;
+ const PAGE_TIMEOUT_MS = 45_000;
+ /** Let a loaded page settle before reading it. */
+ const SETTLE_MS = 500;
+-/** Planning rounds before we call a store done. */
+-const MAX_ROUNDS = 12;
++/**
++ * Planning rounds before we call a store done. A round is one plan call, and a
++ * large store's sitemap now takes several of them (sitemap-pieces.js). They
++ * cost the store nothing: a plan call goes only to our site.
++ */
++const MAX_ROUNDS = 24;
+ /** Pause between sitemap fetches — cheap requests, but still requests. */
+ const SITEMAP_GAP_MS = 400;
+ 
+@@ -214,8 +220,17 @@ async function reconnect() {
+   return { error: NO_TAB };
+ }
+ 
+-/** Ask the collect tab to call the API, and wait for what it got back. */
++/**
++ * Ask the collect tab to call the API, and wait for what it got back.
++ *
++ * The second attempt goes through `reconnect`, which only hands back a tab
++ * whose bridge has just answered. So a send that fails after that is not about
++ * reaching the tab: the tab is there, and Chrome refused this one message. Up
++ * to 1.0.12 that was reported as "not reachable" too, which sent the admin off
++ * reloading a tab that was fine.
++ */
+ async function askPage(type, payload) {
++  let refused = "";
+   for (let attempt = 0; attempt < 2; attempt++) {
+     const tabId = attempt === 0 ? await studioTab() : await reconnect();
+     if (tabId != null && typeof tabId === "object") return { ok: false, error: tabId.error };
+@@ -223,10 +238,17 @@ async function askPage(type, payload) {
+     try {
+       const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
+       return res ?? { ok: false, error: "The collect tab did not answer" };
+-    } catch {
++    } catch (err) {
+       /* dead bridge or gone tab: reconnect and try once more */
++      if (attempt === 1) refused = err?.message || "no reason given";
+     }
+   }
++  if (refused) {
++    return {
++      ok: false,
++      error: `The collect tab is open, but Chrome would not pass it the ${type} request (${refused}). Reloading the tab will not help: this is a fault in Goo Collect, not in the tab.`,
++    };
++  }
+   return { ok: false, error: NO_TAB };
+ }
+ 
+@@ -482,6 +504,10 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+   let html = first.html ?? "";
+   let docs = [];
+   const readDocs = new Set();
++  /** Sitemaps the site has asked for and we have not fetched yet, best first. */
++  let toFetch = [];
++  /** Fetched sitemaps not yet sent, in pieces that each fit one plan call. */
++  const pieces = [];
+   const seen = [];
+   let collected = 0;
+   let refusals = 0;
+@@ -586,20 +612,33 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+ 
+     if (state.stopped || collected >= limit) break;
+ 
+-    // Sitemaps for the next round. The server names them; we fetch them.
+-    const next = (Array.isArray(plan.fetchNext) ? plan.fetchNext : []).filter(
+-      (u) => !readDocs.has(u),
++    // Sitemaps for the next round. The server names them, best first; we
++    // fetch them. Newly named ones go ahead of older ones, because the server
++    // ranks the products sitemap out of an index above everything else.
++    const named = (Array.isArray(plan.fetchNext) ? plan.fetchNext : []).filter(
++      (u) => typeof u === "string" && !readDocs.has(u) && !toFetch.includes(u),
+     );
+-    if (!next.length) break;
+-
+-    docs = [];
+-    for (const docUrl of next) {
+-      if (state.stopped) break;
++    toFetch = [...named, ...toFetch];
++
++    // Only as much as one plan call can take. A store whose first sitemap
++    // holds more products than the run asked for is never asked for the rest.
++    // Fetching every named sitemap at once is how a Farfetch run ended up
++    // handing Chrome a message bigger than it will carry.
++    while (
++      toFetch.length &&
++      !state.stopped &&
++      queuedBytes(pieces) < PLAN_SITEMAP_BUDGET &&
++      pieces.length < PLAN_SITEMAP_DOCS
++    ) {
++      const docUrl = toFetch.shift();
+       readDocs.add(docUrl);
+       const xml = await fetchText(docUrl);
+-      if (xml) docs.push({ url: docUrl, xml });
++      if (xml) pieces.push(...sitemapPieces(docUrl, xml));
+       await sleep(SITEMAP_GAP_MS);
+     }
++    if (state.stopped) break;
++
++    docs = takePieces(pieces);
+     if (!docs.length) break;
+   }
+ 
+diff --git a/extension/manifest.json b/extension/manifest.json
+index 5e65ffa..a00f550 100644
+--- a/extension/manifest.json
++++ b/extension/manifest.json
+@@ -1,7 +1,7 @@
+ {
+   "manifest_version": 3,
+   "name": "Goo Collect",
+-  "version": "1.0.12",
++  "version": "1.0.13",
+   "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
+   "minimum_chrome_version": "116",
+   "permissions": [
+diff --git a/extension/sitemap-pieces.js b/extension/sitemap-pieces.js
+new file mode 100644
+index 0000000..c663678
+--- /dev/null
++++ b/extension/sitemap-pieces.js
+@@ -0,0 +1,121 @@
++/**
++ * Sitemaps cut down to what fits in one plan call.
++ *
++ * A sitemap goes from the worker to the collect tab as a Chrome message, and
++ * from the collect tab to our API as a request body. Both have a ceiling.
++ * Chrome will not carry an extension message over 64 MB, and Vercel refuses a
++ * function body over 4.5 MB before the route sees it. A large store's
++ * sitemaps are past both: one that lists every address once per language runs
++ * to tens of megabytes. Up to 1.0.12 the worker sent every sitemap it had
++ * fetched in one message. On a Farfetch run Chrome refused it, and the run
++ * halted with "The collect tab is not reachable" while the tab sat there
++ * answering.
++ *
++ * So each document is cut down to what the planner reads of it: every `<loc>`,
++ * plus the `<image:title>` Shopify writes beside a product. These are
++ * `locations` and `titles` in src/lib/server/parser/sitemap.ts, and the two
++ * must change together. The rest is dropped: hreflang alternates, images,
++ * dates. Then it is cut into pieces that each fit one call. A piece keeps its
++ * document's address, because the planner treats the name as evidence
++ * ("product-sitemap.xml") and records the document as read. Nothing here
++ * decides which addresses are products; every one is passed on.
++ */
++
++/**
++ * Sitemap bytes sent in one plan call. That leaves room under Vercel's 4.5 MB
++ * for the rest of the request: robots.txt, and the addresses already seen.
++ */
++export const PLAN_SITEMAP_BUDGET = 2_000_000;
++
++/** Documents the route reads from one plan call (`MAX_SITEMAPS` in collect/route.ts). */
++export const PLAN_SITEMAP_DOCS = 12;
++
++// The same patterns sitemap.ts reads with, so a piece says to the planner
++// exactly what its document said.
++const LOC = /<loc>\s*(?:<!\[CDATA\[\s*)?([^<\s\]]+)/i;
++const LOCS = /<loc>\s*(?:<!\[CDATA\[\s*)?([^<\s\]]+)/gi;
++const URL_ENTRY = /<url>([\s\S]*?)<\/url>/gi;
++const TITLE = /<image:title>\s*(?:<!\[CDATA\[)?([^<\]]*)/i;
++
++/** UTF-8 length, counted without copying: a title in Cyrillic is two bytes a letter. */
++function utf8Bytes(s) {
++  let n = s.length;
++  for (let i = 0; i < s.length; i++) {
++    const c = s.charCodeAt(i);
++    if (c > 0x7f) n += c > 0x7ff ? 2 : 1;
++  }
++  return n;
++}
++
++/**
++ * One fetched sitemap as pieces of at most `budget` bytes, in document order.
++ *
++ * A document with no `<loc>` at all, such as an HTML page served at a guessed
++ * sitemap address, still becomes one empty piece. The planner then records it
++ * as read, as it did when the whole text was sent.
++ */
++export function sitemapPieces(url, xml, budget = PLAN_SITEMAP_BUDGET) {
++  const index = /<sitemapindex[\s>]/i.test(xml);
++  const tag = index ? "sitemapindex" : "urlset";
++  const open = `<${tag}>\n`;
++  const close = `</${tag}>`;
++  const frame = open.length + close.length;
++
++  // Titles by address, read the way `titles` reads them: one per `<url>`, the
++  // last one winning when an address repeats.
++  const titles = new Map();
++  if (!index) {
++    for (const m of xml.matchAll(URL_ENTRY)) {
++      const loc = LOC.exec(m[1])?.[1];
++      const title = TITLE.exec(m[1])?.[1];
++      if (loc && title?.trim()) titles.set(loc, title);
++    }
++  }
++
++  const pieces = [];
++  let entries = [];
++  let size = frame;
++  const flush = () => {
++    const text = open + entries.join("\n") + (entries.length ? "\n" : "") + close;
++    pieces.push({ url, xml: text, bytes: utf8Bytes(text) });
++    entries = [];
++    size = frame;
++  };
++
++  for (const m of xml.matchAll(LOCS)) {
++    const loc = m[1];
++    const title = titles.get(loc);
++    const entry = index
++      ? `<sitemap><loc>${loc}</loc></sitemap>`
++      : `<url><loc>${loc}</loc>${title ? `<image:title>${title}</image:title>` : ""}</url>`;
++    const cost = utf8Bytes(entry) + 1;
++    if (entries.length && size + cost > budget) flush();
++    entries.push(entry);
++    size += cost;
++  }
++  if (entries.length || !pieces.length) flush();
++  return pieces;
++}
++
++/** Total bytes of the pieces still waiting to be sent. */
++export function queuedBytes(queue) {
++  return queue.reduce((n, p) => n + p.bytes, 0);
++}
++
++/**
++ * Take the next plan call's worth of pieces off the front of the queue.
++ *
++ * At least one piece is always taken, so the queue can never stall on a piece
++ * bigger than the budget.
++ */
++export function takePieces(queue, budget = PLAN_SITEMAP_BUDGET, maxDocs = PLAN_SITEMAP_DOCS) {
++  const batch = [];
++  let size = 0;
++  while (queue.length && batch.length < maxDocs) {
++    if (batch.length && size + queue[0].bytes > budget) break;
++    const piece = queue.shift();
++    size += piece.bytes;
++    batch.push({ url: piece.url, xml: piece.xml });
++  }
++  return batch;
++}

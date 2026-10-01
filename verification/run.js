@@ -818,6 +818,64 @@ async function main() {
   }
   collect.close(); popup.close();
 
+  // ── Run K: sitemaps the size Farfetch's are ───────────────────────────────
+  //
+  // The category page gives two products; the rest are in sitemaps that list
+  // every address in ten languages, about 90 MB together. Up to 1.0.12 the
+  // worker fetched them all and sent them in one plan message, which Chrome
+  // will not carry past 64 MB — so the run halted with "The collect tab is not
+  // reachable" while the tab sat there answering. Each one alone was also past
+  // Vercel's 4.5 MB body limit, so even a smaller store could never be planned
+  // from its sitemap.
+  console.log("\n— run K: the sitemaps are far bigger than one message can carry —");
+  await storeControl({ mode: "bigmap", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  popup = await openPopup(extId);
+  await popup.evaluate(
+    `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:4}})`,
+  );
+  {
+    let st = null;
+    for (let i = 0; i < 180; i++) {
+      await sleep(1000);
+      st = await popup.evaluate("chrome.runtime.sendMessage({type:'state'})");
+      if (st && !st.running) break;
+    }
+    const { api, imported: importedK } = await studioEvents();
+    const logK = (await storeLog()).log;
+    check("run K finished rather than halting", !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    const names = importedK.map((i) => i.url.replace(/^.*\/product\//, "")).sort();
+    check(
+      "it collected the two products on the page and the two only the sitemap names",
+      JSON.stringify(names) === JSON.stringify(["alpha", "beta", "delta", "gamma"]),
+      JSON.stringify(names),
+    );
+    const plans = api.filter((a) => a.action === "plan");
+    check(
+      "a plan carried the sitemap",
+      plans.some((a) => a.sitemaps > 0),
+      JSON.stringify(plans.map((a) => ({ bytes: a.bytes, sitemaps: a.sitemaps }))),
+    );
+    check(
+      "and no request to the site was over Vercel's 4.5 MB limit",
+      api.every((a) => a.action !== "refused") && plans.every((a) => a.bytes <= 4_500_000),
+      JSON.stringify(api.map((a) => ({ action: a.action, bytes: a.bytes }))),
+    );
+    const children = logK.filter((l) => /^\/sitemap-products-\d+\.xml$/.test(l.path)).map((l) => l.path);
+    check(
+      "the first sitemap had enough, so the other two were never downloaded",
+      JSON.stringify(children) === JSON.stringify(["/sitemap-products-1.xml"]),
+      JSON.stringify(children),
+    );
+    check(
+      "no address only a sitemap's padding names was opened",
+      !logK.some((l) => l.path.startsWith("/product/gone-")),
+      JSON.stringify(logK.filter((l) => l.path.startsWith("/product/gone-")).slice(0, 3)),
+    );
+  }
+  collect.close(); popup.close();
+
   // ── Run G: the extension is updated while the collect tab stays open ───────
   //
   // What an admin does after installing a new version: ↻ on the extensions
