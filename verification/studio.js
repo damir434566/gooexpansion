@@ -158,6 +158,12 @@ window.addEventListener("message", async (event) => {
   }
 });
 
+// The real screen's "Retry failed" button: a one-way word to the extension.
+window.__gooRetry = function () {
+  log("retry-pressed", {});
+  window.postMessage({ source: FROM_PAGE, type: "retry" }, window.location.origin);
+};
+
 // Exposed so the test can press Stop the way the real screen does.
 window.__gooStop = function () {
   stopped = true;

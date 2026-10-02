@@ -32,6 +32,7 @@
  */
 
 import { sitemapPieces, takePieces, queuedBytes, PLAN_SITEMAP_BUDGET, PLAN_SITEMAP_DOCS } from "./sitemap-pieces.js";
+import { listingStep, robotsRules, robotsAllows, planHtml } from "./listing.js";
 
 // ── Politeness constants ─────────────────────────────────────────────────────
 
@@ -76,18 +77,28 @@ const state = {
   running: false,
   stopped: false,
   store: "",
+  linksOnly: false,
+  /** idle → listing (walking the admin's page) → planning → collecting → done / stopped / halted */
   phase: "idle",
   message: "",
+  /** Pieces the page showed, as the planner counted them. */
+  found: 0,
+  /** True when a run that asked for a few stopped reading the page early. */
+  foundAtLeast: false,
+  /** While the page is walked: pages opened and links seen so far. */
+  listing: null,
   planned: 0,
   done: 0,
-  imported: 0,
-  failed: 0,
+  counts: { new: 0, updated: 0, skipped: 0, failed: 0 },
+  /** Pages that failed, with why, for Retry. Not sent to the popup on every poll. */
+  failures: [],
   delayMs: MIN_DELAY_MS,
   studioTabId: null,
 };
 
 function publicState() {
-  return { ...state };
+  const { failures, ...rest } = state;
+  return { ...rest, failureCount: failures.length };
 }
 
 // ── Abortable waiting ────────────────────────────────────────────────────────
@@ -268,6 +279,11 @@ function pushProgress() {
     planned: state.planned,
     delayMs: state.delayMs,
     store: state.store,
+    phase: state.phase,
+    found: state.found,
+    foundAtLeast: state.foundAtLeast,
+    listing: state.listing,
+    message: state.message,
   });
 }
 
@@ -441,19 +457,209 @@ async function snapshotPage(url) {
 
 // ── The run ──────────────────────────────────────────────────────────────────
 
+/** "Products to collect" when the admin asks for everything on the page. */
+const MAX_LIMIT = 2_000;
+/** How long the walk of one listing may take, all its pages together. */
+const LISTING_MS = 10 * 60_000;
+/** Pages of one listing the walk opens. */
+const LISTING_PAGES = 100;
+/** Links one walk keeps: past any category, a bound on what is sent, not a target. */
+const LISTING_LINKS = 15_000;
+/** Structured data kept from the walked pages, in characters. */
+const LISTING_LD = 500_000;
+/** How long the walk waits for the store tab to come back to the front. */
+const HIDDEN_MS = 5 * 60_000;
+/** Failed pages one run remembers, for Retry. */
+const MAX_FAILURES = 500;
+
+const KEEP_IN_FRONT =
+  "Bring the store tab back to the front. A store only loads more of its page while you can see it.";
+const NOTHING_FOUND =
+  "No pieces were found on this page. Open a page with a grid of products (a category, a brand, a search) and try again.";
+
+/** Where every kind of run starts from. */
+function begin(storeUrl, linksOnly, phase) {
+  Object.assign(state, {
+    running: true,
+    stopped: false,
+    store: storeUrl,
+    linksOnly,
+    phase,
+    message: "",
+    planned: 0,
+    done: 0,
+    found: 0,
+    foundAtLeast: false,
+    listing: null,
+    counts: { new: 0, updated: 0, skipped: 0, failed: 0 },
+    failures: [],
+    delayMs: MIN_DELAY_MS,
+  });
+}
+
+/** What a run came to, kept after the worker is gone so the popup can say it. */
+function summary() {
+  return {
+    store: state.store,
+    at: Date.now(),
+    phase: state.phase,
+    message: state.message,
+    found: state.found,
+    foundAtLeast: state.foundAtLeast,
+    planned: state.planned,
+    done: state.done,
+    counts: { ...state.counts },
+    failures: state.failures.slice(0, MAX_FAILURES),
+    linksOnly: state.linksOnly,
+  };
+}
+
+async function saveLastRun() {
+  try {
+    await chrome.storage.local.set({ lastRun: summary() });
+  } catch {
+    /* the summary is a convenience; the collect tab has every row */
+  }
+}
+
+async function lastRun() {
+  try {
+    const { lastRun: last } = await chrome.storage.local.get("lastRun");
+    return last && typeof last === "object" ? last : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One page's outcome, in the counts the admin is shown at the end. */
+function record(url, status, reason) {
+  const key = status === "imported" ? "new" : status;
+  if (key in state.counts) state.counts[key]++;
+  if (status === "failed" && state.failures.length < MAX_FAILURES) {
+    state.failures.push({ url, reason: String(reason || "failed").slice(0, 300) });
+  }
+}
+
+/**
+ * A page that failed before the collect tab saw it: refused, or not read at
+ * all. The tab lists what its imports return, so without this a page that
+ * never loaded was missing from its rows, and "found 36, 35 new" had no
+ * reason beside it. Sent as progress, which every bridge passes on without
+ * waiting for an answer.
+ */
+function failedUnseen(url, reason) {
+  record(url, "failed", reason);
+  void tellPage("progress", { failure: { url, reason: String(reason || "failed").slice(0, 300) } });
+}
+
 function halt(message) {
   state.running = false;
   state.phase = "halted";
   state.message = message;
   void tellPage("error", { message });
+  void saveLastRun();
 }
 
 function finish() {
   state.running = false;
   state.phase = state.stopped ? "stopped" : "done";
   void tellPage("done", {});
+  void saveLastRun();
 }
 
+/**
+ * Open each address in turn, at the store's pace, and hand what it shows to
+ * the collect tab. Every kind of run ends here. Returns false when the store
+ * made the run stop: two refusals in a row.
+ */
+async function collect(urls, ctx) {
+  for (const url of urls) {
+    if (state.stopped || ctx.collected >= ctx.limit) break;
+    ctx.seen.push(url);
+
+    await politePause();
+    if (state.stopped) break;
+
+    const snap = await snapshotPage(url);
+    // Stopped while the page was open: not a failure, and nothing to retry.
+    if (state.stopped) break;
+
+    if (snap.refused) {
+      ctx.refusals++;
+      state.done++;
+      failedUnseen(url, snap.check ? `the store showed a bot check ("${snap.check}")` : `the store refused it (HTTP ${snap.status})`);
+      if (ctx.refusals >= REFUSAL_LIMIT) {
+        halt(
+          snap.check
+            ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
+            : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
+        );
+        return false;
+      }
+      continue;
+    }
+    ctx.refusals = 0;
+
+    if (!snap.html) {
+      failedUnseen(url, snap.error || "Could not read the page");
+      ctx.collected++;
+      state.done++;
+      continue;
+    }
+
+    const ingested = await askPage("ingest", {
+      url,
+      html: snap.html,
+      // Sent in links-only runs too: the site keeps no photo from them, but
+      // may read the colour off one, and the colour picks the right card.
+      images: snap.images,
+      linksOnly: ctx.linksOnly,
+      priceText: snap.priceText,
+      sizes: snap.sizes,
+      colorText: snap.colorText,
+      colorCandidates: snap.colorCandidates,
+      titleText: snap.titleText,
+      shopify: snap.shopify,
+      variantUrls: snap.variantUrls,
+      descriptionText: snap.descriptionText,
+      specs: snap.specs,
+      breadcrumbs: snap.breadcrumbs,
+      brandText: snap.brandText,
+      pageTitle: snap.pageTitle,
+      finalUrl: snap.finalUrl,
+    });
+    ctx.collected++;
+    state.done++;
+    if (ingested.ok) {
+      const result = ingested.data?.result;
+      record(url, result?.status || "imported", result?.reason);
+    } else if (!state.stopped) {
+      record(url, "failed", ingested.error);
+    }
+    pushProgress();
+
+    ctx.sinceRest++;
+    if (ctx.sinceRest >= REST_EVERY && ctx.collected < ctx.limit && !state.stopped) {
+      ctx.sinceRest = 0;
+      const said = state.message;
+      state.message = "Resting so the store does not notice a rhythm…";
+      await sleep(REST_MS);
+      state.message = said;
+    }
+  }
+  return true;
+}
+
+function newContext(limit, linksOnly) {
+  return { limit, linksOnly, collected: 0, refusals: 0, sinceRest: 0, seen: [] };
+}
+
+/**
+ * Collect a store from an address alone: the page as a background tab opens
+ * it, then the store's sitemaps. What runs started without a tab get (the test
+ * harness, older popups); the popup's "Collect this page" walks the admin's
+ * own tab instead (`runPage`).
+ */
 async function run({ storeUrl, limit, linksOnly = false }) {
   let origin;
   try {
@@ -463,18 +669,7 @@ async function run({ storeUrl, limit, linksOnly = false }) {
     return;
   }
 
-  Object.assign(state, {
-    running: true,
-    stopped: false,
-    store: storeUrl,
-    phase: "planning",
-    message: "",
-    planned: 0,
-    done: 0,
-    imported: 0,
-    failed: 0,
-    delayMs: MIN_DELAY_MS,
-  });
+  begin(storeUrl, linksOnly, "planning");
 
   // The collect tab has to be there before anything is asked of the store —
   // failing here costs the store nothing, failing later wastes its bandwidth.
@@ -508,13 +703,10 @@ async function run({ storeUrl, limit, linksOnly = false }) {
   let toFetch = [];
   /** Fetched sitemaps not yet sent, in pieces that each fit one plan call. */
   const pieces = [];
-  const seen = [];
-  let collected = 0;
-  let refusals = 0;
-  let sinceRest = 0;
+  const ctx = newContext(limit, linksOnly);
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    if (state.stopped || collected >= limit) break;
+    if (state.stopped || ctx.collected >= limit) break;
 
     state.phase = "planning";
     state.message = "";
@@ -523,8 +715,8 @@ async function run({ storeUrl, limit, linksOnly = false }) {
       html,
       robotsTxt,
       sitemaps: docs,
-      seen,
-      limit: limit - collected,
+      seen: ctx.seen,
+      limit: limit - ctx.collected,
       // The popup's "Links only": the site then looks in this store for the
       // pieces we already have, and opens no other pages.
       linksOnly,
@@ -539,78 +731,12 @@ async function run({ storeUrl, limit, linksOnly = false }) {
     const plan = planned.data ?? {};
     const urls = Array.isArray(plan.urls) ? plan.urls : [];
     state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
-    state.planned = collected + urls.length;
+    state.planned = ctx.collected + urls.length;
+    state.phase = "collecting";
     pushProgress();
 
-    state.phase = "collecting";
-
-    for (const url of urls) {
-      if (state.stopped || collected >= limit) break;
-      seen.push(url);
-
-      await politePause();
-      if (state.stopped) break;
-
-      const snap = await snapshotPage(url);
-
-      if (snap.refused) {
-        refusals++;
-        state.failed++;
-        if (refusals >= REFUSAL_LIMIT) {
-          halt(
-            snap.check
-              ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
-              : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
-          );
-          return;
-        }
-        continue;
-      }
-      refusals = 0;
-
-      if (!snap.html) {
-        state.failed++;
-        state.done = ++collected;
-        continue;
-      }
-
-      const ingested = await askPage("ingest", {
-        url,
-        html: snap.html,
-        // Sent in links-only runs too: the site keeps no photo from them, but
-        // may read the colour off one, and the colour picks the right card.
-        images: snap.images,
-        linksOnly,
-        priceText: snap.priceText,
-        sizes: snap.sizes,
-        colorText: snap.colorText,
-        colorCandidates: snap.colorCandidates,
-        titleText: snap.titleText,
-        shopify: snap.shopify,
-        variantUrls: snap.variantUrls,
-        descriptionText: snap.descriptionText,
-        specs: snap.specs,
-        breadcrumbs: snap.breadcrumbs,
-        brandText: snap.brandText,
-        pageTitle: snap.pageTitle,
-        finalUrl: snap.finalUrl,
-      });
-      collected++;
-      state.done = collected;
-      if (ingested.ok) state.imported++;
-      else state.failed++;
-      pushProgress();
-
-      sinceRest++;
-      if (sinceRest >= REST_EVERY && collected < limit && !state.stopped) {
-        sinceRest = 0;
-        state.message = "Resting so the store does not notice a rhythm…";
-        await sleep(REST_MS);
-        state.message = "";
-      }
-    }
-
-    if (state.stopped || collected >= limit) break;
+    if (!(await collect(urls, ctx))) return;
+    if (state.stopped || ctx.collected >= limit) break;
 
     // Sitemaps for the next round. The server names them, best first; we
     // fetch them. Newly named ones go ahead of older ones, because the server
@@ -643,6 +769,302 @@ async function run({ storeUrl, limit, linksOnly = false }) {
   }
 
   finish();
+}
+
+/** Load an address in a tab that is already open, and wait for it to finish. */
+function navigate(tabId, url) {
+  return new Promise((resolve) => {
+    let started = false;
+    let settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    // "complete" for the page being left can arrive after the update is asked
+    // for; only one that follows a "loading" is the new page.
+    const onUpdated = (id, info) => {
+      if (id !== tabId) return;
+      if (info.status === "loading") started = true;
+      else if (started && info.status === "complete") done(true);
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    const timer = setTimeout(() => done(started), PAGE_TIMEOUT_MS);
+    mainFrameStatus.delete(tabId);
+    chrome.tabs.update(tabId, { url }).catch(() => done(false));
+  });
+}
+
+/**
+ * Walk the listing in the admin's tab: every screen, every "Show more", every
+ * page, noting each link on the way (listing.js). Returns the links in the
+ * order they were seen and the structured data of each page walked.
+ */
+async function walkListing(tabId, startUrl, limit, rules) {
+  const links = [];
+  const known = new Set();
+  const heads = [];
+  let ldSize = 0;
+  const visited = new Set([startUrl.split("#")[0]]);
+  const started = Date.now();
+  let pages = 1;
+  let first = true;
+  let initial = -1;
+  let hiddenSince = 0;
+  let misses = 0;
+  let lastError = "";
+  let note = "";
+  let partial = false;
+
+  state.listing = { pages, links: 0 };
+  pushProgress();
+
+  while (!state.stopped) {
+    if (Date.now() - started > LISTING_MS) {
+      note = "The page was still loading more after ten minutes; collecting what it had shown by then.";
+      break;
+    }
+
+    let res = null;
+    try {
+      const [out] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: listingStep,
+        args: [{ first }],
+      });
+      res = out?.result ?? null;
+    } catch (err) {
+      lastError = err?.message ?? "";
+    }
+
+    if (!res || !res.ok) {
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!tab) {
+        if (!links.length) return { error: "The store tab was closed before it could be read." };
+        note = "The store tab was closed; collecting what it had shown by then.";
+        break;
+      }
+      // A "Show more" that is a real link takes the tab to the next page.
+      if (tab.status === "loading") {
+        await waitForLoad(tabId);
+        await sleep(SETTLE_MS);
+        first = true;
+        continue;
+      }
+      if (++misses > 3) {
+        if (!links.length) return { error: `The store page could not be read${lastError ? ` (${lastError})` : ""}.` };
+        break;
+      }
+      await sleep(500);
+      continue;
+    }
+    misses = 0;
+
+    for (const url of res.links) {
+      if (known.has(url) || links.length >= LISTING_LINKS) continue;
+      known.add(url);
+      links.push(url);
+    }
+    if (first) {
+      first = false;
+      if (initial < 0) initial = links.length;
+      if (res.head) {
+        const ld = [];
+        for (const text of res.head.ld || []) {
+          if (ldSize + text.length > LISTING_LD) break;
+          ldSize += text.length;
+          ld.push(text);
+        }
+        heads.push({ ld, ogType: res.head.ogType || "" });
+      }
+    }
+    state.listing = { pages, links: links.length };
+
+    if (!res.visible) {
+      hiddenSince = hiddenSince || Date.now();
+      state.message = KEEP_IN_FRONT;
+      pushProgress();
+      if (Date.now() - hiddenSince > HIDDEN_MS) {
+        note = "The store tab stayed in the background; collecting what it had shown by then.";
+        break;
+      }
+      await sleep(1000);
+      continue;
+    }
+    hiddenSince = 0;
+    if (state.message === KEEP_IN_FRONT) state.message = "";
+    pushProgress();
+
+    if (links.length >= LISTING_LINKS) break;
+    // A run that asked for a few pieces does not need the whole category.
+    // Links are not all pieces, so it reads well past the number first.
+    if (limit < MAX_LIMIT && links.length - initial >= limit * 2 + 20) {
+      partial = true;
+      break;
+    }
+    if (!res.exhausted) continue;
+
+    const next = res.next;
+    if (!next || visited.has(next) || pages >= LISTING_PAGES) break;
+    if (!robotsAllows(rules, next)) {
+      note = `robots.txt does not allow page ${pages + 1} of this listing; collecting the ${pages === 1 ? "first page" : `first ${pages} pages`}.`;
+      break;
+    }
+    visited.add(next);
+    await politePause();
+    if (state.stopped) break;
+    const loaded = await navigate(tabId, next);
+    const status = mainFrameStatus.get(tabId) ?? 0;
+    if (REFUSAL_STATUSES.has(status)) {
+      note = `The store refused page ${pages + 1} (HTTP ${status}); collecting the pages before it.`;
+      break;
+    }
+    if (!loaded) break;
+    await sleep(SETTLE_MS);
+    pages++;
+    first = true;
+    state.listing = { pages, links: links.length };
+    pushProgress();
+  }
+
+  // Back where the admin started, rather than on the listing's last page.
+  if (pages > 1) chrome.tabs.update(tabId, { url: startUrl }).catch(() => {});
+  return { links, heads, pages, partial, note };
+}
+
+/**
+ * Collect the page the admin is on: walk it to the end in their tab, plan
+ * every piece it showed, then open them one by one in the background.
+ */
+async function runPage({ tabId, storeUrl, limit, linksOnly = false }) {
+  let origin;
+  try {
+    origin = new URL(storeUrl).origin;
+  } catch {
+    halt("That does not look like a store address.");
+    return;
+  }
+
+  begin(storeUrl, linksOnly, "listing");
+
+  const hello = await askPage("hello", {});
+  if (!hello.ok) {
+    halt(hello.error ?? NO_TAB);
+    return;
+  }
+
+  const robotsTxt = (await fetchText(`${origin}/robots.txt`)) ?? "";
+  const rules = robotsRules(robotsTxt);
+  state.delayMs = Math.max(rules.crawlDelayMs ?? 0, MIN_DELAY_MS);
+  if (state.stopped) return finish();
+
+  const walk = await walkListing(tabId, storeUrl, limit, rules);
+  if (state.stopped) return finish();
+  if (walk.error) {
+    halt(walk.error);
+    return;
+  }
+
+  state.phase = "planning";
+  state.message = "";
+  const planned = await askPage("plan", {
+    url: storeUrl,
+    html: planHtml(walk.heads, walk.links),
+    robotsTxt,
+    sitemaps: [],
+    seen: [],
+    // Every piece the page showed, so the admin is told how many there were;
+    // the run then takes as many as they asked for.
+    limit: MAX_LIMIT,
+    linksOnly,
+  });
+  if (!planned.ok) {
+    halt(planned.error ?? "The collect tab could not plan the run.");
+    return;
+  }
+
+  const plan = planned.data ?? {};
+  let urls = Array.isArray(plan.urls) ? plan.urls : [];
+  // On a product page the page is the piece; what it recommends is not.
+  if (plan.isSingleProduct) urls = urls.slice(0, 1);
+  if (!urls.length) {
+    halt(NOTHING_FOUND);
+    return;
+  }
+
+  state.found = urls.length;
+  state.foundAtLeast = walk.partial;
+  state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
+  const take = urls.slice(0, limit);
+  state.planned = take.length;
+  state.phase = "collecting";
+  state.message = walk.note;
+  pushProgress();
+
+  if (!(await collect(take, newContext(limit, linksOnly)))) return;
+  finish();
+}
+
+/** Open again the pages the last run could not read or import. */
+async function runRetry(last) {
+  const wanted = (last.failures || []).map((f) => f && f.url).filter((u) => typeof u === "string");
+  let origin;
+  try {
+    origin = new URL(last.store || wanted[0]).origin;
+  } catch {
+    halt("The last run's store address is unusable.");
+    return;
+  }
+
+  begin(last.store || wanted[0], last.linksOnly === true, "planning");
+
+  const hello = await askPage("hello", {});
+  if (!hello.ok) {
+    halt(hello.error ?? NO_TAB);
+    return;
+  }
+  const robotsTxt = (await fetchText(`${origin}/robots.txt`)) ?? "";
+  if (state.stopped) return finish();
+
+  // Planned again rather than trusted: robots.txt may have changed, and the
+  // pace comes from it.
+  const planned = await askPage("plan", {
+    url: state.store,
+    html: planHtml([], wanted),
+    robotsTxt,
+    sitemaps: [],
+    seen: [],
+    limit: MAX_LIMIT,
+    linksOnly: state.linksOnly,
+  });
+  if (!planned.ok) {
+    halt(planned.error ?? "The collect tab could not plan the run.");
+    return;
+  }
+  const plan = planned.data ?? {};
+  const set = new Set(wanted);
+  const urls = (Array.isArray(plan.urls) ? plan.urls : []).filter((u) => set.has(u));
+  state.found = urls.length;
+  state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
+  state.planned = urls.length;
+  state.phase = "collecting";
+  pushProgress();
+
+  if (!(await collect(urls, newContext(MAX_LIMIT, state.linksOnly)))) return;
+  finish();
+}
+
+/** Retry, asked for by the popup or by the collect tab's button. */
+async function retry() {
+  if (state.running) return { ok: false, error: "A run is already going." };
+  const last = await lastRun();
+  if (!last || !Array.isArray(last.failures) || !last.failures.length) {
+    return { ok: false, error: "Nothing to retry: the last run had no failed pages." };
+  }
+  runRetry(last).catch((err) => halt(err?.message ?? "The run failed unexpectedly."));
+  return { ok: true };
 }
 
 function stop() {
@@ -687,13 +1109,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return undefined;
       }
       const storeUrl = msg.payload?.storeUrl;
-      const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, 2_000));
-      run({ storeUrl, limit, linksOnly: msg.payload?.linksOnly === true }).catch((err) => {
+      const limit = Math.max(1, Math.min(Number(msg.payload?.limit) || 30, MAX_LIMIT));
+      const linksOnly = msg.payload?.linksOnly === true;
+      // The popup names the tab the admin is looking at: that page is walked
+      // in place. Without one, the address alone is collected as before.
+      const tabId = msg.payload?.tabId;
+      const job = Number.isInteger(tabId)
+        ? runPage({ tabId, storeUrl, limit, linksOnly })
+        : run({ storeUrl, limit, linksOnly });
+      job.catch((err) => {
         halt(err?.message ?? "The run failed unexpectedly.");
       });
       sendResponse({ ok: true });
       return undefined;
     }
+
+    case "retry":
+      // From the popup, or from the collect tab's button through the bridge.
+      // Either way only the pages this worker itself recorded as failed.
+      retry().then((res) => {
+        // Said on the collect tab only when nothing is running there: a run in
+        // progress is not halted by a Retry pressed beside it.
+        if (!res.ok && sender?.tab && !state.running) void tellPage("error", { message: res.error });
+        sendResponse(res);
+      });
+      return true;
 
     default:
       return undefined;

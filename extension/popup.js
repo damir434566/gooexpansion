@@ -1,5 +1,5 @@
 /**
- * The popup: pick a store, say how much, start, watch, stop.
+ * The popup: the page to collect, how much of it, start, watch, stop, retry.
  *
  * Two things have to happen here rather than in the worker, and both are
  * because Chrome requires them to happen under a click:
@@ -20,6 +20,8 @@ const COLLECT_PATH = "/goo-studio/parser/collect";
 
 const el = {
   store: document.getElementById("store"),
+  all: document.getElementById("all"),
+  limitRow: document.getElementById("limitRow"),
   limit: document.getElementById("limit"),
   linksOnly: document.getElementById("linksOnly"),
   studio: document.getElementById("studio"),
@@ -27,15 +29,23 @@ const el = {
   stop: document.getElementById("stop"),
   progress: document.getElementById("progress"),
   fill: document.getElementById("fill"),
+  found: document.getElementById("found"),
   done: document.getElementById("done"),
   planned: document.getElementById("planned"),
-  imported: document.getElementById("imported"),
+  added: document.getElementById("new"),
+  updated: document.getElementById("updated"),
+  skipped: document.getElementById("skipped"),
   failed: document.getElementById("failed"),
   pace: document.getElementById("pace"),
+  retry: document.getElementById("retry"),
   note: document.getElementById("note"),
 };
 
 let activeUrl = "";
+/** The tab the popup was opened over: the page the run walks. */
+let activeTabId = null;
+/** What the last run came to, for when the worker has gone to sleep since. */
+let lastRun = null;
 
 /**
  * "Links only" is a fact about a store, not about a run: a store whose cards
@@ -77,13 +87,28 @@ function send(type, payload) {
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 
+/** "Everything on this page" makes the number beside it moot. */
+function showLimit() {
+  el.limit.disabled = el.all.checked;
+  el.limitRow.classList.toggle("off", el.all.checked);
+}
+
 async function init() {
-  const stored = await chrome.storage.sync.get(["studioOrigin", "limit"]);
+  const stored = await chrome.storage.sync.get(["studioOrigin", "limit", "collectAll"]);
   el.studio.value = stored.studioOrigin || DEFAULT_STUDIO;
   if (stored.limit) el.limit.value = stored.limit;
+  el.all.checked = stored.collectAll !== false;
+  showLimit();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeUrl = tab?.url ?? "";
+  activeTabId = Number.isInteger(tab?.id) ? tab.id : null;
+  try {
+    const { lastRun: last } = await chrome.storage.local.get("lastRun");
+    lastRun = last && typeof last === "object" ? last : null;
+  } catch {
+    lastRun = null;
+  }
 
   if (/^https?:/i.test(activeUrl)) {
     el.store.textContent = activeUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70);
@@ -139,9 +164,14 @@ async function start() {
   }
 
   const studioOrigin = (el.studio.value || DEFAULT_STUDIO).replace(/\/+$/, "");
-  const limit = Math.max(1, Math.min(Number(el.limit.value) || 30, 2000));
+  const collectAll = el.all.checked;
+  const typed = Math.max(1, Math.min(Number(el.limit.value) || 30, 2000));
+  // "Everything" means everything this page shows, which only a walk of the
+  // tab can find. Without a tab to walk, the run falls back to the address and
+  // the store's sitemaps, and there "everything" would be the whole store.
+  const limit = collectAll && activeTabId != null ? 2000 : typed;
   const linksOnly = el.linksOnly.checked;
-  await chrome.storage.sync.set({ studioOrigin, limit });
+  await chrome.storage.sync.set({ studioOrigin, limit: typed, collectAll });
   await rememberLinksOnly(hostOf(activeUrl), linksOnly);
 
   // Must be inside the click: Chrome refuses a permission prompt without one.
@@ -170,7 +200,9 @@ async function start() {
     return;
   }
 
-  const res = await send("start", { storeUrl: activeUrl, limit, linksOnly });
+  // The tab goes with the address: the worker walks this very page, in front,
+  // where the store loads the rest of its grid as it is scrolled.
+  const res = await send("start", { storeUrl: activeUrl, limit, linksOnly, tabId: activeTabId });
   if (res && res.ok === false) {
     note(res.error ?? "Could not start.");
     el.start.disabled = false;
@@ -181,6 +213,19 @@ async function start() {
 
 // ── Display ──────────────────────────────────────────────────────────────────
 
+/** "214", or "at least 214" when a run that asked for a few stopped looking early. */
+function foundText(found, atLeast) {
+  return `Found ${atLeast ? "at least " : ""}${found} piece${found === 1 ? "" : "s"} on the page`;
+}
+
+function showCounts(counts) {
+  const c = counts || {};
+  el.added.textContent = c.new ? `${c.new} new` : "";
+  el.updated.textContent = c.updated ? `${c.updated} updated` : "";
+  el.skipped.textContent = c.skipped ? `${c.skipped} skipped` : "";
+  el.failed.textContent = c.failed ? `${c.failed} failed` : "";
+}
+
 function render(state) {
   if (!state) return;
 
@@ -189,24 +234,51 @@ function render(state) {
   el.stop.hidden = !running;
   el.start.disabled = running || !/^https?:/i.test(activeUrl);
 
-  const show = running || state.done > 0;
-  el.progress.hidden = !show;
+  // A worker that has slept since its last run remembers nothing; what that
+  // run came to was kept for exactly this.
+  const ended = !running && ["done", "stopped", "halted"].includes(state.phase);
+  const remembered = lastRun && state.phase === "idle" && hostOf(lastRun.store) === hostOf(activeUrl) ? lastRun : null;
+  const shown = running || ended ? state : remembered;
+  el.progress.hidden = !shown;
+  if (!shown) return;
 
-  if (show) {
-    const pct = state.planned ? Math.min(100, Math.round((state.done / state.planned) * 100)) : 0;
-    el.fill.style.width = `${state.phase === "planning" ? 4 : pct}%`;
-    el.done.textContent = String(state.done);
-    el.planned.textContent = state.planned ? `of ${state.planned}` : "";
-    el.imported.textContent = state.imported ? `${state.imported} in` : "";
-    el.failed.textContent = state.failed ? `${state.failed} skipped` : "";
-    el.pace.textContent =
-      state.message ||
-      (running ? `One page every ${(state.delayMs / 1000).toFixed(1)}s or slower` : "");
+  const listing = running && shown.phase === "listing";
+  const pct = shown.planned ? Math.min(100, Math.round((shown.done / shown.planned) * 100)) : 0;
+  el.fill.style.width = `${listing || shown.phase === "planning" ? 4 : pct}%`;
+
+  el.found.hidden = !shown.found;
+  if (shown.found) {
+    el.found.textContent =
+      foundText(shown.found, shown.foundAtLeast) +
+      (shown.planned && shown.planned < shown.found ? ` · collecting the first ${shown.planned}` : "");
   }
 
-  if (state.phase === "halted" && state.message) note(state.message);
-  else if (state.phase === "stopped") note("Stopped.");
-  else if (state.phase === "done") note("");
+  el.done.textContent = listing ? "" : String(shown.done || 0);
+  el.planned.textContent = !listing && shown.planned ? `of ${shown.planned}` : "";
+  showCounts(shown.counts);
+
+  if (listing) {
+    const l = shown.listing || { pages: 1, links: 0 };
+    el.pace.textContent =
+      shown.message ||
+      `Scrolling the page${l.pages > 1 ? `, page ${l.pages}` : ""}… ${l.links} links so far. Keep the store tab in front.`;
+  } else if (running) {
+    el.pace.textContent =
+      shown.message ||
+      (shown.phase === "planning"
+        ? "Planning…"
+        : `One page every ${((shown.delayMs || 1500) / 1000).toFixed(1)}s or slower`);
+  } else {
+    el.pace.textContent = shown.message && shown.phase !== "halted" ? shown.message : "";
+  }
+
+  const failed = shown.counts?.failed || 0;
+  el.retry.hidden = running || !failed;
+  el.retry.textContent = `Retry ${failed} failed`;
+
+  if (shown.phase === "halted" && shown.message) note(shown.message);
+  else if (shown.phase === "stopped") note("Stopped.");
+  else if (shown.phase === "done") note("");
 }
 
 // ── Wiring ───────────────────────────────────────────────────────────────────
@@ -225,6 +297,17 @@ el.linksOnly.addEventListener("change", () => {
 
 el.stop.addEventListener("click", async () => {
   await send("stop");
+  render(await send("state"));
+});
+
+el.all.addEventListener("change", showLimit);
+
+el.retry.addEventListener("click", async () => {
+  note("");
+  el.retry.disabled = true;
+  const res = await send("retry");
+  el.retry.disabled = false;
+  if (res && res.ok === false) note(res.error ?? "Could not retry.");
   render(await send("state"));
 });
 

@@ -108,9 +108,37 @@
   ok   the first sitemap had enough, so the other two were never downloaded
   ok   no address only a sitemap's padding names was opened
 
+— run L: the whole category, walked in the admin's own tab —
+  ok   the walk starts in the admin's tab
+  ok   with the store tab in the background it waits, and says why
+  ok   run L finished
+  ok   it found every jacket in the category: 36
+  ok   and opened every one of them
+  ok   in the order the page showed them
+  ok   cards the grid had already taken away still counted (jacket-1 was gone by the end)
+  ok   the cards behind "Show more" were loaded
+  ok   the filter panel's "Show more" was never pressed
+  ok   page two was opened, once
+  ok   robots.txt still rules: the disallowed piece was never opened
+  ok   and the tab is back on the page the admin started from
+  ok   one plan, for the whole category
+  ok   the counts: 35 new, 1 failed
+  ok   the collect tab was told how many the page held
+  ok   and of the page that never loaded, with its reason, so it has a row there too
+  ok   the summary is kept for after the worker sleeps, failed page and reason included
+  ok   the popup says it: found 36, 35 new, 1 failed, and offers a retry
+  ok   Retry opens only the page that failed
+  ok   and this time it comes in
+
+— run M: "or only the first" five —
+  ok   run M finished
+  ok   it collected the first five the page showed, no more
+  ok   and stopped reading the page early: page two was never opened
+  ok   the popup remembers the choice
+
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
 
-  88 passed, 0 failed
+  112 passed, 0 failed
 

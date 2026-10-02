@@ -876,6 +876,152 @@ async function main() {
   }
   collect.close(); popup.close();
 
+  // ── Run L: "Collect this page" on a category that loads as it scrolls ─────
+  //
+  // What the admin does: opens a category, opens the popup over it, presses
+  // Collect. The page is walked in that very tab, because a tab nobody can see
+  // loads nothing more: eight cards in the markup, sixteen more as it scrolls,
+  // six behind "Show more", six on page two, the oldest cards taken away as
+  // the grid grows. Up to 1.0.13 the run read the first screen and stopped.
+  console.log("\n— run L: the whole category, walked in the admin's own tab —");
+  await storeControl({ mode: "page", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  const CATEGORY = `${STORE}/c/jackets`;
+  const storeTarget = await newTab(CATEGORY);
+  await sleep(1500);
+  const activate = (id) => fetch(`http://127.0.0.1:${PORT}/json/activate/${id}`);
+  const targetUrl = async (id) => ((await targets()).find((t) => t.id === id) || {}).url || "";
+  const stateOf = (p) => p.evaluate("chrome.runtime.sendMessage({type:'state'})");
+  /** The popup over the category, its Start pressed as a click presses it. */
+  const startOnPage = async (setup) => {
+    const p = await openPopup(extId);
+    const tab = await p.evaluate(
+      `chrome.tabs.query({}).then((ts) => ts.filter((t) => (t.url || "").startsWith(${JSON.stringify(CATEGORY)})).map((t) => ({ id: t.id, url: t.url }))[0])`,
+    );
+    await p.evaluate(
+      `(async () => { const t = ${JSON.stringify(tab)}; chrome.tabs.query = async () => [t];` +
+        ` chrome.permissions.request = (q) => chrome.permissions.contains(q); await init(); ${setup || ""} })()`,
+    );
+    await p.evaluate(`document.getElementById("start").click()`, { userGesture: true });
+    // Opened as a tab, the popup took the front; a real popup floats over the
+    // page and leaves it there.
+    await sleep(300);
+    await activate(storeTarget.id);
+    return p;
+  };
+  const untilEnded = async (p, seconds) => {
+    let st = null;
+    for (let i = 0; i < seconds; i++) {
+      await sleep(1000);
+      st = await stateOf(p);
+      if (st && !st.running && i > 1) break;
+    }
+    return st;
+  };
+
+  popup = await startOnPage();
+  {
+    // Leave the store tab mid-walk, as an admin checking their mail would.
+    let st = null;
+    for (let i = 0; i < 40; i++) {
+      await sleep(500);
+      st = await stateOf(popup);
+      if (st && st.phase === "listing" && st.listing && st.listing.links > 10) break;
+    }
+    check("the walk starts in the admin's tab", !!st && st.phase === "listing", JSON.stringify(st && { phase: st.phase, listing: st.listing, message: st.message }));
+    await activate(collect.targetId || (await targets()).find((t) => t.url.startsWith(COLLECT)).id);
+    await sleep(3500);
+    const away = await stateOf(popup);
+    check(
+      "with the store tab in the background it waits, and says why",
+      !!away && away.phase === "listing" && /front/i.test(away.message || ""),
+      JSON.stringify(away && { phase: away.phase, message: away.message }),
+    );
+    await activate(storeTarget.id);
+  }
+  {
+    const st = await untilEnded(popup, 300);
+    const { api, events: ev } = await studioEvents();
+    const logL = (await storeLog()).log;
+    check("run L finished", !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    check("it found every jacket in the category: 36", st && st.found === 36, String(st && st.found));
+    const opened = [...new Set(logL.filter((l) => /^\/product\/jacket-\d+$/.test(l.path)).map((l) => l.path))];
+    check("and opened every one of them", opened.length === 36, `${opened.length}: ${JSON.stringify(opened.slice(0, 5))}…`);
+    check("in the order the page showed them", JSON.stringify(opened.slice(0, 3)) === JSON.stringify(["/product/jacket-1", "/product/jacket-2", "/product/jacket-3"]), JSON.stringify(opened.slice(0, 3)));
+    check("cards the grid had already taken away still counted (jacket-1 was gone by the end)", opened.includes("/product/jacket-1"));
+    check("the cards behind \"Show more\" were loaded", logL.some((l) => l.path === "/api/cards" && /from=24/.test(l.search)), JSON.stringify(logL.filter((l) => l.path === "/api/cards").map((l) => l.search)));
+    check("the filter panel's \"Show more\" was never pressed", !logL.some((l) => l.path === "/__filters-more"));
+    check("page two was opened, once", logL.filter((l) => l.path === "/c/jackets" && l.search === "?page=2").length === 1, JSON.stringify(logL.filter((l) => l.path === "/c/jackets").map((l) => l.search)));
+    check("robots.txt still rules: the disallowed piece was never opened", !logL.some((l) => l.path.startsWith("/product/secret-")));
+    check("and the tab is back on the page the admin started from", (await targetUrl(storeTarget.id)) === CATEGORY, await targetUrl(storeTarget.id));
+    const plans = api.filter((a) => a.action === "plan");
+    check("one plan, for the whole category", plans.length === 1, JSON.stringify(plans.map((a) => a.bytes)));
+    check("the counts: 35 new, 1 failed", st && st.counts && st.counts.new === 35 && st.counts.failed === 1, JSON.stringify(st && st.counts));
+    check(
+      "the collect tab was told how many the page held",
+      ev.some((e) => e.kind === "progress" && e.detail.found === 36),
+      JSON.stringify(ev.filter((e) => e.kind === "progress").slice(-1)),
+    );
+    check(
+      "and of the page that never loaded, with its reason, so it has a row there too",
+      ev.some((e) => e.kind === "progress" && e.detail.failure && /jacket-13$/.test(e.detail.failure.url) && /500/.test(e.detail.failure.reason)),
+      JSON.stringify(ev.filter((e) => e.kind === "progress" && e.detail.failure)),
+    );
+    const last = await popup.evaluate("chrome.storage.local.get('lastRun').then((s) => s.lastRun)");
+    check(
+      "the summary is kept for after the worker sleeps, failed page and reason included",
+      !!last && last.found === 36 && last.failures.length === 1 && /jacket-13$/.test(last.failures[0].url) && /500/.test(last.failures[0].reason),
+      JSON.stringify(last && { found: last.found, counts: last.counts, failures: last.failures }),
+    );
+    popup.close();
+    const p = await openPopup(extId);
+    const tab = { url: CATEGORY };
+    await p.evaluate(`(async () => { chrome.tabs.query = async () => [${JSON.stringify(tab)}]; await init(); })()`);
+    const shown = await p.evaluate(
+      "({ found: document.getElementById('found').textContent, retry: document.getElementById('retry').hidden ? '' : document.getElementById('retry').textContent, counts: document.querySelector('.counts').textContent })",
+    );
+    check(
+      "the popup says it: found 36, 35 new, 1 failed, and offers a retry",
+      /Found 36 pieces/.test(shown.found) && /35 new/.test(shown.counts) && /1 failed/.test(shown.counts) && /Retry 1 failed/.test(shown.retry),
+      JSON.stringify(shown),
+    );
+    popup = p;
+  }
+  {
+    // Retry from the collect tab's button: only the page that failed, again.
+    await studioReset();
+    const before = (await storeLog()).log.length;
+    await collect.evaluate("window.__gooRetry()");
+    const st = await untilEnded(popup, 60);
+    const again = (await storeLog()).log.slice(before).filter((l) => l.path.startsWith("/product/")).map((l) => l.path);
+    check("Retry opens only the page that failed", JSON.stringify(again) === JSON.stringify(["/product/jacket-13"]), JSON.stringify(again));
+    check("and this time it comes in", !!st && st.phase === "done" && st.counts.new === 1 && st.counts.failed === 0, JSON.stringify(st && { phase: st.phase, counts: st.counts }));
+  }
+  popup.close();
+
+  // ── Run M: only the first five ───────────────────────────────────────────
+  console.log("\n— run M: \"or only the first\" five —");
+  await storeControl({ mode: "page", reset: true });
+  await studioReset();
+  popup = await startOnPage(`document.getElementById("all").click(); document.getElementById("limit").value = "5";`);
+  {
+    const st = await untilEnded(popup, 120);
+    const logM = (await storeLog()).log;
+    const opened = logM.filter((l) => /^\/product\/jacket-\d+$/.test(l.path)).map((l) => l.path);
+    check("run M finished", !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    check(
+      "it collected the first five the page showed, no more",
+      JSON.stringify(opened) === JSON.stringify([1, 2, 3, 4, 5].map((i) => `/product/jacket-${i}`)),
+      JSON.stringify(opened),
+    );
+    check("and stopped reading the page early: page two was never opened", !logM.some((l) => l.path === "/c/jackets" && l.search === "?page=2"));
+    check("the popup remembers the choice", (await popup.evaluate("chrome.storage.sync.get(['collectAll','limit'])")).collectAll === false);
+  }
+  popup.close();
+  collect.close();
+  await fetch(`http://127.0.0.1:${PORT}/json/close/${storeTarget.id}`);
+
   // ── Run G: the extension is updated while the collect tab stays open ───────
   //
   // What an admin does after installing a new version: ↻ on the extensions

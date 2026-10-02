@@ -60,9 +60,13 @@
     }
 
     // One-way instructions from the screen. Stop is the one that matters, and it
-    // has to reach the worker whatever it is in the middle of.
+    // has to reach the worker whatever it is in the middle of. Retry asks the
+    // worker to open again the pages it recorded as failed; the page names no
+    // addresses, so it cannot point the worker anywhere else.
     if (msg.type === "stop") {
       chrome.runtime.sendMessage({ type: "stop" }).catch(() => {});
+    } else if (msg.type === "retry") {
+      chrome.runtime.sendMessage({ type: "retry" }).catch(() => {});
     }
   });
 
