@@ -10,6 +10,12 @@
  *   spa    — two pages built the way a single-page storefront builds them:
  *            the gallery lives in a hydration payload rather than in markup,
  *            and one of them never states its currency outside rendered text
+ *   page   — a category the way stores build them now: eight cards in the
+ *            markup, more as it scrolls (an IntersectionObserver, which does
+ *            nothing in a tab nobody can see), cards taken away again as they
+ *            scroll off, a "Show more" under the grid, a second page, and a
+ *            "Show more" in the filter panel that must never be pressed. 36
+ *            jackets; jacket-13 answers 500 the first time it is opened.
  *   bigmap — sitemaps the size Farfetch's are: an index naming three product
  *            sitemaps that list every address in ten languages, about 90 MB
  *            between them. The category page links two products; the other
@@ -38,6 +44,7 @@ const SPA_PATHS = [
 
 function products() {
   if (mode === "many") return Array.from({ length: 21 }, (_, i) => `p${i + 1}`);
+  if (mode === "page") return Array.from({ length: PAGE_TOTAL }, (_, i) => `jacket-${i + 1}`);
   return ["alpha", "beta", "gamma", "delta", "secret-hidden"];
 }
 
@@ -199,7 +206,7 @@ function robots() {
   const lines = ["User-agent: Googlebot", "Disallow:", "", "User-agent: *"];
   // A path the run must never open. If it does, the test fails loudly.
   lines.push("Disallow: /product/secret-");
-  if (mode !== "many" && mode !== "spa" && mode !== "bigmap") lines.push("Crawl-delay: 2");
+  if (mode !== "many" && mode !== "spa" && mode !== "bigmap" && mode !== "page") lines.push("Crawl-delay: 2");
   lines.push("", `Sitemap: ${ORIGIN}/sitemap.xml`);
   return lines.join("\n") + "\n";
 }
@@ -299,6 +306,84 @@ function productPage(slug) {
 </body></html>`;
 }
 
+/** The `page` store: jackets on page one, the last six on page two. */
+const PAGE_ONE = 30;
+const PAGE_TOTAL = 36;
+/** Addresses that have already failed once, so a retry finds them working. */
+const flakyServed = new Set();
+
+/**
+ * A category page of the `page` store.
+ *
+ * Page one ships eight cards. An IntersectionObserver under the grid loads
+ * eight more at a time from `/api/cards` up to 24, then a "Show more" button
+ * under the grid loads the last six; past twenty cards the oldest are taken
+ * out of the page, the way a virtualised grid does it. Page two is six cards
+ * in plain markup. The filter panel's own "Show more" fetches `/__filters-more`
+ * so the test can see if it was ever pressed.
+ */
+function listingPage(page) {
+  const card = (i) =>
+    `<div class="card"><a href="/product/jacket-${i}"><img alt="" src="/img/jacket-${i}-1.jpg"></a>` +
+    `<a href="/product/jacket-${i}">Jacket ${i}</a> <a href="/product/jacket-${i}?color=red">red</a></div>`;
+  const first = page === 1 ? [1, 2, 3, 4, 5, 6, 7, 8] : [31, 32, 33, 34, 35, 36];
+  const pager =
+    page === 1
+      ? `<a href="/c/jackets">1</a> <a href="/c/jackets?page=2">2</a> <a href="/c/jackets?page=2" rel="next">Next</a>`
+      : `<a href="/c/jackets">1</a> <span>2</span>`;
+  return `<!doctype html><html><head><title>Jackets</title>
+<meta property="og:type" content="website">
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  header { height: 60px; }
+  aside { position: absolute; top: 70px; right: 0; width: 140px; }
+  .card { height: 320px; border-bottom: 1px solid #ddd; }
+  .card img { width: 120px; height: 160px; }
+</style></head><body>
+<header><nav><a href="/">Home</a> <a href="/c/shoes">Shoes</a> <a href="/about">About</a></nav></header>
+<aside class="filters"><a href="/c/jackets?color=black">Black</a>
+  <button id="filters-more" onclick="fetch('/__filters-more')">Show more</button></aside>
+<main>
+  <h1>Jackets</h1>
+  <div id="grid">${first.map(card).join("")}${page === 1 ? '<div class="card"><a href="/product/secret-jacket">Secret</a></div>' : ""}</div>
+  <div id="sentinel" style="height: 1px"></div>
+  <div id="more-wrap"></div>
+  <div id="pages">${pager}</div>
+</main>
+<footer><a href="/help">Help</a> <a href="/cart">Cart</a></footer>
+${
+  page === 1
+    ? `<script>
+  const grid = document.getElementById("grid");
+  let n = 8;
+  let busy = false;
+  const card = (i) => '<div class="card"><a href="/product/jacket-' + i + '"><img alt="" src="/img/jacket-' + i + '-1.jpg"></a>' +
+    '<a href="/product/jacket-' + i + '">Jacket ' + i + '</a> <a href="/product/jacket-' + i + '?color=red">red</a></div>';
+  async function load(count) {
+    busy = true;
+    const ids = await (await fetch("/api/cards?from=" + n + "&count=" + count)).json();
+    await new Promise((r) => setTimeout(r, 300));
+    for (const i of ids) grid.insertAdjacentHTML("beforeend", card(i));
+    n += ids.length;
+    while (grid.children.length > 20) grid.removeChild(grid.firstChild);
+    busy = false;
+    if (n >= 24 && n < ${PAGE_ONE} && !document.getElementById("more")) {
+      document.getElementById("more-wrap").innerHTML = '<button id="more">Show more</button>';
+      document.getElementById("more").onclick = async () => {
+        await load(${PAGE_ONE} - n);
+        document.getElementById("more-wrap").innerHTML = "";
+      };
+    }
+  }
+  new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting) && !busy && n < 24) load(8);
+  }).observe(document.getElementById("sentinel"));
+</script>`
+    : ""
+}
+</body></html>`;
+}
+
 function categoryPage() {
   const shown =
     mode === "bigmap" ? products().filter((s) => !BIGMAP_SITEMAP_ONLY.includes(s) && !s.startsWith("secret")) : products();
@@ -321,7 +406,10 @@ const server = http.createServer((req, res) => {
     req.on("end", () => {
       const next = JSON.parse(body || "{}");
       if (next.mode) mode = next.mode;
-      if (next.reset) log = [];
+      if (next.reset) {
+        log = [];
+        flakyServed.clear();
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, mode }));
     });
@@ -334,7 +422,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  log.push({ path: p, at: Date.now() });
+  log.push({ path: p, search: url.search, at: Date.now() });
 
   const send = (code, type, body) => {
     // Charset declared, because a page that does not declare one is decoded as
@@ -347,6 +435,22 @@ const server = http.createServer((req, res) => {
   };
 
   if (p === "/robots.txt") return send(200, "text/plain", robots());
+
+  if (mode === "page") {
+    if (p === "/c/jackets") return send(200, "text/html", listingPage(url.searchParams.get("page") === "2" ? 2 : 1));
+    if (p === "/api/cards") {
+      const from = Number(url.searchParams.get("from")) || 0;
+      const count = Number(url.searchParams.get("count")) || 0;
+      const ids = [];
+      for (let i = from + 1; i <= Math.min(from + count, PAGE_ONE); i++) ids.push(i);
+      return send(200, "application/json", JSON.stringify(ids));
+    }
+    if (p === "/__filters-more") return send(200, "application/json", "[]");
+    if (p === "/product/jacket-13" && !flakyServed.has(p)) {
+      flakyServed.add(p);
+      return send(500, "text/html", "<html><body>Something went wrong</body></html>");
+    }
+  }
   if (p === "/sitemap.xml") return send(200, "application/xml", sitemap());
   const child = mode === "bigmap" && /^\/sitemap-products-(\d+)\.xml$/.exec(p);
   if (child && Number(child[1]) >= 1 && Number(child[1]) <= BIGMAP_CHILDREN) {

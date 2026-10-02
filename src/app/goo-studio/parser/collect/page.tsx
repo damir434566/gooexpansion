@@ -48,7 +48,7 @@ interface ExtMessage {
 // ── goo-studio recipes (DESIGN_SYSTEM.md §9) ─────────────────────────────────
 
 const labelCls =
-  "block text-[10px] tracking-[0.14em] uppercase text-[var(--foreground-subtle)] mb-1.5";
+  "block text-[10px] tracking-[0.14em] uppercase text-[var(--foreground-muted)] mb-1.5";
 const btnGhost =
   "px-4 py-2 text-[11px] tracking-[0.12em] uppercase border border-[var(--border)] text-[var(--foreground-muted)] hover:border-[var(--foreground)] hover:text-[var(--foreground)] transition-colors rounded-lg";
 const cardCls = "rounded-xl border border-[var(--border)] bg-[var(--background)]";
@@ -57,7 +57,21 @@ const Spinner = () => (
   <span className="inline-block w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
 );
 
-type Phase = "idle" | "planning" | "collecting" | "done" | "stopped" | "halted";
+/**
+ * `listing` is extension 1.0.14 walking the admin's own store tab to the end
+ * of its grid before anything is planned; older extensions never send it.
+ */
+type Phase = "idle" | "listing" | "planning" | "collecting" | "done" | "stopped" | "halted";
+
+/** How far the walk of the store's page has got: pages opened, links seen. */
+interface ListingWalk {
+  pages: number;
+  links: number;
+}
+
+function isListingWalk(v: unknown): v is ListingWalk {
+  return !!v && typeof v === "object" && typeof (v as ListingWalk).pages === "number" && typeof (v as ListingWalk).links === "number";
+}
 
 /** The two things a run can do with a store's pages. */
 const MODES = [
@@ -69,9 +83,44 @@ const MODES = [
   {
     label: "Links only",
     linksOnly: true,
-    says: "Only adds this store's link and price to pieces we already have. Pieces we don't have are skipped.",
+    says: "Looks through this store for the pieces we already have and adds its link and price to them. Nothing new is created, and pages that are not ours are not opened.",
   },
 ] as const;
+
+/**
+ * Where the chosen mode is kept, so every collect tab runs in it: the extension
+ * opens a collect tab of its own when it finds none, and a fresh tab used to
+ * start in "Make cards" whatever the admin had chosen in another one.
+ */
+const MODE_KEY = "goo-collect-mode";
+
+function saveMode(linksOnly: boolean) {
+  try {
+    window.localStorage.setItem(MODE_KEY, linksOnly ? "links" : "cards");
+  } catch {
+    /* storage blocked — the choice holds for this tab only */
+  }
+}
+
+/**
+ * The mode the extension asked for, when it asked. Its popup has a "Links
+ * only" box of its own, and the box the admin ticked for this run beats the
+ * mode this tab remembers. `linkOnly` is how extension 1.0.5 spelled it.
+ */
+function modeFromExtension(payload: Record<string, unknown>): boolean | undefined {
+  if (typeof payload.linksOnly === "boolean") return payload.linksOnly;
+  if (typeof payload.linkOnly === "boolean") return payload.linkOnly;
+  return undefined;
+}
+
+/** What a links-only run's plan found among the store's pages. */
+interface LinkSearch {
+  cards: number;
+  matched: number;
+  unnamed: number;
+  linked: number;
+  other: number;
+}
 
 interface RobotsInfo {
   parsed: boolean;
@@ -88,15 +137,46 @@ export default function CollectPage() {
   const [planned, setPlanned] = useState(0);
   const [delayMs, setDelayMs] = useState(0);
   const [robots, setRobots] = useState<RobotsInfo | null>(null);
+  const [linkSearch, setLinkSearch] = useState<LinkSearch | null>(null);
   const [notice, setNotice] = useState("");
+  /** Pieces the store's page showed, as the planner counted them (1.0.14). */
+  const [found, setFound] = useState(0);
+  /** A run that asked for a few stopped reading the page early. */
+  const [foundAtLeast, setFoundAtLeast] = useState(false);
+  const [walk, setWalk] = useState<ListingWalk | null>(null);
+  /** What the extension says about the walk: keep the tab in front, why it stopped. */
+  const [walkNote, setWalkNote] = useState("");
   /**
    * Whether this run makes cards or only adds this store to the cards we have.
-   * Chosen here rather than in the extension: this tab makes every import
-   * call, so the choice travels with them and the extension needs no change.
-   * Mirrored in a ref for the same reason as Stop below.
+   * Chosen here, or in the extension's popup when it sends a choice with the
+   * run (`modeFromExtension`) — this tab makes every plan and import call, so
+   * the choice travels with them either way. Mirrored in a ref for the same
+   * reason as Stop below, and kept in the browser (`MODE_KEY`) so a tab the
+   * extension opens runs in it too.
    */
   const [linksOnly, setLinksOnly] = useState(false);
   const linksOnlyRef = useRef(false);
+
+  // Before the bridge's listener below, so a tab the extension has just opened
+  // knows its mode by the time the first plan arrives. Another collect tab
+  // changing it changes it here too: the worker may be talking to either.
+  useEffect(() => {
+    const apply = (value: string | null) => {
+      const on = value === "links";
+      linksOnlyRef.current = on;
+      setLinksOnly(on);
+    };
+    try {
+      apply(window.localStorage.getItem(MODE_KEY));
+    } catch {
+      /* storage blocked — the mode starts at "Make cards" and lives in this tab */
+    }
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === MODE_KEY) apply(event.newValue);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   /**
    * Stop as a ref, not state: the message handler is registered once and would
@@ -120,9 +200,33 @@ export default function CollectPage() {
     );
   }, []);
 
-  /** A one-way instruction to the worker (stop), with no reply expected. */
+  /** A one-way instruction to the worker (stop, retry), with no reply expected. */
   const command = useCallback((type: string) => {
     window.postMessage({ source: FROM_PAGE, type }, window.location.origin);
+  }, []);
+
+  /**
+   * Forget the previous run: its Stop, its counters and the store's titles.
+   *
+   * Called by Clear and by every `hello` — the worker sends one at the start of
+   * each run, so a Stop pressed on the last run cannot refuse the next one. Not
+   * on `plan`: that arrives on every round of the same run.
+   */
+  const reset = useCallback(() => {
+    stoppedRef.current = false;
+    titlesRef.current = [];
+    setResults([]);
+    setPlanned(0);
+    setDelayMs(0);
+    setStore("");
+    setNotice("");
+    setRobots(null);
+    setLinkSearch(null);
+    setFound(0);
+    setFoundAtLeast(false);
+    setWalk(null);
+    setWalkNote("");
+    setPhase("idle");
   }, []);
 
   const callApi = useCallback(async (payload: Record<string, unknown>) => {
@@ -152,6 +256,7 @@ export default function CollectPage() {
 
       switch (msg.type) {
         case "hello": {
+          reset();
           setConnected(true);
           reply(msg.id, true, { ready: true });
           return;
@@ -165,11 +270,19 @@ export default function CollectPage() {
           const target = typeof payload.url === "string" ? payload.url : "";
           setStore(target);
           try {
-            const data = await callApi({ action: "plan", ...payload });
+            const asked = modeFromExtension(payload);
+            if (asked !== undefined && asked !== linksOnlyRef.current) {
+              linksOnlyRef.current = asked;
+              setLinksOnly(asked);
+              saveMode(asked);
+            }
+            const data = await callApi({ action: "plan", ...payload, linksOnly: linksOnlyRef.current });
             const urls = Array.isArray(data.urls) ? (data.urls as string[]) : [];
             setPlanned((n) => n + urls.length);
             setDelayMs(Number(data.delayMs) || 0);
             setRobots((data.robots as RobotsInfo) ?? null);
+            setLinkSearch((data.links as LinkSearch) ?? null);
+            if (typeof data.linksNote === "string") setNotice(`Links only: ${data.linksNote}.`);
             if (urls.length) setPhase("collecting");
             reply(msg.id, true, data);
           } catch (err) {
@@ -196,7 +309,7 @@ export default function CollectPage() {
               action: "ingest",
               ...payload,
               titles: titlesRef.current,
-              linksOnly: linksOnlyRef.current,
+              linksOnly: modeFromExtension(payload) ?? linksOnlyRef.current,
             });
             const result = data.result as CrawlItemResult | undefined;
             if (result) setResults((prev) => [...prev, result]);
@@ -212,9 +325,22 @@ export default function CollectPage() {
 
         case "progress": {
           setConnected(true);
+          // A page the extension could not read never reaches an import, so it
+          // is reported here, to stand in the rows with its reason.
+          const failure = payload.failure as { url?: unknown; reason?: unknown } | undefined;
+          if (failure && typeof failure.url === "string") {
+            const reason = typeof failure.reason === "string" ? failure.reason : "failed";
+            setResults((prev) => [...prev, { url: failure.url as string, status: "failed", reason }]);
+            return;
+          }
           if (typeof payload.planned === "number") setPlanned(payload.planned);
           if (typeof payload.delayMs === "number") setDelayMs(payload.delayMs);
           if (typeof payload.store === "string" && payload.store) setStore(payload.store);
+          if (payload.phase === "listing") setPhase("listing");
+          if (typeof payload.found === "number") setFound(payload.found);
+          if (typeof payload.foundAtLeast === "boolean") setFoundAtLeast(payload.foundAtLeast);
+          if (isListingWalk(payload.listing)) setWalk(payload.listing);
+          if (typeof payload.message === "string") setWalkNote(payload.message);
           return;
         }
 
@@ -234,11 +360,12 @@ export default function CollectPage() {
 
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [callApi, reply]);
+  }, [callApi, reply, reset]);
 
   function chooseMode(value: boolean) {
     linksOnlyRef.current = value;
     setLinksOnly(value);
+    saveMode(value);
   }
 
   function stop() {
@@ -247,26 +374,20 @@ export default function CollectPage() {
     command("stop");
   }
 
-  function reset() {
-    stoppedRef.current = false;
-    titlesRef.current = [];
-    setResults([]);
-    setPlanned(0);
-    setNotice("");
-    setRobots(null);
-    setPhase("idle");
-  }
-
   const done = results.length;
   const imported = results.filter((r) => r.status === "imported").length;
   const updated = results.filter((r) => r.status === "updated").length;
   const failed = results.filter((r) => r.status === "failed" || r.status === "skipped").length;
+  /** Pages that went wrong, as opposed to pages that were not pieces: Retry is for these. */
+  const retryable = results.filter((r) => r.status === "failed").length;
   const photos = results.reduce((n, r) => n + (r.imagesMirrored ?? 0), 0);
-  const running = phase === "planning" || phase === "collecting";
+  // Saved without columns the database lacks — the same note on every row, so said once.
+  const warnings = [...new Set(results.flatMap((r) => (r.warning ? [r.warning] : [])))];
+  const running = phase === "listing" || phase === "planning" || phase === "collecting";
   const pct = planned ? Math.min(100, Math.round((done / planned) * 100)) : 0;
 
   return (
-    <div className="max-w-[1440px] mx-auto px-6 md:px-12 py-8 space-y-5">
+    <div className="max-w-5xl space-y-5">
       <header>
         <h1 className="font-display text-2xl font-light text-[var(--foreground)]">
           Collect with the browser extension
@@ -289,7 +410,7 @@ export default function CollectPage() {
           {connected ? "Extension connected" : "Waiting for the extension"}
         </p>
         {store && (
-          <span className="text-[11px] text-[var(--foreground-muted)] truncate max-w-[420px]">
+          <span className="text-[11px] text-[var(--foreground-muted)] truncate max-w-full md:max-w-[420px]">
             {store.replace(/^https?:\/\/(www\.)?/, "")}
           </span>
         )}
@@ -355,8 +476,10 @@ export default function CollectPage() {
               repository.
             </li>
             <li>
-              Open the store you want, click the Goo icon, set how many products to collect and
-              press <span className="text-[var(--foreground)]">Collect this store</span>.
+              Open the store page you want (a category, a brand, a search), click the Goo icon
+              and press <span className="text-[var(--foreground)]">Collect this page</span>. Keep
+              that tab in front while it scrolls to the end; the pieces then open in the
+              background.
             </li>
             <li>Chrome will ask once for permission to read that store. Grant it.</li>
           </ol>
@@ -393,6 +516,32 @@ export default function CollectPage() {
         </div>
       )}
 
+      {linkSearch && (
+        <div className={`${cardCls} px-5 py-3 flex items-center gap-4 flex-wrap text-[11px]`}>
+          <span className={labelCls + " mb-0"}>Looking for ours</span>
+          <span className="text-[var(--foreground-muted)]">
+            <span className="text-[var(--foreground)] tabular-nums">{linkSearch.matched}</span> store
+            pages name one of our {linkSearch.cards} cards
+          </span>
+          {linkSearch.unnamed > 0 && (
+            <span className="text-[var(--foreground-muted)]">
+              <span className="tabular-nums">{linkSearch.unnamed}</span> name nothing by their
+              address, opened after
+            </span>
+          )}
+          {linkSearch.linked > 0 && (
+            <span className="text-[var(--foreground-muted)]">
+              <span className="tabular-nums">{linkSearch.linked}</span> already on a card
+            </span>
+          )}
+          {linkSearch.other > 0 && (
+            <span className="text-[var(--foreground-subtle)]">
+              <span className="tabular-nums">{linkSearch.other}</span> not ours, not opened
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Progress + outcomes */}
       {(running || results.length > 0) && (
         <div className={`${cardCls} overflow-hidden`}>
@@ -400,6 +549,8 @@ export default function CollectPage() {
             <div className="flex items-center gap-4 flex-wrap">
               <p className="text-xs tracking-[0.12em] uppercase font-medium text-[var(--foreground)] inline-flex items-center gap-1.5">
                 {running && <Spinner />}
+                {phase === "listing" &&
+                  `Scrolling the store page${walk && walk.pages > 1 ? `, page ${walk.pages}` : ""}… ${walk?.links ?? 0} links`}
                 {phase === "planning" && "Reading the store…"}
                 {phase === "collecting" && `Collecting ${done}/${planned || "…"}`}
                 {phase === "done" && "Finished"}
@@ -407,10 +558,19 @@ export default function CollectPage() {
                 {phase === "halted" && "Halted"}
                 {phase === "idle" && "Ready"}
               </p>
-              <div className="ml-auto flex items-center gap-3 text-[11px] tabular-nums">
+              <div className="ml-auto flex flex-wrap items-center gap-3 text-[11px] tabular-nums">
                 <span className="text-emerald-500">{imported} new</span>
                 <span className="text-[var(--foreground-muted)]">{updated} updated</span>
                 {failed > 0 && <span className="text-amber-500">{failed} skipped</span>}
+                {!running && retryable > 0 && connected && (
+                  <button
+                    type="button"
+                    onClick={() => command("retry")}
+                    className="underline hover:no-underline text-amber-500"
+                  >
+                    Retry {retryable} failed
+                  </button>
+                )}
                 {!running && results.length > 0 && (
                   <a
                     href="/goo-studio/products"
@@ -427,11 +587,32 @@ export default function CollectPage() {
                 style={{ width: `${phase === "planning" ? 4 : pct}%` }}
               />
             </div>
+            {found > 0 && (
+              <p className="text-[11px] text-[var(--foreground)] tabular-nums">
+                Found {foundAtLeast ? "at least " : ""}
+                {found} piece{found === 1 ? "" : "s"} on the page
+                {planned > 0 && planned < found ? ` · collecting the first ${planned}` : ""}
+              </p>
+            )}
+            {walkNote && (
+              <p
+                className={`text-[11px] ${
+                  phase === "listing" ? "text-amber-500" : "text-[var(--foreground-muted)]"
+                }`}
+              >
+                {walkNote}
+              </p>
+            )}
             {photos > 0 && (
               <p className="text-[10px] text-[var(--foreground-subtle)]">
                 {photos} photo{photos === 1 ? "" : "s"} copied to our storage
               </p>
             )}
+            {warnings.map((w) => (
+              <p key={w} className="rounded-lg border border-amber-400/30 bg-amber-400/15 px-4 py-3 text-[12px] text-amber-500">
+                {w}
+              </p>
+            ))}
           </div>
 
           {results.length > 0 && (
@@ -447,7 +628,7 @@ export default function CollectPage() {
                   </span>
                   {r.reason && (
                     <span
-                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[220px] md:max-w-[480px] flex-shrink-0"
+                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[40%] md:max-w-[480px] flex-shrink-0"
                       title={r.reason}
                     >
                       {r.reason}
@@ -455,7 +636,7 @@ export default function CollectPage() {
                   )}
                   {!r.reason && detailLine(r) && (
                     <span
-                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[260px] md:max-w-[480px] flex-shrink-0"
+                      className="text-[10px] text-[var(--foreground-muted)] truncate max-w-[40%] md:max-w-[480px] flex-shrink-0"
                       title={detailLine(r)}
                     >
                       {detailLine(r)}
@@ -466,7 +647,7 @@ export default function CollectPage() {
                     target="_blank"
                     rel="noreferrer"
                     aria-label="Open this page in a new tab"
-                    className="text-[var(--foreground-subtle)] hover:text-[var(--foreground)] flex-shrink-0"
+                    className="inline-flex items-center justify-center min-w-10 min-h-10 md:min-w-0 md:min-h-0 text-[var(--foreground-subtle)] hover:text-[var(--foreground)] flex-shrink-0"
                   >
                     ↗
                   </a>
@@ -526,15 +707,15 @@ function detailLine(r: CrawlItemResult): string {
 
 function StatusPill({ status }: { status: CrawlItemResult["status"] }) {
   const map: Record<CrawlItemResult["status"], { label: string; cls: string }> = {
-    imported: { label: "new", cls: "text-emerald-500 bg-emerald-500/10" },
-    updated: { label: "upd", cls: "text-[var(--foreground-muted)] bg-[var(--fg-overlay-05)]" },
-    skipped: { label: "skip", cls: "text-amber-500 bg-amber-500/10" },
-    failed: { label: "fail", cls: "text-red-400 bg-red-500/10" },
+    imported: { label: "new", cls: "text-emerald-500 bg-emerald-400/15 border-emerald-400/30" },
+    updated: { label: "upd", cls: "text-[var(--foreground-muted)] bg-[var(--fg-overlay-05)] border-[var(--border)]" },
+    skipped: { label: "skip", cls: "text-amber-500 bg-amber-400/15 border-amber-400/30" },
+    failed: { label: "fail", cls: "text-red-500 bg-red-400/15 border-red-400/30" },
   };
   const { label, cls } = map[status];
   return (
     <span
-      className={`text-[9px] tracking-[0.1em] uppercase px-1.5 py-0.5 rounded flex-shrink-0 w-10 text-center ${cls}`}
+      className={`text-[9px] tracking-[0.1em] uppercase px-1.5 py-0.5 rounded-full border flex-shrink-0 w-10 text-center ${cls}`}
     >
       {label}
     </span>

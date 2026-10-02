@@ -222,3 +222,19 @@ button:disabled {
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
+
+.row.off {
+  opacity: 0.45;
+}
+
+.found {
+  margin: 8px 0 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.retry {
+  width: 100%;
+  margin-top: 10px;
+}
