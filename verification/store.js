@@ -15,7 +15,12 @@
  *            nothing in a tab nobody can see), cards taken away again as they
  *            scroll off, a "Show more" under the grid, a second page, and a
  *            "Show more" in the filter panel that must never be pressed. 36
- *            jackets; jacket-13 answers 500 the first time it is opened.
+ *            jackets; jacket-13 answers 500 the first time it is opened. The
+ *            same listing also stands at an address numbered like a piece
+ *            (`/ua/men/clothes/jackets-c1010193222.html`, as Bershka numbers
+ *            its categories) and at `/c/coats`, whose markup calls it one
+ *            product (og:type product, a Product with an AggregateOffer).
+ *            Product pages here carry a "You may also like" rail of three.
  *   bigmap — sitemaps the size Farfetch's are: an index naming three product
  *            sitemaps that list every address in ten languages, about 90 MB
  *            between them. The category page links two products; the other
@@ -292,6 +297,15 @@ function productPage(slug) {
 <h1>Fixture ${name} Coat</h1>
 <svg viewBox="0 0 10 10"><path d="M0 0 L10 10"/></svg>
 <iframe src="${ORIGIN}/frame"></iframe>
+${
+  mode === "page"
+    ? `<section class="related"><h2>You may also like</h2>${[1, 2, 3]
+        .filter((i) => `jacket-${i}` !== slug)
+        .slice(0, 3)
+        .map((i) => `<a href="/product/jacket-${i}">Jacket ${i}</a>`)
+        .join(" ")}</section>`
+    : ""
+}
 <img id="hero" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" data-src="${ORIGIN}/img/${slug}-1.jpg">
 <div id="gallery"></div>
 <script>
@@ -311,6 +325,12 @@ const PAGE_ONE = 30;
 const PAGE_TOTAL = 36;
 /** Addresses that have already failed once, so a retry finds them working. */
 const flakyServed = new Set();
+/** The `page` store's listings, each serving the same jackets. */
+const PAGE_LISTINGS = {
+  "/c/jackets": { dressed: false },
+  "/ua/men/clothes/jackets-c1010193222.html": { dressed: false },
+  "/c/coats": { dressed: true },
+};
 
 /**
  * A category page of the `page` store.
@@ -322,17 +342,30 @@ const flakyServed = new Set();
  * in plain markup. The filter panel's own "Show more" fetches `/__filters-more`
  * so the test can see if it was ever pressed.
  */
-function listingPage(page) {
+function listingPage(page, base = "/c/jackets", dressed = false) {
   const card = (i) =>
     `<div class="card"><a href="/product/jacket-${i}"><img alt="" src="/img/jacket-${i}-1.jpg"></a>` +
     `<a href="/product/jacket-${i}">Jacket ${i}</a> <a href="/product/jacket-${i}?color=red">red</a></div>`;
   const first = page === 1 ? [1, 2, 3, 4, 5, 6, 7, 8] : [31, 32, 33, 34, 35, 36];
   const pager =
     page === 1
-      ? `<a href="/c/jackets">1</a> <a href="/c/jackets?page=2">2</a> <a href="/c/jackets?page=2" rel="next">Next</a>`
-      : `<a href="/c/jackets">1</a> <span>2</span>`;
+      ? `<a href="${base}">1</a> <a href="${base}?page=2">2</a> <a href="${base}?page=2" rel="next">Next</a>`
+      : `<a href="${base}">1</a> <span>2</span>`;
+  // A category marked up as one product, the way some stores dress a category
+  // for search results: a Product whose offer is the range of the whole grid.
+  const dress = dressed
+    ? `<meta property="og:type" content="product">
+<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        name: "Jackets",
+        image: `${ORIGIN}/img/store-logo.png`,
+        offers: { "@type": "AggregateOffer", lowPrice: "40", highPrice: "900", priceCurrency: "EUR", offerCount: PAGE_TOTAL },
+      })}</script>`
+    : `<meta property="og:type" content="website">`;
   return `<!doctype html><html><head><title>Jackets</title>
-<meta property="og:type" content="website">
+<meta property="og:image" content="${ORIGIN}/img/store-logo.png">
+${dress}
 <style>
   body { margin: 0; font: 14px sans-serif; }
   header { height: 60px; }
@@ -437,7 +470,8 @@ const server = http.createServer((req, res) => {
   if (p === "/robots.txt") return send(200, "text/plain", robots());
 
   if (mode === "page") {
-    if (p === "/c/jackets") return send(200, "text/html", listingPage(url.searchParams.get("page") === "2" ? 2 : 1));
+    const listing = PAGE_LISTINGS[p];
+    if (listing) return send(200, "text/html", listingPage(url.searchParams.get("page") === "2" ? 2 : 1, p, listing.dressed));
     if (p === "/api/cards") {
       const from = Number(url.searchParams.get("from")) || 0;
       const count = Number(url.searchParams.get("count")) || 0;

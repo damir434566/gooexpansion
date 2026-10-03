@@ -55,14 +55,29 @@ export function listingStep(opts) {
     }
   };
 
+  /**
+   * Every address the page offers: ordinary links, links inside web
+   * components (their open shadow roots are invisible to a plain query), and
+   * cards that are clickable boxes carrying the address in `data-href` or
+   * `data-url` rather than a link.
+   */
   const harvest = () => {
     const out = [];
-    for (const a of document.querySelectorAll("a[href]")) {
-      const url = resolve(a.getAttribute("href"));
+    const note = (href) => {
+      const url = resolve(href);
       if (url && !st.seen.has(url)) {
         st.seen.add(url);
         out.push(url);
       }
+    };
+    const roots = [document];
+    for (let i = 0; i < roots.length && i < 2000; i++) {
+      const root = roots[i];
+      for (const a of root.querySelectorAll("a[href], area[href]")) note(a.getAttribute("href"));
+      for (const el of root.querySelectorAll("[data-href], [data-url], [data-link]")) {
+        note(el.getAttribute("data-href") || el.getAttribute("data-url") || el.getAttribute("data-link"));
+      }
+      for (const el of root.querySelectorAll("*")) if (el.shadowRoot) roots.push(el.shadowRoot);
     }
     return out;
   };
@@ -115,15 +130,39 @@ export function listingStep(opts) {
     }
     const og = document.querySelector('meta[property="og:type"]');
     result.head = { ld, ogType: (og && og.getAttribute("content")) || "" };
+
+    // Whether the page's own markup calls it one product: OpenGraph's page
+    // type, or structured data describing a single Product with an offer of
+    // its own. A category's summary ("from 40 to 900, 214 offers") is an
+    // AggregateOffer and does not count. The address is not asked: plenty of
+    // stores number their categories the way others number pieces
+    // (`…/jackets-c1712066.html`), and that is how a category came to be
+    // collected as one product with the store's logo for a photo.
+    const nodes = [];
+    for (const text of ld) {
+      try {
+        for (const node of [].concat(JSON.parse(text))) {
+          if (node && Array.isArray(node["@graph"])) nodes.push(...node["@graph"]);
+          else nodes.push(node);
+        }
+      } catch {
+        /* a store's broken JSON says nothing */
+      }
+    }
+    result.saysProduct =
+      /^(?:og:)?product$/i.test(result.head.ogType) ||
+      nodes.some((node) => {
+        if (!node || typeof node !== "object") return false;
+        const types = [].concat(node["@type"] || []).map(String);
+        if (!types.some((t) => /^(?:https?:\/\/schema\.org\/)?(?:Product|ProductGroup|IndividualProduct)$/i.test(t))) return false;
+        const offers = [].concat(node.offers || []);
+        return !offers.some((offer) => offer && /AggregateOffer/i.test(String(offer["@type"])));
+      });
   }
 
-  // A page nobody can see loads nothing more, and a product page has no grid
-  // to walk: report what is there and let the worker decide.
+  // A page nobody can see loads nothing more: report what is there and let
+  // the worker wait.
   if (!result.visible) return result;
-  if (o.first && /^(?:og:)?product$/i.test(result.head.ogType)) {
-    result.exhausted = true;
-    return result;
-  }
 
   const MORE =
     /^(?:load|show|view|see)\s+more\b|^more\s+(?:products|items|results|styles)\b|^(?:показать|загрузить)\s+(?:ещ[её]|больше)|^(?:показати|завантажити)\s+(?:ще|більше)|^mehr\s+(?:anzeigen|laden)|^voir\s+plus|^(?:cargar|mostrar|ver)\s+más|^(?:carica|mostra)\s+altri/i;
