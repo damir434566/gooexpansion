@@ -471,6 +471,12 @@ const LISTING_LD = 500_000;
 const HIDDEN_MS = 5 * 60_000;
 /** Failed pages one run remembers, for Retry. */
 const MAX_FAILURES = 500;
+/**
+ * Pieces a page must show at first sight to be a listing even though its
+ * markup calls it one product. A product page shows a few related pieces at
+ * most before it is scrolled; a category shows a grid.
+ */
+const GRID_MIN = 8;
 
 const KEEP_IN_FRONT =
   "Bring the store tab back to the front. A store only loads more of its page while you can see it.";
@@ -771,6 +777,16 @@ async function run({ storeUrl, limit, linksOnly = false }) {
   finish();
 }
 
+/** An address without its query and fragment: how the planner names a page. */
+function pagePath(url) {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return "";
+  }
+}
+
 /** Load an address in a tab that is already open, and wait for it to finish. */
 function navigate(tabId, url) {
   return new Promise((resolve) => {
@@ -802,7 +818,7 @@ function navigate(tabId, url) {
  * page, noting each link on the way (listing.js). Returns the links in the
  * order they were seen and the structured data of each page walked.
  */
-async function walkListing(tabId, startUrl, limit, rules) {
+async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) {
   const links = [];
   const known = new Set();
   const heads = [];
@@ -869,7 +885,8 @@ async function walkListing(tabId, startUrl, limit, rules) {
     }
     if (first) {
       first = false;
-      if (initial < 0) initial = links.length;
+      const opening = initial < 0;
+      if (opening) initial = links.length;
       if (res.head) {
         const ld = [];
         for (const text of res.head.ld || []) {
@@ -878,6 +895,28 @@ async function walkListing(tabId, startUrl, limit, rules) {
           ld.push(text);
         }
         heads.push({ ld, ogType: res.head.ogType || "" });
+      }
+      // A page whose markup calls it one product is that product, unless it
+      // already shows a grid: then it is a listing dressed as a product. The
+      // planner says which links are pieces; the page is asked once, before
+      // any scrolling, so a product page is not walked at all.
+      if (opening && res.saysProduct) {
+        const looked = await askPage("plan", {
+          url: startUrl,
+          html: planHtml(heads, links),
+          robotsTxt,
+          sitemaps: [],
+          seen: [],
+          limit: MAX_LIMIT,
+          linksOnly,
+        });
+        const here = pagePath(startUrl);
+        const others = (looked.ok && Array.isArray(looked.data?.urls) ? looked.data.urls : []).filter(
+          (u) => pagePath(u) !== here,
+        );
+        if (looked.ok && others.length < GRID_MIN) {
+          return { links, heads, pages, partial, note, product: true, walked: [here] };
+        }
       }
     }
     state.listing = { pages, links: links.length };
@@ -931,7 +970,7 @@ async function walkListing(tabId, startUrl, limit, rules) {
 
   // Back where the admin started, rather than on the listing's last page.
   if (pages > 1) chrome.tabs.update(tabId, { url: startUrl }).catch(() => {});
-  return { links, heads, pages, partial, note };
+  return { links, heads, pages, partial, note, product: false, walked: [...visited].map(pagePath) };
 }
 
 /**
@@ -960,7 +999,7 @@ async function runPage({ tabId, storeUrl, limit, linksOnly = false }) {
   state.delayMs = Math.max(rules.crawlDelayMs ?? 0, MIN_DELAY_MS);
   if (state.stopped) return finish();
 
-  const walk = await walkListing(tabId, storeUrl, limit, rules);
+  const walk = await walkListing(tabId, storeUrl, limit, rules, robotsTxt, linksOnly);
   if (state.stopped) return finish();
   if (walk.error) {
     halt(walk.error);
@@ -987,8 +1026,22 @@ async function runPage({ tabId, storeUrl, limit, linksOnly = false }) {
 
   const plan = planned.data ?? {};
   let urls = Array.isArray(plan.urls) ? plan.urls : [];
-  // On a product page the page is the piece; what it recommends is not.
-  if (plan.isSingleProduct) urls = urls.slice(0, 1);
+  if (walk.product) {
+    // A product page: the page is the piece, and what it recommends is not.
+    // It is opened again in the background, so robots.txt has its say: the
+    // planner's own entry for it has passed it, and without one we ask.
+    const here = pagePath(storeUrl);
+    const own = urls.find((u) => pagePath(u) === here) ?? (robotsAllows(rules, storeUrl) ? storeUrl.split("#")[0] : "");
+    urls = own ? [own] : [];
+  } else {
+    // A listing is never one of its own pieces. Up to 1.0.14 a category the
+    // planner took for a product by its address (stores that number their
+    // categories, `…/jackets-c1712066.html`) came back as the only "piece",
+    // and was imported with the store's logo for a photo. Its other pages
+    // (`?page=2` names the same path) are the listing too.
+    const listing = new Set(walk.walked);
+    urls = urls.filter((u) => !listing.has(pagePath(u)));
+  }
   if (!urls.length) {
     halt(NOTHING_FOUND);
     return;

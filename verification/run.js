@@ -1022,6 +1022,69 @@ async function main() {
   collect.close();
   await fetch(`http://127.0.0.1:${PORT}/json/close/${storeTarget.id}`);
 
+  // ── Run N: pages that look like one product, and one that is ──────────────
+  //
+  // 1.0.14 took the planner's "this page is a product" at its word and kept
+  // the page alone. A category numbered the way Bershka numbers them, or one
+  // whose markup calls it a product, then came back as the run's only piece —
+  // imported with the store's logo for a photo, the pieces themselves never
+  // seen. A real product page must still give just itself.
+  console.log("\n— run N: a category that looks like a product, and a product —");
+  const startOn = async (url, setup) => {
+    const target = await newTab(url);
+    await sleep(1500);
+    const p = await openPopup(extId);
+    const tab = await p.evaluate(
+      `chrome.tabs.query({}).then((ts) => ts.filter((t) => t.url === ${JSON.stringify(url)}).map((t) => ({ id: t.id, url: t.url }))[0])`,
+    );
+    await p.evaluate(
+      `(async () => { const t = ${JSON.stringify(tab)}; chrome.tabs.query = async () => [t];` +
+        ` chrome.permissions.request = (q) => chrome.permissions.contains(q); await init(); ${setup || ""} })()`,
+    );
+    await p.evaluate(`document.getElementById("start").click()`, { userGesture: true });
+    await sleep(300);
+    await activate(target.id);
+    return { p, target };
+  };
+  collect = await openCollect();
+  const firstThree = `if (document.getElementById("all").checked) document.getElementById("all").click(); document.getElementById("limit").value = "3";`;
+  for (const [label, listingPath] of [
+    ["numbered like a piece", "/ua/men/clothes/jackets-c1010193222.html"],
+    ["marked up as one product", "/c/coats"],
+  ]) {
+    await storeControl({ mode: "page", reset: true });
+    await studioReset();
+    const url = `${STORE}${listingPath}`;
+    const { p, target } = await startOn(url, firstThree);
+    const st = await untilEnded(p, 120);
+    const { api } = await studioEvents();
+    const sent = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, ""));
+    check(`a category ${label}: the run finished`, !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    check(
+      `a category ${label}: its pieces were collected, not the category`,
+      JSON.stringify(sent) === JSON.stringify(["/product/jacket-1", "/product/jacket-2", "/product/jacket-3"]),
+      JSON.stringify(sent),
+    );
+    check(`a category ${label}: it counted the grid`, !!st && st.found >= 3, String(st && st.found));
+    p.close();
+    await fetch(`http://127.0.0.1:${PORT}/json/close/${target.id}`);
+  }
+  {
+    await storeControl({ mode: "page", reset: true });
+    await studioReset();
+    const url = `${STORE}/product/jacket-5`;
+    const { p, target } = await startOn(url);
+    const st = await untilEnded(p, 60);
+    const { api } = await studioEvents();
+    const sent = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, ""));
+    check("a product page: the run finished", !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    check("a product page gives that product alone, not its \"You may also like\"", JSON.stringify(sent) === JSON.stringify(["/product/jacket-5"]), JSON.stringify(sent));
+    check("and says it found one piece", !!st && st.found === 1, String(st && st.found));
+    p.close();
+    await fetch(`http://127.0.0.1:${PORT}/json/close/${target.id}`);
+  }
+  collect.close();
+
   // ── Run G: the extension is updated while the collect tab stays open ───────
   //
   // What an admin does after installing a new version: ↻ on the extensions

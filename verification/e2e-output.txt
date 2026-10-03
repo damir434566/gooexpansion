@@ -136,9 +136,20 @@
   ok   and stopped reading the page early: page two was never opened
   ok   the popup remembers the choice
 
+— run N: a category that looks like a product, and a product —
+  ok   a category numbered like a piece: the run finished
+  ok   a category numbered like a piece: its pieces were collected, not the category
+  ok   a category numbered like a piece: it counted the grid
+  ok   a category marked up as one product: the run finished
+  ok   a category marked up as one product: its pieces were collected, not the category
+  ok   a category marked up as one product: it counted the grid
+  ok   a product page: the run finished
+  ok   a product page gives that product alone, not its "You may also like"
+  ok   and says it found one piece
+
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
 
-  112 passed, 0 failed
+  121 passed, 0 failed
 

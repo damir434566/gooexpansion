@@ -119,6 +119,20 @@ function check(name, got, want) {
     check("an address with a quote in it arrives whole", plan.urls.filter((u) => /%2[27]/.test(u)).length, 2);
   }
   {
+    // Why the extension, not the planner, decides whether the page it walked is
+    // one product: the planner judges by the address too, and these are all
+    // categories. 1.0.14 trusted it and collected each as a single "piece".
+    for (const category of [
+      "https://www.bershka.com/ua/men/clothes/jackets-c1010193222.html",
+      "https://www.massimodutti.com/ua/men/coats-and-jackets-c1712066.html",
+      "https://www.pullandbear.com/ua/men/clothes/jackets-n6467",
+      "https://rozetka.com.ua/ua/muzhskie-kurtki/c4637184/",
+    ]) {
+      const plan = planCollection({ startUrl: category, html: planHtml([{ ld: [], ogType: "website" }], []), limit: 2000 });
+      check(`the planner takes the category ${new URL(category).hostname} for a product`, plan.isSingleProduct, true);
+    }
+  }
+  {
     // A product page: the planner still knows it for one by its page type, and
     // the run then takes only the piece itself.
     const html = planHtml([{ ld: [], ogType: "product" }], ["https://shop.example/products/other-1", "https://shop.example/products/other-2"]);

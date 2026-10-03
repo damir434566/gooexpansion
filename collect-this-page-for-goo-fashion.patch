@@ -1,5 +1,5 @@
 diff --git a/extension/README.md b/extension/README.md
-index b36df98..43b43c3 100644
+index b36df98..982b612 100644
 --- a/extension/README.md
 +++ b/extension/README.md
 @@ -2,7 +2,7 @@
@@ -7,7 +7,7 @@ index b36df98..43b43c3 100644
  Собирает каталог магазина в Goo Fashion, открывая страницы в твоём браузере:
  твой адрес, твои куки, уже пройденная проверка. Сервер решает, что собирать;
 -расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.3).
-+расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.14).
++расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.15).
  
  **Когда нужно:** магазин отказывает нашему серверу (403, «Access denied»,
  проверка «Just a moment…»), а собрать надо каталог, а не один товар. Для одного
@@ -71,7 +71,7 @@ index b36df98..43b43c3 100644
  | **Links only** | Только добавить ссылку и цену этого магазина к вещам, которые уже есть в каталоге; новых карточек не создаётся. Запоминается для каждого магазина. Галочка решает режим прогона вместо переключателя на экране Collect (нужен goo-fashion #889). |
  | **Goo Studio** | Адрес сайта. По умолчанию `https://www.goo-fashion.com` (сайт сам уводит с `www` на адрес без `www`, расширение знает оба). Для локальной разработки — `http://localhost:3000`. Запоминается. |
  
-@@ -108,11 +131,15 @@ Collect catalog и Parse URL).
+@@ -108,11 +131,16 @@ Collect catalog и Parse URL).
  |---|---|
  | **«Waiting for the extension»** и ничего не происходит | Перезагрузи вкладку приёмника (F5). Так бывает, если она была открыта раньше, чем поставили или обновили расширение. Не помогло — адреса сайта нет в `manifest.json` (см. «Установка»). |
  | В popup: **«Could not reach …/goo-studio/parser/collect»** | Приёмник не ответил за 10 секунд. Ты не вошёл как админ в этом Chrome, в popup неверный адрес Goo Studio, или этого адреса нет в `manifest.json`. Открой приёмник сам, войди, обнови вкладку и попробуй снова. |
@@ -79,6 +79,7 @@ index b36df98..43b43c3 100644
 +| **«The collect tab is not reachable»** | С версии 1.0.6 расширение само находит вкладку приёмника и чинит связь, в том числе после обновления расширения. Если сообщение всё же появилось — открой Goo Studio → Parser → Collect, обнови её (F5) и нажми «Collect this page» ещё раз. До 1.0.13 так же писалось, когда вкладка была на месте, а Chrome не пропускал слишком большое сообщение с сайтмапами (Farfetch: прогон вставал после первой порции товаров). С 1.0.13 сайтмапы уходят кусками до 2 МБ. |
 +| **«The collect tab is open, but Chrome would not pass it the … request»** | Вкладка на месте, но Chrome отказался передать ей именно этот запрос (причина в скобках). Перезагрузка вкладки не поможет: это ошибка расширения, пришли текст сообщения разработчику. |
 +| **«Bring the store tab back to the front»** | Ты переключился с вкладки магазина, пока она листалась. Вернись на неё — листание продолжится. Через 5 минут в фоне расширение соберёт то, что успело найти. |
++| Вместо вещей добавилась одна «вещь» с логотипом магазина | Так было в 1.0.14 на магазинах, которые нумеруют категории как товары (Bershka, Massimo Dutti, Pull&Bear, Rozetka, AboutYou). Обнови расширение до 1.0.15, а лишнюю карточку удали в каталоге. |
 +| **«No pieces were found on this page»** | На странице нет сетки товаров (главная, статья, корзина). Открой категорию, бренд или поиск. |
 +| Нашлось меньше, чем показывает магазин | Если карточки подгружаются только по кнопке, которую расширение не узнало, нажми её сам до старта столько раз, сколько нужно, и запускай. |
  | **«…usually a sign-in redirect»** | Вкладку приёмника увело на вход. Войди в Goo Studio админом, открой Parser → Collect и запусти снова. |
@@ -89,7 +90,7 @@ index b36df98..43b43c3 100644
  | **«Open a store page in this tab first.»** | Popup открыт не на странице магазина. Перейди на магазин и открой popup там. |
  | **«A run is already going.»** | Прогон уже идёт. Дождись конца или нажми Stop. |
  | Строки `fail` с причиной **Unauthorized** (или плашка «Unauthorized» в начале прогона) | Кончилась сессия админа. Войди заново во вкладке приёмника. |
-@@ -162,4 +189,6 @@ Collect catalog и Parse URL).
+@@ -162,4 +190,6 @@ Collect catalog и Parse URL).
  | `background.js` | Фоновый работник: robots.txt и sitemap, открытие страниц, темп, отказы, Stop. |
  | `snapshot.js` | Вставляется в страницу магазина: прокручивает, очищает, собирает фото, цену, размеры, цвет и остальное. |
  | `bridge.js` | Работает на вкладке-приёмнике: передаёт сообщения между расширением и страницей. |
@@ -97,7 +98,7 @@ index b36df98..43b43c3 100644
 +| `sitemap-pieces.js` | Сжимает сайтмап до того, что читает планировщик (`<loc>`, `<image:title>`), и режет на куски до 2 МБ, чтобы каждый план прошёл и в сообщении Chrome, и в запросе к сайту. |
  | `icons/` | Иконки. |
 diff --git a/extension/background.js b/extension/background.js
-index 73f3e5a..dc97834 100644
+index 73f3e5a..d447eb2 100644
 --- a/extension/background.js
 +++ b/extension/background.js
 @@ -31,6 +31,9 @@
@@ -207,7 +208,7 @@ index 73f3e5a..dc97834 100644
    });
  }
  
-@@ -419,19 +457,209 @@ async function snapshotPage(url) {
+@@ -419,19 +457,215 @@ async function snapshotPage(url) {
  
  // ── The run ──────────────────────────────────────────────────────────────────
  
@@ -225,6 +226,12 @@ index 73f3e5a..dc97834 100644
 +const HIDDEN_MS = 5 * 60_000;
 +/** Failed pages one run remembers, for Retry. */
 +const MAX_FAILURES = 500;
++/**
++ * Pieces a page must show at first sight to be a listing even though its
++ * markup calls it one product. A product page shows a few related pieces at
++ * most before it is scrolled; a category shows a grid.
++ */
++const GRID_MIN = 8;
 +
 +const KEEP_IN_FRONT =
 +  "Bring the store tab back to the front. A store only loads more of its page while you can see it.";
@@ -417,7 +424,7 @@ index 73f3e5a..dc97834 100644
  async function run({ storeUrl, limit, linksOnly = false }) {
    let origin;
    try {
-@@ -441,18 +669,7 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -441,18 +675,7 @@ async function run({ storeUrl, limit, linksOnly = false }) {
      return;
    }
  
@@ -437,7 +444,7 @@ index 73f3e5a..dc97834 100644
  
    // The collect tab has to be there before anything is asked of the store —
    // failing here costs the store nothing, failing later wastes its bandwidth.
-@@ -482,13 +699,14 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -482,13 +705,14 @@ async function run({ storeUrl, limit, linksOnly = false }) {
    let html = first.html ?? "";
    let docs = [];
    const readDocs = new Set();
@@ -457,7 +464,7 @@ index 73f3e5a..dc97834 100644
  
      state.phase = "planning";
      state.message = "";
-@@ -497,8 +715,8 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -497,8 +721,8 @@ async function run({ storeUrl, limit, linksOnly = false }) {
        html,
        robotsTxt,
        sitemaps: docs,
@@ -468,7 +475,7 @@ index 73f3e5a..dc97834 100644
        // The popup's "Links only": the site then looks in this store for the
        // pieces we already have, and opens no other pages.
        linksOnly,
-@@ -513,99 +731,342 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -513,99 +737,389 @@ async function run({ storeUrl, limit, linksOnly = false }) {
      const plan = planned.data ?? {};
      const urls = Array.isArray(plan.urls) ? plan.urls : [];
      state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
@@ -534,6 +541,16 @@ index 73f3e5a..dc97834 100644
 +  finish();
 +}
 +
++/** An address without its query and fragment: how the planner names a page. */
++function pagePath(url) {
++  try {
++    const u = new URL(url);
++    return `${u.origin}${u.pathname}`;
++  } catch {
++    return "";
++  }
++}
++
 +/** Load an address in a tab that is already open, and wait for it to finish. */
 +function navigate(tabId, url) {
 +  return new Promise((resolve) => {
@@ -565,7 +582,7 @@ index 73f3e5a..dc97834 100644
 + * page, noting each link on the way (listing.js). Returns the links in the
 + * order they were seen and the structured data of each page walked.
 + */
-+async function walkListing(tabId, startUrl, limit, rules) {
++async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) {
 +  const links = [];
 +  const known = new Set();
 +  const heads = [];
@@ -637,7 +654,8 @@ index 73f3e5a..dc97834 100644
 +    }
 +    if (first) {
 +      first = false;
-+      if (initial < 0) initial = links.length;
++      const opening = initial < 0;
++      if (opening) initial = links.length;
 +      if (res.head) {
 +        const ld = [];
 +        for (const text of res.head.ld || []) {
@@ -647,6 +665,28 @@ index 73f3e5a..dc97834 100644
 +        }
 +        heads.push({ ld, ogType: res.head.ogType || "" });
        }
++      // A page whose markup calls it one product is that product, unless it
++      // already shows a grid: then it is a listing dressed as a product. The
++      // planner says which links are pieces; the page is asked once, before
++      // any scrolling, so a product page is not walked at all.
++      if (opening && res.saysProduct) {
++        const looked = await askPage("plan", {
++          url: startUrl,
++          html: planHtml(heads, links),
++          robotsTxt,
++          sitemaps: [],
++          seen: [],
++          limit: MAX_LIMIT,
++          linksOnly,
++        });
++        const here = pagePath(startUrl);
++        const others = (looked.ok && Array.isArray(looked.data?.urls) ? looked.data.urls : []).filter(
++          (u) => pagePath(u) !== here,
++        );
++        if (looked.ok && others.length < GRID_MIN) {
++          return { links, heads, pages, partial, note, product: true, walked: [here] };
++        }
++      }
 +    }
 +    state.listing = { pages, links: links.length };
  
@@ -742,11 +782,11 @@ index 73f3e5a..dc97834 100644
 +    first = true;
 +    state.listing = { pages, links: links.length };
 +    pushProgress();
-+  }
-+
+   }
+ 
 +  // Back where the admin started, rather than on the listing's last page.
 +  if (pages > 1) chrome.tabs.update(tabId, { url: startUrl }).catch(() => {});
-+  return { links, heads, pages, partial, note };
++  return { links, heads, pages, partial, note, product: false, walked: [...visited].map(pagePath) };
 +}
 +
 +/**
@@ -760,8 +800,8 @@ index 73f3e5a..dc97834 100644
 +  } catch {
 +    halt("That does not look like a store address.");
 +    return;
-   }
- 
++  }
++
 +  begin(storeUrl, linksOnly, "listing");
 +
 +  const hello = await askPage("hello", {});
@@ -775,7 +815,7 @@ index 73f3e5a..dc97834 100644
 +  state.delayMs = Math.max(rules.crawlDelayMs ?? 0, MIN_DELAY_MS);
 +  if (state.stopped) return finish();
 +
-+  const walk = await walkListing(tabId, storeUrl, limit, rules);
++  const walk = await walkListing(tabId, storeUrl, limit, rules, robotsTxt, linksOnly);
 +  if (state.stopped) return finish();
 +  if (walk.error) {
 +    halt(walk.error);
@@ -802,8 +842,22 @@ index 73f3e5a..dc97834 100644
 +
 +  const plan = planned.data ?? {};
 +  let urls = Array.isArray(plan.urls) ? plan.urls : [];
-+  // On a product page the page is the piece; what it recommends is not.
-+  if (plan.isSingleProduct) urls = urls.slice(0, 1);
++  if (walk.product) {
++    // A product page: the page is the piece, and what it recommends is not.
++    // It is opened again in the background, so robots.txt has its say: the
++    // planner's own entry for it has passed it, and without one we ask.
++    const here = pagePath(storeUrl);
++    const own = urls.find((u) => pagePath(u) === here) ?? (robotsAllows(rules, storeUrl) ? storeUrl.split("#")[0] : "");
++    urls = own ? [own] : [];
++  } else {
++    // A listing is never one of its own pieces. Up to 1.0.14 a category the
++    // planner took for a product by its address (stores that number their
++    // categories, `…/jackets-c1712066.html`) came back as the only "piece",
++    // and was imported with the store's logo for a photo. Its other pages
++    // (`?page=2` names the same path) are the listing too.
++    const listing = new Set(walk.walked);
++    urls = urls.filter((u) => !listing.has(pagePath(u)));
++  }
 +  if (!urls.length) {
 +    halt(NOTHING_FOUND);
 +    return;
@@ -819,9 +873,9 @@ index 73f3e5a..dc97834 100644
 +  pushProgress();
 +
 +  if (!(await collect(take, newContext(limit, linksOnly)))) return;
-+  finish();
-+}
-+
+   finish();
+ }
+ 
 +/** Open again the pages the last run could not read or import. */
 +async function runRetry(last) {
 +  const wanted = (last.failures || []).map((f) => f && f.url).filter((u) => typeof u === "string");
@@ -868,9 +922,9 @@ index 73f3e5a..dc97834 100644
 +  pushProgress();
 +
 +  if (!(await collect(urls, newContext(MAX_LIMIT, state.linksOnly)))) return;
-   finish();
- }
- 
++  finish();
++}
++
 +/** Retry, asked for by the popup or by the collect tab's button. */
 +async function retry() {
 +  if (state.running) return { ok: false, error: "A run is already going." };
@@ -885,7 +939,7 @@ index 73f3e5a..dc97834 100644
  function stop() {
    state.stopped = true;
    state.phase = "stopped";
-@@ -648,14 +1109,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+@@ -648,14 +1162,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
          return undefined;
        }
        const storeUrl = msg.payload?.storeUrl;
@@ -941,10 +995,10 @@ index f284f93..012ebd5 100644
  
 diff --git a/extension/listing.js b/extension/listing.js
 new file mode 100644
-index 0000000..42deb48
+index 0000000..09852b0
 --- /dev/null
 +++ b/extension/listing.js
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,401 @@
 +/**
 + * Reading a whole listing: every card a category shows, however it shows them.
 + *
@@ -1002,14 +1056,29 @@ index 0000000..42deb48
 +    }
 +  };
 +
++  /**
++   * Every address the page offers: ordinary links, links inside web
++   * components (their open shadow roots are invisible to a plain query), and
++   * cards that are clickable boxes carrying the address in `data-href` or
++   * `data-url` rather than a link.
++   */
 +  const harvest = () => {
 +    const out = [];
-+    for (const a of document.querySelectorAll("a[href]")) {
-+      const url = resolve(a.getAttribute("href"));
++    const note = (href) => {
++      const url = resolve(href);
 +      if (url && !st.seen.has(url)) {
 +        st.seen.add(url);
 +        out.push(url);
 +      }
++    };
++    const roots = [document];
++    for (let i = 0; i < roots.length && i < 2000; i++) {
++      const root = roots[i];
++      for (const a of root.querySelectorAll("a[href], area[href]")) note(a.getAttribute("href"));
++      for (const el of root.querySelectorAll("[data-href], [data-url], [data-link]")) {
++        note(el.getAttribute("data-href") || el.getAttribute("data-url") || el.getAttribute("data-link"));
++      }
++      for (const el of root.querySelectorAll("*")) if (el.shadowRoot) roots.push(el.shadowRoot);
 +    }
 +    return out;
 +  };
@@ -1062,15 +1131,39 @@ index 0000000..42deb48
 +    }
 +    const og = document.querySelector('meta[property="og:type"]');
 +    result.head = { ld, ogType: (og && og.getAttribute("content")) || "" };
++
++    // Whether the page's own markup calls it one product: OpenGraph's page
++    // type, or structured data describing a single Product with an offer of
++    // its own. A category's summary ("from 40 to 900, 214 offers") is an
++    // AggregateOffer and does not count. The address is not asked: plenty of
++    // stores number their categories the way others number pieces
++    // (`…/jackets-c1712066.html`), and that is how a category came to be
++    // collected as one product with the store's logo for a photo.
++    const nodes = [];
++    for (const text of ld) {
++      try {
++        for (const node of [].concat(JSON.parse(text))) {
++          if (node && Array.isArray(node["@graph"])) nodes.push(...node["@graph"]);
++          else nodes.push(node);
++        }
++      } catch {
++        /* a store's broken JSON says nothing */
++      }
++    }
++    result.saysProduct =
++      /^(?:og:)?product$/i.test(result.head.ogType) ||
++      nodes.some((node) => {
++        if (!node || typeof node !== "object") return false;
++        const types = [].concat(node["@type"] || []).map(String);
++        if (!types.some((t) => /^(?:https?:\/\/schema\.org\/)?(?:Product|ProductGroup|IndividualProduct)$/i.test(t))) return false;
++        const offers = [].concat(node.offers || []);
++        return !offers.some((offer) => offer && /AggregateOffer/i.test(String(offer["@type"])));
++      });
 +  }
 +
-+  // A page nobody can see loads nothing more, and a product page has no grid
-+  // to walk: report what is there and let the worker decide.
++  // A page nobody can see loads nothing more: report what is there and let
++  // the worker wait.
 +  if (!result.visible) return result;
-+  if (o.first && /^(?:og:)?product$/i.test(result.head.ogType)) {
-+    result.exhausted = true;
-+    return result;
-+  }
 +
 +  const MORE =
 +    /^(?:load|show|view|see)\s+more\b|^more\s+(?:products|items|results|styles)\b|^(?:показать|загрузить)\s+(?:ещ[её]|больше)|^(?:показати|завантажити)\s+(?:ще|більше)|^mehr\s+(?:anzeigen|laden)|^voir\s+plus|^(?:cargar|mostrar|ver)\s+más|^(?:carica|mostra)\s+altri/i;
@@ -1308,7 +1401,7 @@ index 0000000..42deb48
 +  return `<!doctype html><html><head>${head.join("\n")}</head><body>\n${body.join("\n")}\n</body></html>`;
 +}
 diff --git a/extension/manifest.json b/extension/manifest.json
-index 5e65ffa..867014c 100644
+index 5e65ffa..bd16d9e 100644
 --- a/extension/manifest.json
 +++ b/extension/manifest.json
 @@ -1,7 +1,7 @@
@@ -1316,7 +1409,7 @@ index 5e65ffa..867014c 100644
    "manifest_version": 3,
    "name": "Goo Collect",
 -  "version": "1.0.12",
-+  "version": "1.0.14",
++  "version": "1.0.15",
    "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
    "minimum_chrome_version": "116",
    "permissions": [
