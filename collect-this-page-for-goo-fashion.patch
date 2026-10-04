@@ -1,5 +1,5 @@
 diff --git a/extension/README.md b/extension/README.md
-index b36df98..982b612 100644
+index b36df98..029ad3c 100644
 --- a/extension/README.md
 +++ b/extension/README.md
 @@ -2,7 +2,7 @@
@@ -7,7 +7,7 @@ index b36df98..982b612 100644
  Собирает каталог магазина в Goo Fashion, открывая страницы в твоём браузере:
  твой адрес, твои куки, уже пройденная проверка. Сервер решает, что собирать;
 -расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.3).
-+расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.15).
++расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.16).
  
  **Когда нужно:** магазин отказывает нашему серверу (403, «Access denied»,
  проверка «Just a moment…»), а собрать надо каталог, а не один товар. Для одного
@@ -71,7 +71,19 @@ index b36df98..982b612 100644
  | **Links only** | Только добавить ссылку и цену этого магазина к вещам, которые уже есть в каталоге; новых карточек не создаётся. Запоминается для каждого магазина. Галочка решает режим прогона вместо переключателя на экране Collect (нужен goo-fashion #889). |
  | **Goo Studio** | Адрес сайта. По умолчанию `https://www.goo-fashion.com` (сайт сам уводит с `www` на адрес без `www`, расширение знает оба). Для локальной разработки — `http://localhost:3000`. Запоминается. |
  
-@@ -108,11 +131,16 @@ Collect catalog и Parse URL).
+@@ -89,6 +112,11 @@ Collect catalog и Parse URL).
+ 
+ ## Почему так медленно
+ 
++Если какая-то вещь не открывается, сбор её **не ждёт**: страница без ответа
++пропускается через 15 секунд, оборванная — сразу, а страница, где не грузится
++только какой-нибудь трекер, читается через 4 секунды как обычная. Пока сайт
++сохраняет одну вещь, расширение уже открывает следующую.
++
+ Перед каждым товаром — пауза от 1,5 до 2,1 секунды (1,5 с плюс случайная
+ добавка до 40 %), потом загрузка самой страницы, и десять секунд передышки
+ каждые двадцать страниц. Это не тормоза, а
+@@ -108,11 +136,17 @@ Collect catalog и Parse URL).
  |---|---|
  | **«Waiting for the extension»** и ничего не происходит | Перезагрузи вкладку приёмника (F5). Так бывает, если она была открыта раньше, чем поставили или обновили расширение. Не помогло — адреса сайта нет в `manifest.json` (см. «Установка»). |
  | В popup: **«Could not reach …/goo-studio/parser/collect»** | Приёмник не ответил за 10 секунд. Ты не вошёл как админ в этом Chrome, в popup неверный адрес Goo Studio, или этого адреса нет в `manifest.json`. Открой приёмник сам, войди, обнови вкладку и попробуй снова. |
@@ -80,6 +92,7 @@ index b36df98..982b612 100644
 +| **«The collect tab is open, but Chrome would not pass it the … request»** | Вкладка на месте, но Chrome отказался передать ей именно этот запрос (причина в скобках). Перезагрузка вкладки не поможет: это ошибка расширения, пришли текст сообщения разработчику. |
 +| **«Bring the store tab back to the front»** | Ты переключился с вкладки магазина, пока она листалась. Вернись на неё — листание продолжится. Через 5 минут в фоне расширение соберёт то, что успело найти. |
 +| Вместо вещей добавилась одна «вещь» с логотипом магазина | Так было в 1.0.14 на магазинах, которые нумеруют категории как товары (Bershka, Massimo Dutti, Pull&Bear, Rozetka, AboutYou). Обнови расширение до 1.0.15, а лишнюю карточку удали в каталоге. |
++| Строки `fail` «The page was still loading after 15 s», «The store did not answer in 15 s», «The page did not load (net::…)» | Эту страницу магазин не отдал вовремя или оборвал. Вещь пропущена, сбор пошёл дальше. В конце нажми **Retry N failed**: часто со второго раза открывается. |
 +| **«No pieces were found on this page»** | На странице нет сетки товаров (главная, статья, корзина). Открой категорию, бренд или поиск. |
 +| Нашлось меньше, чем показывает магазин | Если карточки подгружаются только по кнопке, которую расширение не узнало, нажми её сам до старта столько раз, сколько нужно, и запускай. |
  | **«…usually a sign-in redirect»** | Вкладку приёмника увело на вход. Войди в Goo Studio админом, открой Parser → Collect и запусти снова. |
@@ -90,7 +103,7 @@ index b36df98..982b612 100644
  | **«Open a store page in this tab first.»** | Popup открыт не на странице магазина. Перейди на магазин и открой popup там. |
  | **«A run is already going.»** | Прогон уже идёт. Дождись конца или нажми Stop. |
  | Строки `fail` с причиной **Unauthorized** (или плашка «Unauthorized» в начале прогона) | Кончилась сессия админа. Войди заново во вкладке приёмника. |
-@@ -162,4 +190,6 @@ Collect catalog и Parse URL).
+@@ -162,4 +196,6 @@ Collect catalog и Parse URL).
  | `background.js` | Фоновый работник: robots.txt и sitemap, открытие страниц, темп, отказы, Stop. |
  | `snapshot.js` | Вставляется в страницу магазина: прокручивает, очищает, собирает фото, цену, размеры, цвет и остальное. |
  | `bridge.js` | Работает на вкладке-приёмнике: передаёт сообщения между расширением и страницей. |
@@ -98,7 +111,7 @@ index b36df98..982b612 100644
 +| `sitemap-pieces.js` | Сжимает сайтмап до того, что читает планировщик (`<loc>`, `<image:title>`), и режет на куски до 2 МБ, чтобы каждый план прошёл и в сообщении Chrome, и в запросе к сайту. |
  | `icons/` | Иконки. |
 diff --git a/extension/background.js b/extension/background.js
-index 73f3e5a..d447eb2 100644
+index 73f3e5a..fdf967f 100644
 --- a/extension/background.js
 +++ b/extension/background.js
 @@ -31,6 +31,9 @@
@@ -111,8 +124,33 @@ index 73f3e5a..d447eb2 100644
  // ── Politeness constants ─────────────────────────────────────────────────────
  
  /** Never faster than this, whatever robots.txt does or does not ask for. */
-@@ -59,8 +62,12 @@ const CHECK_WAIT_MS = 6_000;
- const PAGE_TIMEOUT_MS = 45_000;
+@@ -55,12 +58,35 @@ const REFUSAL_STATUSES = new Set([403, 429]);
+ /** How long a bot check is given to pass on its own before it counts as a refusal. */
+ const CHECK_WAIT_MS = 6_000;
+ 
+-/** Give up on a page that will not finish loading. */
+-const PAGE_TIMEOUT_MS = 45_000;
++/**
++ * How long a page may take before it is skipped. Up to 1.0.15 this was 45 s
++ * spent waiting for the tab's "complete", which a good page with one tracker
++ * that never answers does not reach: each such piece cost 45 s and was then
++ * counted as failed, and a few in a row looked like the run had stopped.
++ */
++const PAGE_TIMEOUT_MS = 15_000;
++/**
++ * From when a page whose own markup is in may be read while something on it
++ * is still loading. The store's answer has arrived and the document is built;
++ * what is outstanding is a tracker, a chat widget, an ad.
++ */
++const READY_AFTER_MS = 4_000;
++/** How long snapshot.js may take to read a page before the page is skipped. */
++const READ_TIMEOUT_MS = 25_000;
++/**
++ * How long one import on the site may take. The site's own limit is 60 s
++ * (Vercel ends the function); past this the collect tab is not answering at
++ * all, and the piece is skipped rather than waited for.
++ */
++const INGEST_TIMEOUT_MS = 90_000;
  /** Let a loaded page settle before reading it. */
  const SETTLE_MS = 500;
 -/** Planning rounds before we call a store done. */
@@ -126,7 +164,7 @@ index 73f3e5a..d447eb2 100644
  /** Pause between sitemap fetches — cheap requests, but still requests. */
  const SITEMAP_GAP_MS = 400;
  
-@@ -70,18 +77,28 @@ const state = {
+@@ -70,18 +96,28 @@ const state = {
    running: false,
    stopped: false,
    store: "",
@@ -158,7 +196,7 @@ index 73f3e5a..d447eb2 100644
  }
  
  // ── Abortable waiting ────────────────────────────────────────────────────────
-@@ -214,8 +231,17 @@ async function reconnect() {
+@@ -214,8 +250,17 @@ async function reconnect() {
    return { error: NO_TAB };
  }
  
@@ -177,7 +215,7 @@ index 73f3e5a..d447eb2 100644
    for (let attempt = 0; attempt < 2; attempt++) {
      const tabId = attempt === 0 ? await studioTab() : await reconnect();
      if (tabId != null && typeof tabId === "object") return { ok: false, error: tabId.error };
-@@ -223,10 +249,17 @@ async function askPage(type, payload) {
+@@ -223,10 +268,17 @@ async function askPage(type, payload) {
      try {
        const res = await chrome.tabs.sendMessage(tabId, { target: "bridge", type, payload });
        return res ?? { ok: false, error: "The collect tab did not answer" };
@@ -196,7 +234,7 @@ index 73f3e5a..d447eb2 100644
    return { ok: false, error: NO_TAB };
  }
  
-@@ -246,6 +279,11 @@ function pushProgress() {
+@@ -246,6 +298,11 @@ function pushProgress() {
      planned: state.planned,
      delayMs: state.delayMs,
      store: state.store,
@@ -208,7 +246,168 @@ index 73f3e5a..d447eb2 100644
    });
  }
  
-@@ -419,19 +457,215 @@ async function snapshotPage(url) {
+@@ -299,6 +356,109 @@ chrome.webRequest.onCompleted.addListener(
+   { urls: ["<all_urls>"], types: ["main_frame"] },
+ );
+ 
++/**
++ * Pages that failed outright: no answer, a dropped connection, a name that
++ * does not resolve. Chrome says so at once, and the piece is skipped at once,
++ * instead of after the page timeout.
++ */
++const mainFrameError = new Map();
++
++chrome.webRequest.onErrorOccurred.addListener(
++  (details) => {
++    if (details.type === "main_frame" && details.tabId >= 0) {
++      mainFrameError.set(details.tabId, details.error);
++    }
++  },
++  { urls: ["<all_urls>"], types: ["main_frame"] },
++);
++
++/**
++ * `promise`, or `fallback` once `ms` have passed. Waits through `sleep`, so
++ * Stop cuts it short too.
++ */
++async function withTimeout(promise, ms, fallback) {
++  let done = false;
++  const guarded = promise.then(
++    (value) => {
++      done = true;
++      return value;
++    },
++    (err) => {
++      done = true;
++      throw err;
++    },
++  );
++  const timer = sleep(ms).then(() => (done ? undefined : fallback));
++  const winner = await Promise.race([guarded, timer]);
++  return done ? guarded : winner;
++}
++
++/** The document's readyState in a tab, or "" when it cannot be asked. */
++async function readyState(tabId) {
++  try {
++    const out = await withTimeout(
++      chrome.scripting.executeScript({ target: { tabId }, func: () => document.readyState }),
++      2_000,
++      [],
++    );
++    return out?.[0]?.result ?? "";
++  } catch {
++    return "";
++  }
++}
++
++/**
++ * Wait until a freshly opened page can be read, and no longer than that.
++ *
++ * Ready means the tab reached "complete", or — from READY_AFTER_MS on — that
++ * the store's answer is in and the document past "loading", whatever is still
++ * fetching around it. A page that failed outright is reported as soon as
++ * Chrome knows. A page with no answer after PAGE_TIMEOUT_MS is given up.
++ */
++async function waitForPage(tabId) {
++  const started = Date.now();
++  let complete = false;
++  const onUpdated = (id, info) => {
++    if (id === tabId && info.status === "complete") complete = true;
++  };
++  chrome.tabs.onUpdated.addListener(onUpdated);
++  try {
++    for (;;) {
++      if (state.stopped) return { ok: false, error: "Stopped" };
++      const failed = mainFrameError.get(tabId);
++      // ERR_ABORTED is a navigation replaced by another (a script redirect),
++      // not a failure: the next one is waited for.
++      if (failed && failed !== "net::ERR_ABORTED") {
++        return { ok: false, error: `The page did not load (${failed})` };
++      }
++      if (!complete) {
++        const tab = await chrome.tabs.get(tabId).catch(() => null);
++        if (!tab) return { ok: false, error: "The tab was closed" };
++        if (tab.status === "complete") complete = true;
++      }
++      if (complete) return { ok: true };
++
++      const elapsed = Date.now() - started;
++      const answered = mainFrameStatus.has(tabId);
++      if (answered && elapsed >= READY_AFTER_MS) {
++        const ready = await readyState(tabId);
++        if (ready === "interactive" || ready === "complete") return { ok: true, early: true };
++      }
++      if (elapsed >= PAGE_TIMEOUT_MS) {
++        return {
++          ok: false,
++          error: answered
++            ? `The page was still loading after ${PAGE_TIMEOUT_MS / 1000} s`
++            : `The store did not answer in ${PAGE_TIMEOUT_MS / 1000} s`,
++        };
++      }
++      await sleep(250);
++    }
++  } finally {
++    chrome.tabs.onUpdated.removeListener(onUpdated);
++  }
++}
++
+ function waitForLoad(tabId) {
+   return new Promise((resolve) => {
+     let settled = false;
+@@ -345,23 +505,27 @@ async function snapshotPage(url) {
+ 
+   const tabId = tab.id;
+   mainFrameStatus.delete(tabId);
++  mainFrameError.delete(tabId);
+ 
+   try {
+-    const loaded = await waitForLoad(tabId);
++    const page = await waitForPage(tabId);
+     const status = mainFrameStatus.get(tabId) ?? 0;
+ 
+     if (REFUSAL_STATUSES.has(status)) return { refused: true, status };
+     if (status >= 400) return { error: `HTTP ${status}`, status };
+-    if (!loaded) return { error: "The page did not finish loading" };
++    if (!page.ok) return { error: page.error };
+ 
+     await sleep(SETTLE_MS);
+     if (state.stopped) return { error: "Stopped" };
+ 
++    // A page whose scripts lock it up would hold the read, and the run with
++    // it, for as long as it liked. Closing the tab ends the read below.
+     const read = async () => {
+-      const [injected] = await chrome.scripting.executeScript({
+-        target: { tabId },
+-        files: ["snapshot.js"],
+-      });
++      const [injected] = await withTimeout(
++        chrome.scripting.executeScript({ target: { tabId }, files: ["snapshot.js"] }),
++        READ_TIMEOUT_MS,
++        [{ result: { ok: false, error: `The page did not let itself be read in ${READ_TIMEOUT_MS / 1000} s` } }],
++      );
+       return injected?.result;
+     };
+     let result = await read();
+@@ -372,7 +536,7 @@ async function snapshotPage(url) {
+     if (result && result.ok && result.botCheck) {
+       await sleep(CHECK_WAIT_MS);
+       if (state.stopped) return { error: "Stopped" };
+-      await waitForLoad(tabId);
++      await waitForPage(tabId);
+       await sleep(SETTLE_MS);
+       result = await read();
+       if (result && result.ok && result.botCheck) {
+@@ -409,6 +573,7 @@ async function snapshotPage(url) {
+     return { error: err?.message ?? "Could not read the page" };
+   } finally {
+     mainFrameStatus.delete(tabId);
++    mainFrameError.delete(tabId);
+     try {
+       await chrome.tabs.remove(tabId);
+     } catch {
+@@ -419,19 +584,248 @@ async function snapshotPage(url) {
  
  // ── The run ──────────────────────────────────────────────────────────────────
  
@@ -326,49 +525,12 @@ index 73f3e5a..d447eb2 100644
    state.phase = state.stopped ? "stopped" : "done";
    void tellPage("done", {});
 +  void saveLastRun();
-+}
-+
-+/**
-+ * Open each address in turn, at the store's pace, and hand what it shows to
-+ * the collect tab. Every kind of run ends here. Returns false when the store
-+ * made the run stop: two refusals in a row.
-+ */
-+async function collect(urls, ctx) {
-+  for (const url of urls) {
-+    if (state.stopped || ctx.collected >= ctx.limit) break;
-+    ctx.seen.push(url);
-+
-+    await politePause();
-+    if (state.stopped) break;
-+
-+    const snap = await snapshotPage(url);
-+    // Stopped while the page was open: not a failure, and nothing to retry.
-+    if (state.stopped) break;
-+
-+    if (snap.refused) {
-+      ctx.refusals++;
-+      state.done++;
-+      failedUnseen(url, snap.check ? `the store showed a bot check ("${snap.check}")` : `the store refused it (HTTP ${snap.status})`);
-+      if (ctx.refusals >= REFUSAL_LIMIT) {
-+        halt(
-+          snap.check
-+            ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
-+            : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
-+        );
-+        return false;
-+      }
-+      continue;
-+    }
-+    ctx.refusals = 0;
-+
-+    if (!snap.html) {
-+      failedUnseen(url, snap.error || "Could not read the page");
-+      ctx.collected++;
-+      state.done++;
-+      continue;
-+    }
-+
-+    const ingested = await askPage("ingest", {
+ }
+ 
++/** Hand one read page to the collect tab and record what the site made of it. */
++async function ingest(url, snap, ctx) {
++  const ingested = await withTimeout(
++    askPage("ingest", {
 +      url,
 +      html: snap.html,
 +      // Sent in links-only runs too: the site keeps no photo from them, but
@@ -388,33 +550,103 @@ index 73f3e5a..d447eb2 100644
 +      brandText: snap.brandText,
 +      pageTitle: snap.pageTitle,
 +      finalUrl: snap.finalUrl,
-+    });
-+    ctx.collected++;
-+    state.done++;
-+    if (ingested.ok) {
-+      const result = ingested.data?.result;
-+      record(url, result?.status || "imported", result?.reason);
-+    } else if (!state.stopped) {
-+      record(url, "failed", ingested.error);
-+    }
-+    pushProgress();
-+
-+    ctx.sinceRest++;
-+    if (ctx.sinceRest >= REST_EVERY && ctx.collected < ctx.limit && !state.stopped) {
-+      ctx.sinceRest = 0;
-+      const said = state.message;
-+      state.message = "Resting so the store does not notice a rhythm…";
-+      await sleep(REST_MS);
-+      state.message = said;
-+    }
++    }),
++    INGEST_TIMEOUT_MS,
++    { ok: false, error: `The site did not finish importing it in ${INGEST_TIMEOUT_MS / 1000} s` },
++  );
++  state.done++;
++  if (ingested.ok) {
++    const result = ingested.data?.result;
++    record(url, result?.status || "imported", result?.reason);
++  } else if (!state.stopped) {
++    record(url, "failed", ingested.error);
 +  }
-+  return true;
++  pushProgress();
++}
++
++/**
++ * Open each address in turn, at the store's pace, and hand what it shows to
++ * the collect tab. Every kind of run ends here. Returns false when the store
++ * made the run stop: two refusals in a row.
++ *
++ * A page that fails is recorded with its reason and skipped; only the store
++ * refusing us twice in a row stops the run. Imports run one at a time and in
++ * page order, so the site matching a piece against the catalogue has seen the
++ * piece before it, but the store is not kept waiting for them: the next page
++ * is opened while the last one is being imported.
++ */
++async function collect(urls, ctx) {
++  /** The import still running on the site, if any. */
++  let importing = null;
++  const settle = async () => {
++    if (importing) {
++      await importing;
++      importing = null;
++    }
++  };
++
++  try {
++    for (const url of urls) {
++      if (state.stopped || ctx.collected >= ctx.limit) break;
++      ctx.seen.push(url);
++
++      await politePause();
++      if (state.stopped) break;
++
++      const snap = await snapshotPage(url);
++      // Stopped while the page was open: not a failure, and nothing to retry.
++      if (state.stopped) break;
++
++      if (snap.refused) {
++        ctx.refusals++;
++        state.done++;
++        failedUnseen(url, snap.check ? `the store showed a bot check ("${snap.check}")` : `the store refused it (HTTP ${snap.status})`);
++        if (ctx.refusals >= REFUSAL_LIMIT) {
++          await settle();
++          halt(
++            snap.check
++              ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
++              : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
++          );
++          return false;
++        }
++        continue;
++      }
++      ctx.refusals = 0;
++
++      if (!snap.html) {
++        failedUnseen(url, snap.error || "Could not read the page");
++        ctx.collected++;
++        state.done++;
++        pushProgress();
++        continue;
++      }
++
++      await settle();
++      if (state.stopped) break;
++      ctx.collected++;
++      importing = ingest(url, snap, ctx);
++
++      ctx.sinceRest++;
++      if (ctx.sinceRest >= REST_EVERY && ctx.collected < ctx.limit && !state.stopped) {
++        ctx.sinceRest = 0;
++        const said = state.message;
++        state.message = "Resting so the store does not notice a rhythm…";
++        await sleep(REST_MS);
++        state.message = said;
++      }
++    }
++    await settle();
++    return true;
++  } finally {
++    await settle();
++  }
 +}
 +
 +function newContext(limit, linksOnly) {
 +  return { limit, linksOnly, collected: 0, refusals: 0, sinceRest: 0, seen: [] };
- }
- 
++}
++
 +/**
 + * Collect a store from an address alone: the page as a background tab opens
 + * it, then the store's sitemaps. What runs started without a tab get (the test
@@ -424,7 +656,7 @@ index 73f3e5a..d447eb2 100644
  async function run({ storeUrl, limit, linksOnly = false }) {
    let origin;
    try {
-@@ -441,18 +675,7 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -441,18 +835,7 @@ async function run({ storeUrl, limit, linksOnly = false }) {
      return;
    }
  
@@ -444,7 +676,7 @@ index 73f3e5a..d447eb2 100644
  
    // The collect tab has to be there before anything is asked of the store —
    // failing here costs the store nothing, failing later wastes its bandwidth.
-@@ -482,13 +705,14 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -482,13 +865,14 @@ async function run({ storeUrl, limit, linksOnly = false }) {
    let html = first.html ?? "";
    let docs = [];
    const readDocs = new Set();
@@ -464,7 +696,7 @@ index 73f3e5a..d447eb2 100644
  
      state.phase = "planning";
      state.message = "";
-@@ -497,8 +721,8 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -497,8 +881,8 @@ async function run({ storeUrl, limit, linksOnly = false }) {
        html,
        robotsTxt,
        sitemaps: docs,
@@ -475,7 +707,7 @@ index 73f3e5a..d447eb2 100644
        // The popup's "Links only": the site then looks in this store for the
        // pieces we already have, and opens no other pages.
        linksOnly,
-@@ -513,99 +737,389 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -513,99 +897,389 @@ async function run({ storeUrl, limit, linksOnly = false }) {
      const plan = planned.data ?? {};
      const urls = Array.isArray(plan.urls) ? plan.urls : [];
      state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
@@ -491,23 +723,6 @@ index 73f3e5a..d447eb2 100644
 -    for (const url of urls) {
 -      if (state.stopped || collected >= limit) break;
 -      seen.push(url);
--
--      await politePause();
--      if (state.stopped) break;
--
--      const snap = await snapshotPage(url);
--
--      if (snap.refused) {
--        refusals++;
--        state.failed++;
--        if (refusals >= REFUSAL_LIMIT) {
--          halt(
--            snap.check
--              ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
--              : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
--          );
--          return;
--        }
 +    // Sitemaps for the next round. The server names them, best first; we
 +    // fetch them. Newly named ones go ahead of older ones, because the server
 +    // ranks the products sitemap out of an index above everything else.
@@ -533,14 +748,28 @@ index 73f3e5a..d447eb2 100644
 +      await sleep(SITEMAP_GAP_MS);
 +    }
 +    if (state.stopped) break;
-+
+ 
+-      await politePause();
+-      if (state.stopped) break;
 +    docs = takePieces(pieces);
 +    if (!docs.length) break;
 +  }
-+
+ 
+-      const snap = await snapshotPage(url);
 +  finish();
 +}
-+
+ 
+-      if (snap.refused) {
+-        refusals++;
+-        state.failed++;
+-        if (refusals >= REFUSAL_LIMIT) {
+-          halt(
+-            snap.check
+-              ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
+-              : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
+-          );
+-          return;
+-        }
 +/** An address without its query and fragment: how the planner names a page. */
 +function pagePath(url) {
 +  try {
@@ -782,8 +1011,8 @@ index 73f3e5a..d447eb2 100644
 +    first = true;
 +    state.listing = { pages, links: links.length };
 +    pushProgress();
-   }
- 
++  }
++
 +  // Back where the admin started, rather than on the listing's last page.
 +  if (pages > 1) chrome.tabs.update(tabId, { url: startUrl }).catch(() => {});
 +  return { links, heads, pages, partial, note, product: false, walked: [...visited].map(pagePath) };
@@ -808,8 +1037,8 @@ index 73f3e5a..d447eb2 100644
 +  if (!hello.ok) {
 +    halt(hello.error ?? NO_TAB);
 +    return;
-+  }
-+
+   }
+ 
 +  const robotsTxt = (await fetchText(`${origin}/robots.txt`)) ?? "";
 +  const rules = robotsRules(robotsTxt);
 +  state.delayMs = Math.max(rules.crawlDelayMs ?? 0, MIN_DELAY_MS);
@@ -939,7 +1168,7 @@ index 73f3e5a..d447eb2 100644
  function stop() {
    state.stopped = true;
    state.phase = "stopped";
-@@ -648,14 +1162,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+@@ -648,14 +1322,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
          return undefined;
        }
        const storeUrl = msg.payload?.storeUrl;
@@ -1401,7 +1630,7 @@ index 0000000..09852b0
 +  return `<!doctype html><html><head>${head.join("\n")}</head><body>\n${body.join("\n")}\n</body></html>`;
 +}
 diff --git a/extension/manifest.json b/extension/manifest.json
-index 5e65ffa..bd16d9e 100644
+index 5e65ffa..801b054 100644
 --- a/extension/manifest.json
 +++ b/extension/manifest.json
 @@ -1,7 +1,7 @@
@@ -1409,7 +1638,7 @@ index 5e65ffa..bd16d9e 100644
    "manifest_version": 3,
    "name": "Goo Collect",
 -  "version": "1.0.12",
-+  "version": "1.0.15",
++  "version": "1.0.16",
    "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
    "minimum_chrome_version": "116",
    "permissions": [

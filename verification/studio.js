@@ -235,6 +235,9 @@ const server = http.createServer(async (req, res) => {
     });
 
     if (body.action === "ingest") {
+      // The slow store's s6 takes a while to import, the way a piece with
+      // twenty photos to copy does. The run should not stand still for it.
+      if (/\/product\/s6$/.test(body.url || "")) await new Promise((r) => setTimeout(r, 8000));
       // The route's own first question: is this the product at all?
       const notProduct = notAProductPage({ url: body.url, finalUrl: body.finalUrl, html: body.html || "" });
       if (notProduct) return json(200, { ok: true, result: { url: body.url, status: "skipped", reason: notProduct } });

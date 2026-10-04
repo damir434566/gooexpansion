@@ -147,9 +147,20 @@
   ok   a product page gives that product alone, not its "You may also like"
   ok   and says it found one piece
 
+— run S: failing and slow pages are skipped, not waited out —
+  ok   run S went on to the end rather than stopping
+  ok   the good page with a tracker that never finishes was read, not failed
+  ok   every page after the failures was collected too
+  ok   the page that never answered was skipped, with a reason
+  ok   the dropped connection was skipped, with a reason
+  ok   the good page with a tracker that never finishes was read within seconds
+  ok   the page that never answered was given up after 15 s, not 45
+  ok   the dropped connection was skipped at once
+  ok   a slow import on the site did not keep the next page from opening
+
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
 
-  121 passed, 0 failed
+  130 passed, 0 failed
 

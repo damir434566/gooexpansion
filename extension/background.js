@@ -58,8 +58,27 @@ const REFUSAL_STATUSES = new Set([403, 429]);
 /** How long a bot check is given to pass on its own before it counts as a refusal. */
 const CHECK_WAIT_MS = 6_000;
 
-/** Give up on a page that will not finish loading. */
-const PAGE_TIMEOUT_MS = 45_000;
+/**
+ * How long a page may take before it is skipped. Up to 1.0.15 this was 45 s
+ * spent waiting for the tab's "complete", which a good page with one tracker
+ * that never answers does not reach: each such piece cost 45 s and was then
+ * counted as failed, and a few in a row looked like the run had stopped.
+ */
+const PAGE_TIMEOUT_MS = 15_000;
+/**
+ * From when a page whose own markup is in may be read while something on it
+ * is still loading. The store's answer has arrived and the document is built;
+ * what is outstanding is a tracker, a chat widget, an ad.
+ */
+const READY_AFTER_MS = 4_000;
+/** How long snapshot.js may take to read a page before the page is skipped. */
+const READ_TIMEOUT_MS = 25_000;
+/**
+ * How long one import on the site may take. The site's own limit is 60 s
+ * (Vercel ends the function); past this the collect tab is not answering at
+ * all, and the piece is skipped rather than waited for.
+ */
+const INGEST_TIMEOUT_MS = 90_000;
 /** Let a loaded page settle before reading it. */
 const SETTLE_MS = 500;
 /**
@@ -337,6 +356,109 @@ chrome.webRequest.onCompleted.addListener(
   { urls: ["<all_urls>"], types: ["main_frame"] },
 );
 
+/**
+ * Pages that failed outright: no answer, a dropped connection, a name that
+ * does not resolve. Chrome says so at once, and the piece is skipped at once,
+ * instead of after the page timeout.
+ */
+const mainFrameError = new Map();
+
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    if (details.type === "main_frame" && details.tabId >= 0) {
+      mainFrameError.set(details.tabId, details.error);
+    }
+  },
+  { urls: ["<all_urls>"], types: ["main_frame"] },
+);
+
+/**
+ * `promise`, or `fallback` once `ms` have passed. Waits through `sleep`, so
+ * Stop cuts it short too.
+ */
+async function withTimeout(promise, ms, fallback) {
+  let done = false;
+  const guarded = promise.then(
+    (value) => {
+      done = true;
+      return value;
+    },
+    (err) => {
+      done = true;
+      throw err;
+    },
+  );
+  const timer = sleep(ms).then(() => (done ? undefined : fallback));
+  const winner = await Promise.race([guarded, timer]);
+  return done ? guarded : winner;
+}
+
+/** The document's readyState in a tab, or "" when it cannot be asked. */
+async function readyState(tabId) {
+  try {
+    const out = await withTimeout(
+      chrome.scripting.executeScript({ target: { tabId }, func: () => document.readyState }),
+      2_000,
+      [],
+    );
+    return out?.[0]?.result ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Wait until a freshly opened page can be read, and no longer than that.
+ *
+ * Ready means the tab reached "complete", or — from READY_AFTER_MS on — that
+ * the store's answer is in and the document past "loading", whatever is still
+ * fetching around it. A page that failed outright is reported as soon as
+ * Chrome knows. A page with no answer after PAGE_TIMEOUT_MS is given up.
+ */
+async function waitForPage(tabId) {
+  const started = Date.now();
+  let complete = false;
+  const onUpdated = (id, info) => {
+    if (id === tabId && info.status === "complete") complete = true;
+  };
+  chrome.tabs.onUpdated.addListener(onUpdated);
+  try {
+    for (;;) {
+      if (state.stopped) return { ok: false, error: "Stopped" };
+      const failed = mainFrameError.get(tabId);
+      // ERR_ABORTED is a navigation replaced by another (a script redirect),
+      // not a failure: the next one is waited for.
+      if (failed && failed !== "net::ERR_ABORTED") {
+        return { ok: false, error: `The page did not load (${failed})` };
+      }
+      if (!complete) {
+        const tab = await chrome.tabs.get(tabId).catch(() => null);
+        if (!tab) return { ok: false, error: "The tab was closed" };
+        if (tab.status === "complete") complete = true;
+      }
+      if (complete) return { ok: true };
+
+      const elapsed = Date.now() - started;
+      const answered = mainFrameStatus.has(tabId);
+      if (answered && elapsed >= READY_AFTER_MS) {
+        const ready = await readyState(tabId);
+        if (ready === "interactive" || ready === "complete") return { ok: true, early: true };
+      }
+      if (elapsed >= PAGE_TIMEOUT_MS) {
+        return {
+          ok: false,
+          error: answered
+            ? `The page was still loading after ${PAGE_TIMEOUT_MS / 1000} s`
+            : `The store did not answer in ${PAGE_TIMEOUT_MS / 1000} s`,
+        };
+      }
+      await sleep(250);
+    }
+  } finally {
+    chrome.tabs.onUpdated.removeListener(onUpdated);
+  }
+}
+
 function waitForLoad(tabId) {
   return new Promise((resolve) => {
     let settled = false;
@@ -383,23 +505,27 @@ async function snapshotPage(url) {
 
   const tabId = tab.id;
   mainFrameStatus.delete(tabId);
+  mainFrameError.delete(tabId);
 
   try {
-    const loaded = await waitForLoad(tabId);
+    const page = await waitForPage(tabId);
     const status = mainFrameStatus.get(tabId) ?? 0;
 
     if (REFUSAL_STATUSES.has(status)) return { refused: true, status };
     if (status >= 400) return { error: `HTTP ${status}`, status };
-    if (!loaded) return { error: "The page did not finish loading" };
+    if (!page.ok) return { error: page.error };
 
     await sleep(SETTLE_MS);
     if (state.stopped) return { error: "Stopped" };
 
+    // A page whose scripts lock it up would hold the read, and the run with
+    // it, for as long as it liked. Closing the tab ends the read below.
     const read = async () => {
-      const [injected] = await chrome.scripting.executeScript({
-        target: { tabId },
-        files: ["snapshot.js"],
-      });
+      const [injected] = await withTimeout(
+        chrome.scripting.executeScript({ target: { tabId }, files: ["snapshot.js"] }),
+        READ_TIMEOUT_MS,
+        [{ result: { ok: false, error: `The page did not let itself be read in ${READ_TIMEOUT_MS / 1000} s` } }],
+      );
       return injected?.result;
     };
     let result = await read();
@@ -410,7 +536,7 @@ async function snapshotPage(url) {
     if (result && result.ok && result.botCheck) {
       await sleep(CHECK_WAIT_MS);
       if (state.stopped) return { error: "Stopped" };
-      await waitForLoad(tabId);
+      await waitForPage(tabId);
       await sleep(SETTLE_MS);
       result = await read();
       if (result && result.ok && result.botCheck) {
@@ -447,6 +573,7 @@ async function snapshotPage(url) {
     return { error: err?.message ?? "Could not read the page" };
   } finally {
     mainFrameStatus.delete(tabId);
+    mainFrameError.delete(tabId);
     try {
       await chrome.tabs.remove(tabId);
     } catch {
@@ -573,47 +700,10 @@ function finish() {
   void saveLastRun();
 }
 
-/**
- * Open each address in turn, at the store's pace, and hand what it shows to
- * the collect tab. Every kind of run ends here. Returns false when the store
- * made the run stop: two refusals in a row.
- */
-async function collect(urls, ctx) {
-  for (const url of urls) {
-    if (state.stopped || ctx.collected >= ctx.limit) break;
-    ctx.seen.push(url);
-
-    await politePause();
-    if (state.stopped) break;
-
-    const snap = await snapshotPage(url);
-    // Stopped while the page was open: not a failure, and nothing to retry.
-    if (state.stopped) break;
-
-    if (snap.refused) {
-      ctx.refusals++;
-      state.done++;
-      failedUnseen(url, snap.check ? `the store showed a bot check ("${snap.check}")` : `the store refused it (HTTP ${snap.status})`);
-      if (ctx.refusals >= REFUSAL_LIMIT) {
-        halt(
-          snap.check
-            ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
-            : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
-        );
-        return false;
-      }
-      continue;
-    }
-    ctx.refusals = 0;
-
-    if (!snap.html) {
-      failedUnseen(url, snap.error || "Could not read the page");
-      ctx.collected++;
-      state.done++;
-      continue;
-    }
-
-    const ingested = await askPage("ingest", {
+/** Hand one read page to the collect tab and record what the site made of it. */
+async function ingest(url, snap, ctx) {
+  const ingested = await withTimeout(
+    askPage("ingest", {
       url,
       html: snap.html,
       // Sent in links-only runs too: the site keeps no photo from them, but
@@ -633,27 +723,97 @@ async function collect(urls, ctx) {
       brandText: snap.brandText,
       pageTitle: snap.pageTitle,
       finalUrl: snap.finalUrl,
-    });
-    ctx.collected++;
-    state.done++;
-    if (ingested.ok) {
-      const result = ingested.data?.result;
-      record(url, result?.status || "imported", result?.reason);
-    } else if (!state.stopped) {
-      record(url, "failed", ingested.error);
-    }
-    pushProgress();
-
-    ctx.sinceRest++;
-    if (ctx.sinceRest >= REST_EVERY && ctx.collected < ctx.limit && !state.stopped) {
-      ctx.sinceRest = 0;
-      const said = state.message;
-      state.message = "Resting so the store does not notice a rhythm…";
-      await sleep(REST_MS);
-      state.message = said;
-    }
+    }),
+    INGEST_TIMEOUT_MS,
+    { ok: false, error: `The site did not finish importing it in ${INGEST_TIMEOUT_MS / 1000} s` },
+  );
+  state.done++;
+  if (ingested.ok) {
+    const result = ingested.data?.result;
+    record(url, result?.status || "imported", result?.reason);
+  } else if (!state.stopped) {
+    record(url, "failed", ingested.error);
   }
-  return true;
+  pushProgress();
+}
+
+/**
+ * Open each address in turn, at the store's pace, and hand what it shows to
+ * the collect tab. Every kind of run ends here. Returns false when the store
+ * made the run stop: two refusals in a row.
+ *
+ * A page that fails is recorded with its reason and skipped; only the store
+ * refusing us twice in a row stops the run. Imports run one at a time and in
+ * page order, so the site matching a piece against the catalogue has seen the
+ * piece before it, but the store is not kept waiting for them: the next page
+ * is opened while the last one is being imported.
+ */
+async function collect(urls, ctx) {
+  /** The import still running on the site, if any. */
+  let importing = null;
+  const settle = async () => {
+    if (importing) {
+      await importing;
+      importing = null;
+    }
+  };
+
+  try {
+    for (const url of urls) {
+      if (state.stopped || ctx.collected >= ctx.limit) break;
+      ctx.seen.push(url);
+
+      await politePause();
+      if (state.stopped) break;
+
+      const snap = await snapshotPage(url);
+      // Stopped while the page was open: not a failure, and nothing to retry.
+      if (state.stopped) break;
+
+      if (snap.refused) {
+        ctx.refusals++;
+        state.done++;
+        failedUnseen(url, snap.check ? `the store showed a bot check ("${snap.check}")` : `the store refused it (HTTP ${snap.status})`);
+        if (ctx.refusals >= REFUSAL_LIMIT) {
+          await settle();
+          halt(
+            snap.check
+              ? `The store showed a bot check instead of two pages in a row ("${snap.check}"). The run stopped so your address does not end up blocked. Open the store in a normal tab, pass the check, and try again later.`
+              : `The store refused two pages in a row (HTTP ${snap.status}). The run stopped so your address does not end up blocked. Try again later, or more slowly.`,
+          );
+          return false;
+        }
+        continue;
+      }
+      ctx.refusals = 0;
+
+      if (!snap.html) {
+        failedUnseen(url, snap.error || "Could not read the page");
+        ctx.collected++;
+        state.done++;
+        pushProgress();
+        continue;
+      }
+
+      await settle();
+      if (state.stopped) break;
+      ctx.collected++;
+      importing = ingest(url, snap, ctx);
+
+      ctx.sinceRest++;
+      if (ctx.sinceRest >= REST_EVERY && ctx.collected < ctx.limit && !state.stopped) {
+        ctx.sinceRest = 0;
+        const said = state.message;
+        state.message = "Resting so the store does not notice a rhythm…";
+        await sleep(REST_MS);
+        state.message = said;
+      }
+    }
+    await settle();
+    return true;
+  } finally {
+    await settle();
+  }
 }
 
 function newContext(limit, linksOnly) {
