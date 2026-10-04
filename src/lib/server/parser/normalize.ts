@@ -254,6 +254,8 @@ export function normalizeExtract(
   return {
     name,
     brand,
+    // An admin's override is their word, not the page's guess.
+    ...(raw.brandFromText && !config?.brandOverride ? { brandFromText: true } : {}),
     category,
     gender,
     description: raw.description ?? "",

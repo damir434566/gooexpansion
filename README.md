@@ -241,6 +241,58 @@
 > сеткой и не в фильтрах, вторая страница, вкладка в фоне, Retry) и M (первые
 > пять). Сквозной 112/112. Экран Collect проверен `tsc --strict`.
 >
+> **Бренд с GOAT — не «Air Jordan» у всего — расширение 1.0.17 и сервер**
+> (патч `collect-this-page-for-goo-fashion.patch` обновлён, против `master`
+> @ `7b3c473`. Теперь в нём, кроме `extension/` и экрана Collect, серверные
+> `brand-from-name.ts`, `extract.ts`, `normalize.ts`, `types.ts`,
+> `import-product.ts`).
+> С GOAT каждая вещь приходила с брендом «Air Jordan». Причин было две.
+> - **Расширение** брало бренд из первого элемента на странице, похожего на
+>   бренд. На GOAT это первая ссылка `/brand/…` в меню шапки, «Air Jordan».
+>   Разметки с брендом GOAT не даёт, так что эта строка и становилась брендом.
+> - **Сервер** сверяет бренд с названием товара, но оставлял любой бренд,
+>   который каталог уже знает. После первой вещи «Air Jordan» стал
+>   «известным» и держался даже против «New Balance 550» в названии. А в
+>   названиях вроде «Dunk Low 'Panda'» бренда нет вообще.
+>
+> Теперь:
+> - расширение (`collectBrandText`) не читает шапку, меню, подвал,
+>   всплывающие окна и карточки «похожих» и берёт кандидата, ближайшего к
+>   названию товара. `<header>` внутри `<article>` — это заголовок самого
+>   товара, и он читается;
+> - сервер помечает бренд, который страница только напечатала, а не
+>   объявила в разметке (`brandFromText`). Такой бренд уступает названию
+>   всегда, когда они расходятся;
+> - если в названии нет бренда, но есть модель, производитель которой
+>   однозначен, бренд берётся по модели (`brandFromModel`): Dunk, Air Force 1,
+>   Air Max → Nike; Samba, Gazelle, Spezial → adidas; «550 'White Green'»,
+>   2002R → New Balance; Gel-… → ASICS; Chuck 70 → Converse; Old Skool →
+>   Vans; XT-6 → Salomon; Clifton → HOKA; Nuptse → The North Face и ещё
+>   несколько. Модели, совпадающие с обычными словами, в список не входят
+>   («Blazer» только с Mid/Low, «Superstar» нет вовсе — это ещё и Golden
+>   Goose, «550» только в виде «550 'Кличка'», не «Levi's 550»). Бренд,
+>   объявленный в разметке, по-прежнему важнее модели;
+> - **бренд, которого нет в списке Brands, добавляется туда сам**, и в строке
+>   прогона это написано («ASICS added to the Brands list»). Имя самого
+>   магазина брендом не становится. В прогоне Links only ничего не
+>   добавляется.
+>
+> Уже собранные вещи с неправильным брендом исправятся, если собрать ту же
+> категорию ещё раз: при обновлении карточки бренд пересчитывается. Найти их
+> можно так:
+>
+> ```sql
+> select id, name, brand from products
+>  where brand = 'Air Jordan' and source_url like '%goat.com%'
+>    and name not ilike '%jordan%';
+> ```
+>
+> Тесты: `verification/test-brand.js` 44/44 (на `master` без правки — 20/44:
+> «New Balance 550» и «Dunk Low» остаются «Air Jordan»). Приёмка
+> `snapshot.js` 20/20 с двумя страницами «как у GOAT»; на 1.0.16 обе дают
+> «Air Jordan». Поддельная база тестов теперь знает `upsert` и таблицу
+> `brands`.
+>
 > **Сбойная вещь пропускается, а не ждётся — расширение 1.0.16** (патч
 > `collect-this-page-for-goo-fashion.patch` обновлён, против `master` @
 > `7b3c473`; в него входят 1.0.13–1.0.16).
@@ -598,6 +650,7 @@ node verification/test-product-group.js                      # 33/33  ProductGro
 node verification/test-second-store.js                       # 85/85  второй магазин — ссылка, не карточка
 node verification/test-sitemap-pieces.js                     # 33/33  большие сайтмапы — кусками
 node verification/test-listing.js                            # 45/45  «Collect this page»: robots.txt и план
+node verification/test-brand.js                              # 44/44  бренд: GOAT, модели, список Brands
 node verification/store.js &                                 # фиктивный магазин
 node verification/studio.js &                                # заглушка Студии
 CHROME_PATH=/usr/bin/google-chrome node verification/run.js   # 130/130 сквозной прогон

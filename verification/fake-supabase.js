@@ -2,19 +2,22 @@
  * A stand-in for `@/lib/supabase` for the importer tests.
  *
  * Answers `products` reads from an in-memory list (eq, ilike, in, and the
- * jsonb `cs` filter on retailers) and every other table with nothing, and records inserts and
- * updates instead of performing them — the importer's writes are the result.
+ * jsonb `cs` filter on retailers), `brands` reads from the Brands list a test
+ * sets, and every other table with nothing, and records inserts, updates and
+ * upserts instead of performing them — the importer's writes are the result.
  */
 let rows = [];
 let writes = [];
+let brands = [];
 
 function builder(table) {
   const q = { table, filters: [], op: "select", row: null, single: false, limit: 0 };
   const run = () => {
-    if (q.op === "insert" || q.op === "update") {
+    if (q.op === "insert" || q.op === "update" || q.op === "upsert") {
       writes.push({ table, op: q.op, row: q.row, filters: q.filters });
       return { data: q.single ? { id: q.op === "insert" ? "new-id" : q.filters.find((f) => f[1] === "id")?.[2] } : [], error: null };
     }
+    if (table === "brands") return { data: brands.map((name) => ({ name })), error: null };
     if (table !== "products") return { data: q.single ? null : [], error: null };
     let out = rows.filter((r) =>
       q.filters.every(([kind, col, val]) => {
@@ -47,6 +50,7 @@ function builder(table) {
         if (prop === "then") return (res, rej) => Promise.resolve(run()).then(res, rej);
         return (...args) => {
           if (prop === "insert") { q.op = "insert"; q.row = args[0]; }
+          else if (prop === "upsert") { q.op = "upsert"; q.row = args[0]; }
           else if (prop === "update") { q.op = "update"; q.row = args[0]; }
           else if (prop === "eq") q.filters.push(["eq", args[0], args[1]]);
           else if (prop === "ilike") q.filters.push(["ilike", args[0], args[1]]);
@@ -72,7 +76,13 @@ module.exports = {
   supabase,
   isSupabaseConfigured: true,
   dbToColorGroup: (r) => r,
-  reset(list) { rows = list.map((r) => ({ ...r })); writes = []; },
+  reset(list, opts = {}) {
+    rows = list.map((r) => ({ ...r }));
+    writes = [];
+    if (opts.brands) brands = [...opts.brands];
+  },
+  /** Brands the importer put on the Brands list. */
+  brandsAdded: () => writes.filter((w) => w.table === "brands" && w.op === "upsert").map((w) => w.row.name),
   inserts: () => writes.filter((w) => w.table === "products" && w.op === "insert"),
   updates: () => writes.filter((w) => w.table === "products" && w.op === "update"),
 };

@@ -1070,23 +1070,54 @@
    * designer as a link to a designer page instead of as a property of the
    * product. The spec table answers this too, and the server reads it from
    * there — this covers the stores with no table either.
+   *
+   * Only the product's own part of the page counts, and of what is there, the
+   * candidate nearest the product's title. Up to 1.0.16 the first match in the
+   * whole document won, and on GOAT that is the menu's first brand link: every
+   * piece collected there came in as "Air Jordan".
    */
   function collectBrandText() {
-    const marked = document.querySelector('[itemprop="brand"]');
-    const markedText = squash(textOf(marked));
-    if (markedText && markedText.length <= 60) return markedText;
-
-    const candidates = document.querySelectorAll(
-      '[class*="brand" i],[class*="designer" i],[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]',
-    );
-    for (const el of candidates) {
+    // The page's own header, menus, footer and pop-ups, and other products'
+    // cards. A <header> inside the product's <article> or <main> is the
+    // product's heading block, not the page's.
+    const furniture = (el) => {
+      if (el.closest(OTHER_PRODUCTS)) return true;
+      const chrome = el.closest(NOT_THIS_PRODUCT);
+      if (!chrome) return false;
+      return !(chrome.matches("header") && chrome.parentElement && chrome.parentElement.closest('main, article, [role="main"]'));
+    };
+    const usable = (el) => {
+      if (furniture(el)) return "";
       const text = squash(textOf(el));
       // A brand is a name, not a sentence, and not the word "Brand" alone.
-      if (!text || text.length < 2 || text.length > 60) continue;
-      if (/^(?:brand|designer|бренд|дизайнер)$/i.test(text)) continue;
+      if (!text || text.length < 2 || text.length > 60) return "";
+      if (/^(?:brand|designer|бренд|дизайнер)$/i.test(text)) return "";
       return text;
+    };
+
+    for (const el of document.querySelectorAll('[itemprop="brand"]')) {
+      const text = usable(el);
+      if (text) return text;
     }
-    return "";
+
+    const candidates = [];
+    for (const el of document.querySelectorAll(
+      '[class*="brand" i],[class*="designer" i],[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]',
+    )) {
+      const text = usable(el);
+      if (text) candidates.push({ el, text });
+    }
+    if (!candidates.length) return "";
+
+    // The title the brand belongs to: the first <h1> that is not page furniture
+    // (some stores put their logo in an <h1> inside the header).
+    const title = [...document.querySelectorAll("h1")].find((h) => !furniture(h) && squash(textOf(h)));
+    if (!title) return candidates[0].text;
+    const top = (el) => el.getBoundingClientRect().top + window.scrollY;
+    const at = top(title);
+    let best = candidates[0];
+    for (const c of candidates) if (Math.abs(top(c.el) - at) < Math.abs(top(best.el) - at)) best = c;
+    return best.text;
   }
 
   /**

@@ -13,6 +13,7 @@
  * matched against that list, never mined for a capitalised word, so an unknown
  * brand stays unknown rather than becoming "Oversized".
  */
+import { escapeRegExp } from "@/lib/text";
 
 /** Values a catalogue row can carry in `brand` that are not a brand. */
 const NOT_A_BRAND = new Set([
@@ -139,13 +140,9 @@ function compact(value: string): string {
   return foldBrand(value).replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
-function escapeRe(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** Is this brand spelled, as whole words, inside `text`? Returns where, or -1. */
 function positionIn(text: string, brand: string): number {
-  const pattern = escapeRe(foldBrand(brand)).replace(/ /g, "\\s+");
+  const pattern = escapeRegExp(foldBrand(brand)).replace(/ /g, "\\s+");
   // Not `\b`: it only knows ASCII letters, so "Кросівки Nike" and "Stüssy"
   // would get their boundaries wrong. A brand must not continue into a letter
   // or digit on either side — "Cos" is not in "Cosy", "Arket" not in "Market".
@@ -194,27 +191,87 @@ export function brandInName(name: string, brands: string[]): string {
   return best;
 }
 
+/**
+ * Models whose maker is not in doubt, for the names that leave the brand out.
+ * GOAT and StockX title a Nike "Dunk Low 'Panda'" and an adidas "Samba OG";
+ * the brand sits in a field of its own, and when that field is missed the name
+ * still says it to anyone who knows the shoe.
+ *
+ * Matched as whole words in the folded name. Deliberately short: a model that
+ * is also an ordinary word ("Blazer", "Boston", "Club") is listed only with the
+ * word that makes it the shoe, and a bare number ("550") only in the
+ * "550 'White Green'" shape sneaker stores give it, never "Levi's 550".
+ */
+const MODEL_MAKERS: [RegExp, string][] = (
+  [
+    ["air jordan|jordan \\d+(?: retro| low| mid| high)?", "Air Jordan"],
+    ["(?:sb )?dunk (?:low|high|mid|sb|pro)|air force 1|air max|blazer (?:low|mid)|cortez|vomero|air zoom pegasus|pegasus \\d+|air huarache|air presto|air foamposite|air more uptempo|air vapormax|air rift|shox|p-6000|v2k run|killshot|air trainer|tech fleece", "Nike"],
+    // Not "Superstar": Golden Goose's best-known shoe has the same name.
+    ["samba|gazelle|campus 00s|stan smith|forum (?:low|mid|high|84)|ultra ?boost|nmd|handball spezial|sl 72|adizero|adilette|ozweego|copa mundial", "adidas"],
+    ["(?:550|530|574|327|990v\\d|991|992|993|1500|2002r|1906r|9060|860v2)(?= ['‘’])", "New Balance"],
+    ["gel-[a-z0-9]+|gt-2160|gt-2000", "ASICS"],
+    ["chuck taylor|chuck 70|run star (?:hike|motion|legacy)|one star", "Converse"],
+    ["old skool|sk8-hi|knu skool", "Vans"],
+    ["xt-6|xt-4|speedcross|acs pro|xa pro", "Salomon"],
+    ["clifton \\d+|bondi \\d+|mafate|speedgoat", "HOKA"],
+    ["tasman|tazz", "UGG"],
+    ["wallabee", "Clarks"],
+    ["club c(?: 85)?", "Reebok"],
+    ["speedcat", "Puma"],
+    ["mexico 66", "Onitsuka Tiger"],
+    ["shadow 6000|grid azura", "Saucony"],
+    ["wave rider", "Mizuno"],
+    ["jadon", "Dr. Martens"],
+    ["nuptse", "The North Face"],
+  ] as [string, string][]
+).map(([models, brand]) => [new RegExp(`(?<![\\p{L}\\p{N}])(?:${models})(?![\\p{L}\\p{N}])`, "u"), brand]);
+
+/**
+ * The maker of a model the name names, in the catalogue's spelling when it has
+ * one ("Adidas" if that is how the catalogue writes it), or "".
+ */
+export function brandFromModel(name: string, known: string[] = []): string {
+  const text = foldBrand(name);
+  for (const [pattern, brand] of MODEL_MAKERS) {
+    if (!pattern.test(text)) continue;
+    return known.find((b) => foldBrand(b) === foldBrand(brand)) ?? brand;
+  }
+  return "";
+}
+
 export interface BrandDecision {
   brand: string;
   /** Set when the name decided it, for the import to say so. */
   fromName?: boolean;
+  /** Set when it was a model in the name rather than the brand's own word. */
+  viaModel?: boolean;
 }
 
 /**
  * The brand to store: the page's own word, unless the name says better.
  *
  * `stated` is what the page (or an admin's recipe) gave as the brand; `host` is
- * the store's address. The name takes over when the page said nothing, when it
- * said the store's own name ("Intertop" on intertop.ua is the shop, not the
- * maker), or when it said something we have never seen as a brand and the name
- * does not repeat. A stated brand the name confirms, or one the catalogue
- * already knows, is kept — structured data is still the store's word.
+ * the store's address. The name says better when it names a known brand, or a
+ * model whose maker is not in doubt (`brandFromModel`), and the page said
+ * nothing, or said the store's own name ("Intertop" on intertop.ua is the shop,
+ * not the maker), or said something we have never seen as a brand.
+ *
+ * `weak` is a brand the page only printed near the product, which the
+ * extension read rather than the page declared. The name beats it whenever the
+ * two differ. Up to here a printed brand the catalogue already knew was kept,
+ * and on GOAT the one printed first was the menu's "Air Jordan": after one
+ * import it was known, and from then on it held for every piece of the run.
+ *
+ * A stated brand the name confirms is kept, and so is one the page declares in
+ * structured data and the catalogue already knows: that is still the store's
+ * word over our reading of a name.
  */
 export function decideBrand(input: {
   stated: string;
   name: string;
   host: string;
   known: string[];
+  weak?: boolean;
 }): BrandDecision {
   const stated = (input.stated ?? "").replace(/\s+/g, " ").trim();
   const statedFold = foldBrand(stated);
@@ -223,20 +280,41 @@ export function decideBrand(input: {
   const canonical =
     (statedFold && input.known.find((b) => foldBrand(b) === statedFold)) || stated;
 
-  const fromName = brandInName(input.name, input.known);
-  if (!fromName || foldBrand(fromName) === statedFold) {
+  const inName = brandInName(input.name, input.known);
+  const named = inName || brandFromModel(input.name, input.known);
+  const viaModel = !inName && !!named;
+  const fromName = (): BrandDecision => ({ brand: named, fromName: true, ...(viaModel ? { viaModel } : {}) });
+
+  if (!named || foldBrand(named) === statedFold) {
     return { brand: NOT_A_BRAND.has(statedFold) ? "" : canonical };
   }
 
-  if (!stated || NOT_A_BRAND.has(statedFold)) return { brand: fromName, fromName: true };
+  if (!stated || NOT_A_BRAND.has(statedFold)) return fromName();
 
   // The name repeats the stated brand: it is confirmed, whatever else it names.
   if (positionIn(input.name, stated) >= 0) return { brand: canonical };
 
+  // Printed, not declared: the name is the better witness.
+  if (input.weak) return fromName();
+
+  // One maker under another of its names ("Nike" for an Air Jordan), or a
+  // model's maker against what the page declares: the page's word.
+  if (brandsAgree(stated, named) || viaModel) return { brand: canonical };
+
   // The store's own name, given as the brand.
   const labels = (input.host ?? "").toLowerCase().split(".").map(compact).filter(Boolean);
-  if (labels.includes(compact(stated))) return { brand: fromName, fromName: true };
+  if (labels.includes(compact(stated))) return fromName();
 
   const statedIsKnown = input.known.some((b) => foldBrand(b) === statedFold);
-  return statedIsKnown ? { brand: canonical } : { brand: fromName, fromName: true };
+  return statedIsKnown ? { brand: canonical } : fromName();
+}
+
+/**
+ * Is this the store's own name rather than a maker's? Used before a brand is
+ * added to the Brands list, so a shop that fills the brand with itself does
+ * not become a brand in the filter.
+ */
+export function isShopName(brand: string, host: string): boolean {
+  const labels = (host ?? "").toLowerCase().split(".").map(compact).filter(Boolean);
+  return labels.includes(compact(brand));
 }
