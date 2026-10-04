@@ -1,9 +1,10 @@
 /**
  * Persist a parsed product into the catalog.
  *
- * Shared by the single-product import route and the bulk crawler. Deduping is by
- * `source_url`: re-importing the same page updates the existing row instead of
- * creating a twin, which is what makes a crawl safe to re-run.
+ * Shared by the single-product import route, the bulk crawler, the collect
+ * extension and the CSV feed import. Deduping is by `source_url`: re-importing
+ * the same page updates the existing row instead of creating a twin, which is
+ * what makes a crawl safe to re-run.
  *
  * Photos are mirrored into our own storage first (see
  * `@/lib/server/storage/product-images`) so the catalog never depends on a
@@ -19,12 +20,8 @@ import {
 } from "@/lib/server/product-fields";
 import { toUsd } from "@/lib/server/fx";
 import { normalizeStyleKeywords } from "@/lib/style-keywords";
-import {
-  chooseGroup,
-  isColorSiblingByName,
-  sameModelFamily,
-  type VariantCandidate,
-} from "./variant-group";
+import { isColorSiblingByName, sameModelFamily, type VariantCandidate } from "./variant-group";
+import { joinColourGroup } from "@/lib/server/colour-group";
 import {
   gtinSpellings,
   isSameItem,
@@ -36,9 +33,10 @@ import {
   type IncomingItem,
   type NamedItem,
 } from "./same-item";
-import { brandSearchWord, brandVocabulary, decideBrand } from "./brand-from-name";
+import { brandSearchWord, brandVocabulary, decideBrand, foldBrand, isShopName } from "./brand-from-name";
 import { articleCodePatterns, articleCodes, modelWord, pieceName } from "./piece-name";
-import { listingKey, urlSpellings } from "./listing-url";
+import { listingKey, sameListing, urlSpellings } from "./listing-url";
+import { buildCatalogueIndex, type CatalogueIndex, type CataloguePiece } from "./catalogue-match";
 import { loadRetailerRules, resolveRetailer, storeDefaultGender } from "@/lib/server/retailer-domains";
 import { loadCatalogueProfile, proposeGender, proposeStyles } from "@/lib/server/catalogue-profile";
 import { mirrorProductImages } from "@/lib/server/storage/product-images";
@@ -102,7 +100,8 @@ async function colorGroupIdsFor(names: string[]): Promise<number[] | undefined> 
 // seconds, and the list changes when an admin adds a brand, not per product.
 
 const BRAND_TTL_MS = 5 * 60_000;
-let brandCache: { at: number; brands: string[] } | null = null;
+/** `curated` is the Brands list alone; `brands` adds what the catalogue carries. */
+let brandCache: { at: number; brands: string[]; curated: string[] } | null = null;
 
 async function loadKnownBrands(): Promise<string[]> {
   if (brandCache && Date.now() - brandCache.at < BRAND_TTL_MS) return brandCache.brands;
@@ -121,20 +120,113 @@ async function loadKnownBrands(): Promise<string[]> {
     /* no connection — no list, and the page's own brand stands as it was */
   }
   const brands = brandVocabulary(curated, catalogue);
-  brandCache = { at: Date.now(), brands };
+  brandCache = { at: Date.now(), brands, curated };
   return brands;
+}
+
+/**
+ * Put a brand on the Brands list if it is not there yet, so a maker first met
+ * in a collect run shows in the brand filter and the Brand Manager without an
+ * admin typing it in. Not the store's own name: a shop that fills the brand
+ * with itself does not become a brand. Returns whether it was added; a list
+ * that cannot be written (no table, no rights) leaves the product as it is.
+ */
+async function ensureBrandListed(brand: string, host: string): Promise<boolean> {
+  const name = brand.replace(/\s+/g, " ").trim();
+  if (!name || name.length > 60 || !/\p{L}/u.test(name) || isShopName(name, host)) return false;
+  // Within the vocabulary's rules: no one-letter "brands", no "Unknown".
+  if (!brandVocabulary([name]).length) return false;
+  await loadKnownBrands();
+  const curated = brandCache?.curated ?? [];
+  if (curated.some((b) => foldBrand(b) === foldBrand(name))) return false;
+  try {
+    const { error } = await supabase!
+      .from("brands")
+      .upsert({ name }, { onConflict: "name", ignoreDuplicates: true });
+    if (error) return false;
+  } catch {
+    return false;
+  }
+  curated.push(name);
+  if (brandCache && !brandCache.brands.some((b) => foldBrand(b) === foldBrand(name))) brandCache.brands.push(name);
+  return true;
+}
+
+/** What the run's row says when a page's link was taken off another variant's card. */
+function unlinkedNote(names: string[]): string {
+  return `its link taken off ${names.map((n) => `"${n}"`).join(", ")} (another variant)`;
+}
+
+// ── The catalogue a links-only run looks for ──────────────────────────────────
+// Every card's name, brand, colour, part number and pages, read once a minute
+// at most: a collect run plans a round every few dozen pages, and the cards it
+// looks for change when a run adds a link, not between two of its rounds.
+
+const CATALOGUE_TTL_MS = 60_000;
+const CATALOGUE_PAGE = 1_000;
+const CATALOGUE_MAX = 20_000;
+let catalogueCache: { at: number; index: CatalogueIndex } | null = null;
+
+/**
+ * Null when the catalogue could not be read at all — the run then opens the
+ * store's pages in its own order, as before, rather than none of them.
+ */
+export async function loadCatalogueIndex(): Promise<CatalogueIndex | null> {
+  if (catalogueCache && Date.now() - catalogueCache.at < CATALOGUE_TTL_MS) return catalogueCache.index;
+  if (!isSupabaseConfigured || !supabase) return null;
+  // The part number exists only with migration 020; without it, the rest.
+  for (const columns of ["name, brand, colors, mpn, source_url, retailers", "name, brand, colors, source_url, retailers"]) {
+    const rows: CataloguePiece[] = [];
+    let failed = false;
+    for (let from = 0; from < CATALOGUE_MAX; from += CATALOGUE_PAGE) {
+      const { data, error } = await supabase
+        .from("products")
+        .select(columns)
+        .order("id")
+        .range(from, from + CATALOGUE_PAGE - 1);
+      if (error) {
+        failed = true;
+        break;
+      }
+      const batch = (data ?? []) as unknown as {
+        name: string | null;
+        brand: string | null;
+        colors: string[] | null;
+        mpn?: string | null;
+        source_url: string | null;
+        retailers: { url?: string }[] | null;
+      }[];
+      for (const r of batch) {
+        rows.push({
+          name: r.name ?? "",
+          brand: r.brand,
+          colors: r.colors,
+          mpn: r.mpn,
+          urls: [r.source_url, ...(Array.isArray(r.retailers) ? r.retailers.map((x) => x?.url) : [])],
+        });
+      }
+      if (batch.length < CATALOGUE_PAGE) break;
+    }
+    if (failed) continue;
+    const index = buildCatalogueIndex(rows);
+    catalogueCache = { at: Date.now(), index };
+    return index;
+  }
+  return null;
 }
 
 // ── Colour variants ───────────────────────────────────────────────────────────
 // One colourway per page is how a store sells; one card per piece is how the
-// catalogue shows. The CSV importer forms those groups inside a batch, but a
-// collect run imports one page at a time, so grouping has to happen against the
+// catalogue shows. Products arrive one at a time — a collect run imports a page,
+// the CSV import a batch of feed rows — so grouping has to happen against the
 // rows already in the table. Two signals, judged in `variant-group.ts`: the
-// addresses the page's own colour row links to, and — only when the store
-// switches colours with script instead of links — brand and base name.
+// addresses the page's own colour row links to (the CSV import passes the feed
+// links of the piece's other colours the same way), and brand and name — the
+// only one that reaches the same piece collected from another store.
 
 interface VariantRow {
   id: string;
+  brand: string | null;
   name: string | null;
   colors: string[] | null;
   category: string | null;
@@ -145,6 +237,7 @@ interface VariantRow {
 function toCandidate(row: VariantRow): VariantCandidate {
   return {
     id: row.id,
+    brand: row.brand,
     name: row.name ?? "",
     colors: row.colors ?? [],
     category: row.category,
@@ -153,7 +246,7 @@ function toCandidate(row: VariantRow): VariantCandidate {
   };
 }
 
-const VARIANT_COLUMNS = "id, name, colors, category, variant_group_id, is_group_primary";
+const VARIANT_COLUMNS = "id, brand, name, colors, category, variant_group_id, is_group_primary";
 
 /**
  * Rows of one brand read for a name comparison. Generous: the comparison runs
@@ -166,6 +259,56 @@ const BRAND_ROWS = 500;
 /** PostgREST pattern metacharacters, so a product named "50% Wool" cannot match everything. */
 function escapeLike(value: string): string {
   return value.replace(/[%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * The reads that find a piece's cards by name, as `ilike` patterns on the
+ * brand and the name columns — one list for both questions asked of a page
+ * (another store's listing of it, and its other colours), so they see the same
+ * cards.
+ *
+ * By the brand's first word, not its whole spelling: "adidas" and "adidas
+ * Originals", "Carhartt" and "Carhartt WIP" are one maker, and an exact match
+ * never showed a card to the other spelling. Narrowed by the model's own word
+ * as well, because a brand with more cards than one read returns hid the very
+ * card the page belongs to. By the model's word alone, whatever the brand
+ * column says: a card saved before its brand was read has none, and a page
+ * whose brand was not read has none either. And by the reduced name's words in
+ * order ("Кросівки Air Max 90" finds "Nike Air Max 90").
+ */
+function nameLookups(brand: string, name: string, colors: string[]): { brand?: string; name?: string }[] {
+  const word = brandSearchWord(brand);
+  const model = modelWord(name, brand, colors);
+  const tokens = pieceName(name, brand, colors).full.split(" ").filter(Boolean);
+  const ordered = tokens.length >= 2 || tokens.some((t) => /\d/.test(t)) ? tokens.slice(0, 5).map(escapeLike).join("%") : "";
+  return [
+    ...(word && model ? [{ brand: `%${escapeLike(word)}%`, name: `%${escapeLike(model)}%` }] : []),
+    ...(word ? [{ brand: `%${escapeLike(word)}%` }] : []),
+    ...(model ? [{ name: `%${escapeLike(model)}%` }] : []),
+    ...(ordered ? [{ name: `%${ordered}%` }] : []),
+  ];
+}
+
+/**
+ * Every spelling of these addresses (`urlSpellings`), in slices short enough
+ * for one `.in()` filter each: a store's colour row links `/p/x` where the card
+ * was saved as `www…/p/x/`, and an exact match missed it.
+ */
+function spellingSlices(urls: string[]): string[][] {
+  const slices: string[][] = [];
+  let slice: string[] = [];
+  let length = 0;
+  for (const spelling of new Set(urls.flatMap((u) => urlSpellings(u)))) {
+    if (slice.length && (slice.length >= 40 || length + spelling.length > 4000)) {
+      slices.push(slice);
+      slice = [];
+      length = 0;
+    }
+    slice.push(spelling);
+    length += spelling.length;
+  }
+  if (slice.length) slices.push(slice);
+  return slices;
 }
 
 /**
@@ -190,39 +333,39 @@ async function linkColorVariants(input: {
 
   try {
     if (input.variantUrls.length) {
-      const { data } = await supabase!
-        .from("products")
-        .select(VARIANT_COLUMNS)
-        .in("source_url", input.variantUrls.slice(0, 20));
       // The page's own colour row, checked once: a link is a colourway only
       // if it can be one. A "you may also like" grid with swatches on its
       // cards read as the colour row, and other jackets joined this one.
       const ours = { name: input.name, colors: input.colors, category: input.category };
-      for (const row of (data ?? []) as VariantRow[]) {
-        if (row.id === input.productId) continue;
-        const candidate = toCandidate(row);
-        if (sameModelFamily(input.brand, ours, candidate)) siblings.set(row.id, candidate);
+      for (const slice of spellingSlices(input.variantUrls.slice(0, 20))) {
+        const { data, error } = await supabase!.from("products").select(VARIANT_COLUMNS).in("source_url", slice);
+        if (error) continue;
+        for (const row of (data ?? []) as unknown as VariantRow[]) {
+          if (row.id === input.productId) continue;
+          const candidate = toCandidate(row);
+          const brands = [input.brand, candidate.brand ?? ""].filter((b) => b.trim());
+          if (sameModelFamily(brands, ours, candidate)) siblings.set(row.id, candidate);
+        }
       }
     }
 
-    // Only when the page named no siblings: a store that links its colourways
-    // has already given the exact answer, and the name test is the guess.
-    if (!siblings.size && input.brand) {
-      // The brand compared without case, so "NIKE" from one store and "Nike"
-      // from another are one brand's rows.
-      const { data } = await supabase!
-        .from("products")
-        .select(VARIANT_COLUMNS)
-        .ilike("brand", escapeLike(input.brand))
-        .limit(BRAND_ROWS);
-      const ours = {
-        brand: input.brand,
-        name: input.name,
-        colors: input.colors,
-        category: input.category,
-      };
-      for (const row of (data ?? []) as VariantRow[]) {
-        if (row.id === input.productId) continue;
+    // By name, on every import: the colour row only ever names this store's
+    // colourways, and the same piece collected from another site — under its
+    // own spelling of the brand, at its own price — is found by name alone.
+    const ours = {
+      brand: input.brand,
+      name: input.name,
+      colors: input.colors,
+      category: input.category,
+    };
+    for (const lookup of nameLookups(input.brand, input.name, input.colors)) {
+      let query = supabase!.from("products").select(VARIANT_COLUMNS);
+      if (lookup.brand) query = query.ilike("brand", lookup.brand);
+      if (lookup.name) query = query.ilike("name", lookup.name);
+      const { data, error } = await query.limit(BRAND_ROWS);
+      if (error) continue;
+      for (const row of (data ?? []) as unknown as VariantRow[]) {
+        if (row.id === input.productId || siblings.has(row.id)) continue;
         const candidate = toCandidate(row);
         if (isColorSiblingByName(ours, candidate)) siblings.set(row.id, candidate);
       }
@@ -233,25 +376,8 @@ async function linkColorVariants(input: {
     // will find this row by its address and form the group then.
     if (!siblings.size) return 0;
 
-    const list = [...siblings.values()];
-    const { groupId, hasPrimary } = chooseGroup(list);
-    const group = groupId ?? crypto.randomUUID();
-
-    const orphans = list.filter((s) => !s.variantGroupId).map((s) => s.id);
-    if (orphans.length) {
-      await supabase!
-        .from("products")
-        .update({ variant_group_id: group })
-        .in("id", orphans.slice(0, 20));
-    }
-
-    const { error } = await supabase!
-      .from("products")
-      .update({ variant_group_id: group, is_group_primary: !hasPrimary })
-      .eq("id", input.productId);
-    if (error) return 0;
-
-    return list.length;
+    const joined = await joinColourGroup([input.productId, ...siblings.keys()], input.productId);
+    return "error" in joined ? 0 : siblings.size;
   } catch {
     return 0;
   }
@@ -376,29 +502,19 @@ async function findSameItemByName(incoming: {
   category: string;
   price: number;
   sourceUrl: string | null;
+  /** A feed's merchant, when the caller named it — see `pickSameItemByName`. */
+  store?: string | null;
   mpn?: string;
-}): Promise<{ item: NamedItem | null; unread: string[]; miss?: string }> {
+  linksOnly?: boolean;
+}): Promise<{ item: NamedItem | null; unread: string[]; miss?: string; stale?: NamedItem[] }> {
   if (!incoming.sourceUrl) return { item: null, unread: [], miss: "no address to add as a store" };
   const codes = articleCodes({ name: "", mpn: incoming.mpn });
   try {
-    // Read by the brand's first word, not its whole spelling: "adidas" and
-    // "adidas Originals", "Carhartt" and "Carhartt WIP" are one maker, and an
-    // exact match never showed a card to the other spelling. And read twice:
-    // once narrowed by the model's own word, because a brand with more cards
-    // than one read returns hid the very card this page belongs to.
-    //
-    // And a third read by the model's word alone, whatever the brand column
-    // says: a card saved before its brand was read has none, and a page whose
-    // brand was not read has none either. `brandsFit` then asks the names.
-    //
-    // And by what needs no brand or long word at all: the card that already
-    // carries this page as a store link; the reduced name's words in order
-    // ("Кросівки Air Max 90" finds "Nike Air Max 90"); the article code, in
-    // the card's part number or its name.
-    const word = brandSearchWord(incoming.brand);
-    const model = modelWord(incoming.name, incoming.brand, incoming.colors);
-    const tokens = pieceName(incoming.name, incoming.brand, incoming.colors).full.split(" ").filter(Boolean);
-    const ordered = tokens.length >= 2 || tokens.some((t) => /\d/.test(t)) ? tokens.slice(0, 5).map(escapeLike).join("%") : "";
+    // The piece's cards by brand and name (`nameLookups`); `brandsFit` then
+    // asks the names. And by what needs no brand or long word at all: the
+    // card that already carries this page as a store link; the article code,
+    // in the card's part number or its name.
+    const lookups = nameLookups(incoming.brand, incoming.name, incoming.colors);
     const codePatterns = [...articleCodePatterns(incoming.name), ...articleCodePatterns(incoming.mpn ?? "")].slice(0, 2);
     const linkedAs = [...new Set([incoming.sourceUrl, `https://${listingKey(incoming.sourceUrl)}`])];
     for (const [pass, columns] of NAME_MATCH_COLUMNS.entries()) {
@@ -412,12 +528,12 @@ async function findSameItemByName(incoming: {
         ...(pass === 0 ? codePatterns.map((code) => products().ilike("mpn", code).limit(50)) : []),
       ];
       const reads = [
-        ...(word && model
-          ? [products().ilike("brand", `%${escapeLike(word)}%`).ilike("name", `%${escapeLike(model)}%`).limit(BRAND_ROWS)]
-          : []),
-        ...(word ? [products().ilike("brand", `%${escapeLike(word)}%`).limit(BRAND_ROWS)] : []),
-        ...(model ? [products().ilike("name", `%${escapeLike(model)}%`).limit(BRAND_ROWS)] : []),
-        ...(ordered ? [products().ilike("name", `%${ordered}%`).limit(BRAND_ROWS)] : []),
+        ...lookups.map((lookup) => {
+          let query = products();
+          if (lookup.brand) query = query.ilike("brand", lookup.brand);
+          if (lookup.name) query = query.ilike("name", lookup.name);
+          return query.limit(BRAND_ROWS);
+        }),
         ...codePatterns.map((code) => products().ilike("name", `%${code}%`).limit(50)),
       ];
       const seen = new Map<string, unknown>();
@@ -446,7 +562,12 @@ async function findSameItemByName(incoming: {
       })[]).map((row) => ({ ...toExisting(row), name: row.name ?? "", category: row.category }));
       const match = pickSameItemByName({ ...incoming, codes }, rows);
       const read = columns.split(",").map((c) => c.trim());
-      return { item: match.item, miss: match.miss, unread: FILL_ONLY_COLUMNS.filter((c) => !read.includes(c)) };
+      return {
+        item: match.item,
+        miss: match.miss,
+        stale: match.stale,
+        unread: FILL_ONLY_COLUMNS.filter((c) => !read.includes(c)),
+      };
     }
   } catch {
     /* no connection — an ordinary insert, as before */
@@ -463,19 +584,43 @@ async function findSameItemByName(incoming: {
  * had added as a second place to buy. B's entry is kept, this page's own entry
  * replaced, and the price range recomputed over every store on the dollar
  * scale (each entry keeps its own currency, so each is converted first).
+ *
+ * `ours` is this source's own entries: one for a page, one per store for a feed
+ * that sells the piece through several merchants.
  */
 async function keepOtherStores(
   dbRow: Record<string, unknown>,
   existing: Product["retailers"],
-  ours: Product["retailers"][number] | undefined,
+  ours: Product["retailers"],
+  sourceUrl: string | null,
+  /** A feed's entries: told apart by the merchant's name, not the link's host. */
+  byName = false,
 ): Promise<Record<string, unknown>> {
-  if (!ours) return dbRow;
-  // Every store that is not this one — told apart by address, not by name:
-  // `nike.com` and `nike.ua` are two stores that both call themselves Nike.
-  const others = existing.filter((r) => r && !isSameRetailer(r, ours));
+  if (!ours.length) return dbRow;
+  // Which of our entries an existing one is. A page's store is told apart by
+  // address, not by name: `nike.com` and `nike.ua` are two stores that both
+  // call themselves Nike. A feed's links all share the affiliate host, so
+  // there the merchant's name decides.
+  const oursIndex = (r: Product["retailers"][number]) =>
+    ours.findIndex((o) => isSameRetailer(r, o, { byName }));
+  const others = existing.filter((r) => r && (!sourceUrl || r.url !== sourceUrl) && oursIndex(r) < 0);
   if (!others.length) return dbRow;
 
-  const row: Record<string, unknown> = { ...dbRow, retailers: withRetailer(existing, ours) };
+  // One place per store of ours, the first it held. The old CSV import wrote an
+  // entry per size link, and `withRetailer` replaces only the first of them, so
+  // the rest would have stayed on as copies of the same shop.
+  const seen = new Set<number>();
+  const kept = existing.filter((r) => {
+    const i = r ? oursIndex(r) : -1;
+    if (i < 0) return true;
+    if (seen.has(i)) return false;
+    seen.add(i);
+    return true;
+  });
+  const row: Record<string, unknown> = {
+    ...dbRow,
+    retailers: ours.reduce((list, entry) => withRetailer(list, entry, { byName }), kept),
+  };
   if (row.currency !== "USD") return row;
 
   const theirs = (
@@ -494,6 +639,25 @@ async function keepOtherStores(
 export interface ImportOptions {
   /** Download photos into Supabase Storage and store our URLs instead. */
   mirrorImages?: boolean;
+  /**
+   * What a re-import does to the row that already has this source URL.
+   *
+   * "replace" (the default — the parser, the crawler, the extension) rewrites
+   * it from the page, keeping only the editor's style and gender. "refresh"
+   * writes just what a feed is the authority on — the price, the stores with
+   * their stock, the sizes — and leaves the name, category, description, tags,
+   * photos and grouping the editor curates after the first import alone. It
+   * also finds the product this link once joined as a second store, and there
+   * writes only this source's stores and the price range they give.
+   */
+  onExisting?: "replace" | "refresh";
+  /**
+   * The "Where to buy" entries, when the caller has resolved them itself: a
+   * feed names its merchant in a column (the link is an affiliate tracker's)
+   * and can sell one piece through several stores. Otherwise the one entry is
+   * derived from the source URL.
+   */
+  retailers?: Product["retailers"];
   /**
    * The page only adds a place to buy. A piece the catalogue already has gains
    * this store's link and price and nothing else; a piece it does not have is
@@ -536,6 +700,48 @@ export interface ImportResult {
   skipped?: string;
   /** What a links-only page did to a card, when it was not a merge. */
   linkNote?: string;
+  /**
+   * Columns the row went in without, because the database does not have them
+   * yet (a migration not run). The product is saved; these fields are not.
+   */
+  droppedColumns?: string[];
+}
+
+/** The migration that adds each optional product column, for the warning below. */
+const COLUMN_MIGRATION: Record<string, string> = {
+  subcategory: "010_product_subcategory.sql",
+  bg_color: "015_product_bg_color.sql",
+  price_min_usd: "019_product_price_usd.sql",
+  price_max_usd: "019_product_price_usd.sql",
+  source_price: "019_product_source_price.sql",
+  source_currency: "019_product_source_price.sql",
+  fx_rate: "019_product_source_price.sql",
+  fx_date: "019_product_source_price.sql",
+  gtin: "020_product_codes.sql",
+  mpn: "020_product_codes.sql",
+  sku: "020_product_codes.sql",
+  color_group_ids: "021_color_groups.sql",
+  crop_data: "023_product_crop_data.sql",
+};
+
+/**
+ * What an import says when the database is a migration behind: which columns
+ * were not stored, and which migration adds them. The write itself succeeded,
+ * so this is a warning to show the admin, not an error.
+ */
+export function droppedColumnsWarning(dropped: readonly string[]): string {
+  const columns = [...new Set(dropped)];
+  const files = [...new Set(columns.map((c) => COLUMN_MIGRATION[c]).filter(Boolean))];
+  // color_images and the variant columns predate supabase/migrations: their
+  // definitions live only in supabase-schema.sql.
+  const unlisted = columns.filter((c) => !COLUMN_MIGRATION[c]);
+  const many = columns.length > 1;
+  const steps = [
+    ...(files.length ? [`run ${files.length > 1 ? "migrations" : "migration"} ${files.join(", ")} from supabase/migrations`] : []),
+    ...(unlisted.length ? [`add ${unlisted.join(", ")} as in supabase-schema.sql`] : []),
+  ].join(", and ");
+  const run = `${steps.charAt(0).toUpperCase()}${steps.slice(1)}.`;
+  return `${many ? "Columns" : "Column"} ${columns.join(", ")} ${many ? "were" : "was"} not saved — the database is missing ${many ? "them" : "it"}. ${run}`;
 }
 
 export async function importParsedProduct(
@@ -622,6 +828,111 @@ export async function importParsedProduct(
     priceNote = "the page never stated a currency — price taken as dollars";
   }
 
+  const sizes = (Array.isArray(p.sizes) ? p.sizes : [])
+    .map((s: unknown) => String(s).trim())
+    .filter(Boolean)
+    .slice(0, 40);
+
+  // ── A feed re-imported over its own rows ────────────────────────────────────
+  // Settled before any photo is downloaded: on this path none is written, and a
+  // feed re-run is mostly rows we already carry.
+  if (opts.onExisting === "refresh" && sourceUrl) {
+    try {
+      type Found = { id: string; retailers: Product["retailers"] | null; source_url: string | null };
+      const { data: found, error: findError } = await supabase
+        .from("products").select("id, retailers, source_url").eq("source_url", sourceUrl).maybeSingle();
+      // Unanswered is not "absent": carrying on would insert a twin of the row
+      // the lookup could not see.
+      if (findError) throw new Error(findError.message);
+      let existing = found as Found | null;
+      // A feed row that once joined another source's product has no row of its
+      // own: its link is one of that product's stores. It is refreshed there —
+      // otherwise every run would download its photos again only to join the
+      // same product, and a store that sold out would stay "in stock".
+      if (!existing) {
+        const { data: joined, error: joinedError } = await supabase
+          .from("products")
+          .select("id, retailers, source_url")
+          .contains("retailers", JSON.stringify([{ url: sourceUrl }]))
+          .order("created_at", { ascending: true })
+          .limit(1);
+        if (joinedError) throw new Error(joinedError.message);
+        existing = ((joined ?? []) as Found[])[0] ?? null;
+      }
+      if (existing) {
+        // The product's own page is another source's: its sizes and source
+        // price are that page's, and only this feed's stores are ours to write.
+        const joinedOther = existing.source_url !== sourceUrl;
+        let ours = opts.retailers ?? [];
+        if (!ours.length) {
+          const store = resolveRetailer(sourceUrl, String(p.brand ?? "").trim(), await loadRetailerRules());
+          ours = [{
+            name: store.name,
+            url: sourceUrl,
+            price: sourcePrice || price,
+            currency: sourceCurrency || currency,
+            availability: "in stock",
+            isOfficial: store.isOfficial,
+          }];
+        }
+        const priceMax = priceOriginal > price ? priceOriginal : price;
+        // The same columns, and the same rules for them, as the full row below.
+        const row: Record<string, unknown> = {
+          price_min: price,
+          price_max: priceMax,
+          currency,
+          price_min_usd: currency === "USD" ? price : null,
+          price_max_usd: currency === "USD" ? priceMax : null,
+          retailers: ours,
+          ...(sourceCurrency && sourceCurrency !== "USD"
+            ? {
+                source_price: sourcePrice,
+                source_currency: sourceCurrency,
+                ...(fxRate !== null ? { fx_rate: fxRate } : {}),
+                ...(fxDate ? { fx_date: fxDate } : {}),
+              }
+            : {}),
+          // A piece sold out everywhere in the feed arrives with no sizes; the
+          // store's entry says so, and the size list stays as it was.
+          ...(sizes.length ? { sizes } : {}),
+        };
+        const id = existing.id;
+        const current = Array.isArray(existing.retailers) ? existing.retailers : [];
+        if (joinedOther) {
+          for (const column of ["sizes", "source_price", "source_currency", "fx_rate", "fx_date"]) {
+            delete row[column];
+          }
+        }
+        const next = await keepOtherStores(row, current, ours, sourceUrl, !!opts.retailers);
+        // A price the product cannot compare (no dollar rate), or one from a
+        // store that has sold out, is not written over another source's price.
+        if (joinedOther && (currency !== "USD" || ours.every((r) => r.availability === "sold out"))) {
+          for (const column of ["price_min", "price_max", "currency", "price_min_usd", "price_max_usd"]) {
+            delete next[column];
+          }
+        }
+        const { data, error, dropped } = await writeProductRow<{ id: string }>(next, (r) =>
+          supabase!.from("products").update(r).eq("id", id).select("id").maybeSingle(),
+        );
+        if (error) throw new Error(error.message);
+        return {
+          ok: true,
+          productId: data?.id ?? id,
+          updated: true,
+          priceNote,
+          ...(dropped.length ? { droppedColumns: dropped } : {}),
+        };
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        productId: null,
+        updated: false,
+        error: err instanceof Error ? err.message : "Update failed",
+      };
+    }
+  }
+
   let images = (Array.isArray(p.images) ? p.images : []).map(httpUrl).filter(Boolean).slice(0, MAX_PRODUCT_IMAGES);
   let imageUrl = httpUrl(p.imageUrl) || images[0] || "";
 
@@ -651,10 +962,6 @@ export async function importParsedProduct(
   // same-item test trusts a stated colour to rule a card out, and a reading
   // only to choose among cards.
   const coloursStated = colors.length > 0;
-  const sizes =(Array.isArray(p.sizes) ? p.sizes : [])
-    .map((s: unknown) => String(s).trim())
-    .filter(Boolean)
-    .slice(0, 40);
 
   // The page's brand, unless the name names a known brand the page did not —
   // the empty brand, or the shop's own name in its place, that a multi-brand
@@ -671,11 +978,22 @@ export async function importParsedProduct(
     name,
     host,
     known: await loadKnownBrands(),
+    // Printed near the product rather than declared: the name overrules it.
+    weak: p.brandFromText === true,
   });
   const brand = brandDecision.brand.slice(0, 80);
-  const brandNote = brandDecision.fromName
-    ? `brand ${brand} from the name${statedBrand ? ` (page said ${statedBrand})` : ""}`
-    : undefined;
+  // New makers join the Brands list on their own. Not on a links-only run,
+  // which creates nothing.
+  const brandListed = brand && !opts.linksOnly ? await ensureBrandListed(brand, host) : false;
+  const brandNote =
+    [
+      brandDecision.fromName
+        ? `brand ${brand} from ${brandDecision.viaModel ? "the model in " : ""}the name${statedBrand ? ` (page said ${statedBrand})` : ""}`
+        : "",
+      brandListed ? `${brand} added to the Brands list` : "",
+    ]
+      .filter(Boolean)
+      .join("; ") || undefined;
 
   // The store's name and its "official store" flag come from the domain rules
   // when the admin has written one, and from the guesses made off the link only
@@ -684,7 +1002,9 @@ export async function importParsedProduct(
   const retailerRules = sourceUrl ? await loadRetailerRules() : new Map();
   const resolved = sourceUrl ? resolveRetailer(sourceUrl, brand, retailerRules) : null;
 
-  const retailers: Product["retailers"] = sourceUrl && resolved
+  const retailers: Product["retailers"] = opts.retailers?.length
+    ? opts.retailers
+    : sourceUrl && resolved
     ? [{
         name: resolved.name,
         url: sourceUrl,
@@ -726,18 +1046,22 @@ export async function importParsedProduct(
   // ── Gender and style: what the page does not say ────────────────────────────
   // A page names its gender or it doesn't; when it doesn't, the store's own
   // convention decides (the admin's setting, then the brand's and the store's
-  // habit in the catalogue). Style is mostly the brand's manner, which no page
-  // spells out. Both are learned from the editor's own labelling — see
-  // `catalogue-profile.ts` for what is trusted and why.
+  // habit in the catalogue). Style: the description decides and the brand
+  // fills in — the built-in brand list, then the brand's and the store's habit.
+  // See `catalogue-profile.ts` for the order and how the two mix.
   const profile = await loadCatalogueProfile();
   let gender = statedGender;
   let genderNote: string | undefined;
   if (!gender) {
+    // A feed's link is the affiliate network's (every Awin merchant is
+    // awin1.com), so its host says nothing about the store: only the brand's
+    // habit is asked.
+    const storeUrl = opts.retailers?.length ? null : sourceUrl;
     const proposal = proposeGender(
       {
         brand,
-        sourceUrl,
-        storeDefault: sourceUrl ? storeDefaultGender(sourceUrl, retailerRules) : undefined,
+        sourceUrl: storeUrl,
+        storeDefault: storeUrl ? storeDefaultGender(storeUrl, retailerRules) : undefined,
       },
       profile,
     );
@@ -747,7 +1071,7 @@ export async function importParsedProduct(
     }
   }
   const styleProposal = proposeStyles(
-    { brand, keywordStyles: normalizeStyleKeywords(p.styleKeywords), colors, colorGroups: groupNames, sourceUrl },
+    { brand, keywordStyles: normalizeStyleKeywords(p.styleKeywords), sourceUrl },
     profile,
   );
   let styleNote = styleProposal.styles.length
@@ -809,12 +1133,14 @@ export async function importParsedProduct(
 
   // Written through `writeProductRow` so a database that has not run the
   // colour-filter migration drops that one column and still takes the product,
-  // instead of every import failing on a column it has never heard of.
+  // instead of every import failing on a column it has never heard of. What was
+  // dropped comes back as `droppedColumns`, for the caller to tell the admin.
   const insert = (row: Record<string, unknown>) =>
     supabase!.from("products").insert(row).select("id").maybeSingle();
 
   let productId: string | null = null;
   let updated = false;
+  let droppedColumns: string[] = [];
   /** Why a new card was made rather than a link added, for the run's row. */
   let newCardNote: string | undefined;
   try {
@@ -850,7 +1176,7 @@ export async function importParsedProduct(
       // Duplicates screen is where the two become one.
       const id = existingId;
       const patch: Record<string, unknown> = retailers[0]
-        ? { retailers: withRetailer(existingRetailers, retailers[0]) }
+        ? { retailers: withRetailer(existingRetailers, retailers[0], { byName: !!opts.retailers }) }
         : {};
       if (Object.keys(patch).length) {
         const { error } = await writeProductRow<{ id: string }>(patch, (r) =>
@@ -870,7 +1196,7 @@ export async function importParsedProduct(
 
     if (existingId) {
       const id = existingId;
-      const row = await keepOtherStores(dbRow, existingRetailers, retailers[0]);
+      const row = await keepOtherStores(dbRow, existingRetailers, retailers, sourceUrl, !!opts.retailers);
       // Style and gender are the editor's to decide. Re-collecting a page used to
       // write whatever the importer guessed over them — an empty style list
       // included — so a store collected twice lost its hand-set tags. They are
@@ -886,12 +1212,13 @@ export async function importParsedProduct(
       // PostgREST reports failures in `error` rather than throwing, so an
       // unchecked update reads as success while writing nothing (the silent
       // failure pattern audit item Б1-3 called out on the billing ledger).
-      const { data, error } = await writeProductRow<{ id: string }>(row, (r) =>
+      const { data, error, dropped } = await writeProductRow<{ id: string }>(row, (r) =>
         supabase!.from("products").update(r).eq("id", id).select("id").maybeSingle(),
       );
       if (error) throw new Error(error.message);
       productId = data?.id ?? id;
       updated = true;
+      droppedColumns = dropped;
     } else {
       // Before writing a new row: is this the same item, sold by someone else?
       //
@@ -918,6 +1245,8 @@ export async function importParsedProduct(
       };
       // By code first — exact where a store prints one — then by name, brand
       // and colour, which is what most stores leave us.
+      /** Cards this page's link was taken off, for the run's row. */
+      const unlinked: string[] = [];
       let twin: ExistingItem | null = await findSameItem(incoming, sourceUrl);
       let mergedBy: ImportResult["mergedBy"] = twin ? "code" : undefined;
       let unread: string[] = [];
@@ -931,9 +1260,21 @@ export async function importParsedProduct(
           category,
           price: incoming.price,
           sourceUrl,
+          store: opts.retailers?.[0]?.name,
           mpn,
+          linksOnly: opts.linksOnly,
         });
         miss = byName.miss;
+        // A run before the name's variant was read may have put this page on
+        // a card of another variant — "(Black/White)" on "(Grey/Black)". Its
+        // link comes off that card; every other store there stays.
+        for (const card of byName.stale ?? []) {
+          const kept = (card.retailers ?? []).filter((r) => !sameListing(r.url, sourceUrl));
+          const { error } = await writeProductRow<{ id: string }>({ retailers: kept }, (row) =>
+            supabase!.from("products").update(row).eq("id", card.id).select("id").maybeSingle(),
+          );
+          if (!error) unlinked.push(card.name);
+        }
         if (byName.item) {
           twin = byName.item;
           unread = byName.unread;
@@ -943,15 +1284,21 @@ export async function importParsedProduct(
 
       if (twin) {
         const twinId = twin.id;
-        const merged = mergePatch(twin, incoming, { linksOnly: opts.linksOnly });
+        const merged = mergePatch(twin, incoming, { linksOnly: opts.linksOnly, byName: !!opts.retailers });
         const patch = merged.patch;
+        // A feed selling the piece through several stores brings them all.
+        if (retailers.length > 1 && Array.isArray(patch.retailers)) {
+          patch.retailers = retailers
+            .slice(1)
+            .reduce((list, entry) => withRetailer(list, entry, { byName: true }), patch.retailers as Product["retailers"]);
+        }
         for (const column of unread) delete patch[column];
         const filled = merged.filled.filter((f) => !unread.includes(f));
         // Merged prices are dollars on both sides, so the comparable scale is
         // the same number.
         if (patch.price_min !== undefined) patch.price_min_usd = patch.price_min;
         if (patch.price_max !== undefined) patch.price_max_usd = patch.price_max;
-        const { error } = await writeProductRow<{ id: string }>(patch, (row) =>
+        const { error, dropped } = await writeProductRow<{ id: string }>(patch, (row) =>
           supabase!.from("products").update(row).eq("id", twinId).select("id").maybeSingle(),
         );
         if (error) throw new Error(error.message);
@@ -969,6 +1316,8 @@ export async function importParsedProduct(
           mergedInto: twinId,
           mergedBy,
           mergedFields: filled,
+          ...(dropped.length ? { droppedColumns: dropped } : {}),
+          ...(unlinked.length ? { linkNote: unlinkedNote(unlinked) } : {}),
         };
       }
 
@@ -979,14 +1328,16 @@ export async function importParsedProduct(
           updated: false,
           priceNote,
           brandNote,
-          skipped: `links only: ${miss ?? "not in the catalogue"}`,
+          skipped: `links only: ${miss ?? "not in the catalogue"}${unlinked.length ? ` · ${unlinkedNote(unlinked)}` : ""}`,
         };
       }
 
-      const { data, error } = await writeProductRow<{ id: string }>(dbRow, insert);
+      const { data, error, dropped } = await writeProductRow<{ id: string }>(dbRow, insert);
       if (error) throw new Error(error.message);
       productId = data?.id ?? null;
+      droppedColumns = dropped;
       if (miss) newCardNote = `new card — ${miss}`;
+      if (unlinked.length) newCardNote = [newCardNote, unlinkedNote(unlinked)].filter(Boolean).join(" · ");
     }
   } catch (err) {
     return {
@@ -1024,17 +1375,6 @@ export async function importParsedProduct(
     });
   }
 
-  // Record an import job (best-effort — table is optional, ignore if absent).
-  if (sourceUrl) {
-    try {
-      await supabase.from("import_jobs").insert({
-        url: sourceUrl,
-        status: "done",
-        result_product_id: productId,
-      });
-    } catch { /* import_jobs not migrated — non-critical */ }
-  }
-
   return {
     ok: true,
     productId,
@@ -1048,6 +1388,7 @@ export async function importParsedProduct(
     genderNote,
     styleNote,
     variantsLinked,
+    ...(droppedColumns.length ? { droppedColumns } : {}),
     ...(newCardNote ? { linkNote: newCardNote } : {}),
   };
 }

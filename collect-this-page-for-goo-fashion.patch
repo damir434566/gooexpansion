@@ -1,5 +1,5 @@
 diff --git a/extension/README.md b/extension/README.md
-index b36df98..029ad3c 100644
+index b36df98..ca21b4e 100644
 --- a/extension/README.md
 +++ b/extension/README.md
 @@ -2,7 +2,7 @@
@@ -7,7 +7,7 @@ index b36df98..029ad3c 100644
  Собирает каталог магазина в Goo Fashion, открывая страницы в твоём браузере:
  твой адрес, твои куки, уже пройденная проверка. Сервер решает, что собирать;
 -расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.3).
-+расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.16).
++расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.17).
  
  **Когда нужно:** магазин отказывает нашему серверу (403, «Access denied»,
  проверка «Just a moment…»), а собрать надо каталог, а не один товар. Для одного
@@ -83,7 +83,7 @@ index b36df98..029ad3c 100644
  Перед каждым товаром — пауза от 1,5 до 2,1 секунды (1,5 с плюс случайная
  добавка до 40 %), потом загрузка самой страницы, и десять секунд передышки
  каждые двадцать страниц. Это не тормоза, а
-@@ -108,11 +136,17 @@ Collect catalog и Parse URL).
+@@ -108,11 +136,18 @@ Collect catalog и Parse URL).
  |---|---|
  | **«Waiting for the extension»** и ничего не происходит | Перезагрузи вкладку приёмника (F5). Так бывает, если она была открыта раньше, чем поставили или обновили расширение. Не помогло — адреса сайта нет в `manifest.json` (см. «Установка»). |
  | В popup: **«Could not reach …/goo-studio/parser/collect»** | Приёмник не ответил за 10 секунд. Ты не вошёл как админ в этом Chrome, в popup неверный адрес Goo Studio, или этого адреса нет в `manifest.json`. Открой приёмник сам, войди, обнови вкладку и попробуй снова. |
@@ -93,6 +93,7 @@ index b36df98..029ad3c 100644
 +| **«Bring the store tab back to the front»** | Ты переключился с вкладки магазина, пока она листалась. Вернись на неё — листание продолжится. Через 5 минут в фоне расширение соберёт то, что успело найти. |
 +| Вместо вещей добавилась одна «вещь» с логотипом магазина | Так было в 1.0.14 на магазинах, которые нумеруют категории как товары (Bershka, Massimo Dutti, Pull&Bear, Rozetka, AboutYou). Обнови расширение до 1.0.15, а лишнюю карточку удали в каталоге. |
 +| Строки `fail` «The page was still loading after 15 s», «The store did not answer in 15 s», «The page did not load (net::…)» | Эту страницу магазин не отдал вовремя или оборвал. Вещь пропущена, сбор пошёл дальше. В конце нажми **Retry N failed**: часто со второго раза открывается. |
++| У вещей с GOAT бренд «Air Jordan», хотя это Nike, adidas и т. д. | Так было до 1.0.17: бренд брался из меню сайта. Обнови расширение и сайт, затем собери ту же категорию ещё раз — бренды пересчитаются. |
 +| **«No pieces were found on this page»** | На странице нет сетки товаров (главная, статья, корзина). Открой категорию, бренд или поиск. |
 +| Нашлось меньше, чем показывает магазин | Если карточки подгружаются только по кнопке, которую расширение не узнало, нажми её сам до старта столько раз, сколько нужно, и запускай. |
  | **«…usually a sign-in redirect»** | Вкладку приёмника увело на вход. Войди в Goo Studio админом, открой Parser → Collect и запусти снова. |
@@ -103,7 +104,7 @@ index b36df98..029ad3c 100644
  | **«Open a store page in this tab first.»** | Popup открыт не на странице магазина. Перейди на магазин и открой popup там. |
  | **«A run is already going.»** | Прогон уже идёт. Дождись конца или нажми Stop. |
  | Строки `fail` с причиной **Unauthorized** (или плашка «Unauthorized» в начале прогона) | Кончилась сессия админа. Войди заново во вкладке приёмника. |
-@@ -162,4 +196,6 @@ Collect catalog и Parse URL).
+@@ -162,4 +197,6 @@ Collect catalog и Parse URL).
  | `background.js` | Фоновый работник: robots.txt и sitemap, открытие страниц, темп, отказы, Stop. |
  | `snapshot.js` | Вставляется в страницу магазина: прокручивает, очищает, собирает фото, цену, размеры, цвет и остальное. |
  | `bridge.js` | Работает на вкладке-приёмнике: передаёт сообщения между расширением и страницей. |
@@ -1630,7 +1631,7 @@ index 0000000..09852b0
 +  return `<!doctype html><html><head>${head.join("\n")}</head><body>\n${body.join("\n")}\n</body></html>`;
 +}
 diff --git a/extension/manifest.json b/extension/manifest.json
-index 5e65ffa..801b054 100644
+index 5e65ffa..e5f5aec 100644
 --- a/extension/manifest.json
 +++ b/extension/manifest.json
 @@ -1,7 +1,7 @@
@@ -1638,7 +1639,7 @@ index 5e65ffa..801b054 100644
    "manifest_version": 3,
    "name": "Goo Collect",
 -  "version": "1.0.12",
-+  "version": "1.0.16",
++  "version": "1.0.17",
    "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
    "minimum_chrome_version": "116",
    "permissions": [
@@ -2056,6 +2057,76 @@ index 0000000..c663678
 +  }
 +  return batch;
 +}
+diff --git a/extension/snapshot.js b/extension/snapshot.js
+index a906491..f60ebab 100644
+--- a/extension/snapshot.js
++++ b/extension/snapshot.js
+@@ -1070,23 +1070,54 @@
+    * designer as a link to a designer page instead of as a property of the
+    * product. The spec table answers this too, and the server reads it from
+    * there — this covers the stores with no table either.
++   *
++   * Only the product's own part of the page counts, and of what is there, the
++   * candidate nearest the product's title. Up to 1.0.16 the first match in the
++   * whole document won, and on GOAT that is the menu's first brand link: every
++   * piece collected there came in as "Air Jordan".
+    */
+   function collectBrandText() {
+-    const marked = document.querySelector('[itemprop="brand"]');
+-    const markedText = squash(textOf(marked));
+-    if (markedText && markedText.length <= 60) return markedText;
+-
+-    const candidates = document.querySelectorAll(
+-      '[class*="brand" i],[class*="designer" i],[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]',
+-    );
+-    for (const el of candidates) {
++    // The page's own header, menus, footer and pop-ups, and other products'
++    // cards. A <header> inside the product's <article> or <main> is the
++    // product's heading block, not the page's.
++    const furniture = (el) => {
++      if (el.closest(OTHER_PRODUCTS)) return true;
++      const chrome = el.closest(NOT_THIS_PRODUCT);
++      if (!chrome) return false;
++      return !(chrome.matches("header") && chrome.parentElement && chrome.parentElement.closest('main, article, [role="main"]'));
++    };
++    const usable = (el) => {
++      if (furniture(el)) return "";
+       const text = squash(textOf(el));
+       // A brand is a name, not a sentence, and not the word "Brand" alone.
+-      if (!text || text.length < 2 || text.length > 60) continue;
+-      if (/^(?:brand|designer|бренд|дизайнер)$/i.test(text)) continue;
++      if (!text || text.length < 2 || text.length > 60) return "";
++      if (/^(?:brand|designer|бренд|дизайнер)$/i.test(text)) return "";
+       return text;
++    };
++
++    for (const el of document.querySelectorAll('[itemprop="brand"]')) {
++      const text = usable(el);
++      if (text) return text;
+     }
+-    return "";
++
++    const candidates = [];
++    for (const el of document.querySelectorAll(
++      '[class*="brand" i],[class*="designer" i],[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]',
++    )) {
++      const text = usable(el);
++      if (text) candidates.push({ el, text });
++    }
++    if (!candidates.length) return "";
++
++    // The title the brand belongs to: the first <h1> that is not page furniture
++    // (some stores put their logo in an <h1> inside the header).
++    const title = [...document.querySelectorAll("h1")].find((h) => !furniture(h) && squash(textOf(h)));
++    if (!title) return candidates[0].text;
++    const top = (el) => el.getBoundingClientRect().top + window.scrollY;
++    const at = top(title);
++    let best = candidates[0];
++    for (const c of candidates) if (Math.abs(top(c.el) - at) < Math.abs(top(best.el) - at)) best = c;
++    return best.text;
+   }
+ 
+   /**
 diff --git a/src/app/goo-studio/parser/collect/page.tsx b/src/app/goo-studio/parser/collect/page.tsx
 index 4e449f4..aa6cd74 100644
 --- a/src/app/goo-studio/parser/collect/page.tsx
@@ -2215,3 +2286,308 @@ index 4e449f4..aa6cd74 100644
              {photos > 0 && (
                <p className="text-[10px] text-[var(--foreground-subtle)]">
                  {photos} photo{photos === 1 ? "" : "s"} copied to our storage
+diff --git a/src/lib/server/parser/brand-from-name.ts b/src/lib/server/parser/brand-from-name.ts
+index 8011f25..0d7bf3d 100644
+--- a/src/lib/server/parser/brand-from-name.ts
++++ b/src/lib/server/parser/brand-from-name.ts
+@@ -191,27 +191,87 @@ export function brandInName(name: string, brands: string[]): string {
+   return best;
+ }
+ 
++/**
++ * Models whose maker is not in doubt, for the names that leave the brand out.
++ * GOAT and StockX title a Nike "Dunk Low 'Panda'" and an adidas "Samba OG";
++ * the brand sits in a field of its own, and when that field is missed the name
++ * still says it to anyone who knows the shoe.
++ *
++ * Matched as whole words in the folded name. Deliberately short: a model that
++ * is also an ordinary word ("Blazer", "Boston", "Club") is listed only with the
++ * word that makes it the shoe, and a bare number ("550") only in the
++ * "550 'White Green'" shape sneaker stores give it, never "Levi's 550".
++ */
++const MODEL_MAKERS: [RegExp, string][] = (
++  [
++    ["air jordan|jordan \\d+(?: retro| low| mid| high)?", "Air Jordan"],
++    ["(?:sb )?dunk (?:low|high|mid|sb|pro)|air force 1|air max|blazer (?:low|mid)|cortez|vomero|air zoom pegasus|pegasus \\d+|air huarache|air presto|air foamposite|air more uptempo|air vapormax|air rift|shox|p-6000|v2k run|killshot|air trainer|tech fleece", "Nike"],
++    // Not "Superstar": Golden Goose's best-known shoe has the same name.
++    ["samba|gazelle|campus 00s|stan smith|forum (?:low|mid|high|84)|ultra ?boost|nmd|handball spezial|sl 72|adizero|adilette|ozweego|copa mundial", "adidas"],
++    ["(?:550|530|574|327|990v\\d|991|992|993|1500|2002r|1906r|9060|860v2)(?= ['‘’])", "New Balance"],
++    ["gel-[a-z0-9]+|gt-2160|gt-2000", "ASICS"],
++    ["chuck taylor|chuck 70|run star (?:hike|motion|legacy)|one star", "Converse"],
++    ["old skool|sk8-hi|knu skool", "Vans"],
++    ["xt-6|xt-4|speedcross|acs pro|xa pro", "Salomon"],
++    ["clifton \\d+|bondi \\d+|mafate|speedgoat", "HOKA"],
++    ["tasman|tazz", "UGG"],
++    ["wallabee", "Clarks"],
++    ["club c(?: 85)?", "Reebok"],
++    ["speedcat", "Puma"],
++    ["mexico 66", "Onitsuka Tiger"],
++    ["shadow 6000|grid azura", "Saucony"],
++    ["wave rider", "Mizuno"],
++    ["jadon", "Dr. Martens"],
++    ["nuptse", "The North Face"],
++  ] as [string, string][]
++).map(([models, brand]) => [new RegExp(`(?<![\\p{L}\\p{N}])(?:${models})(?![\\p{L}\\p{N}])`, "u"), brand]);
++
++/**
++ * The maker of a model the name names, in the catalogue's spelling when it has
++ * one ("Adidas" if that is how the catalogue writes it), or "".
++ */
++export function brandFromModel(name: string, known: string[] = []): string {
++  const text = foldBrand(name);
++  for (const [pattern, brand] of MODEL_MAKERS) {
++    if (!pattern.test(text)) continue;
++    return known.find((b) => foldBrand(b) === foldBrand(brand)) ?? brand;
++  }
++  return "";
++}
++
+ export interface BrandDecision {
+   brand: string;
+   /** Set when the name decided it, for the import to say so. */
+   fromName?: boolean;
++  /** Set when it was a model in the name rather than the brand's own word. */
++  viaModel?: boolean;
+ }
+ 
+ /**
+  * The brand to store: the page's own word, unless the name says better.
+  *
+  * `stated` is what the page (or an admin's recipe) gave as the brand; `host` is
+- * the store's address. The name takes over when the page said nothing, when it
+- * said the store's own name ("Intertop" on intertop.ua is the shop, not the
+- * maker), or when it said something we have never seen as a brand and the name
+- * does not repeat. A stated brand the name confirms, or one the catalogue
+- * already knows, is kept — structured data is still the store's word.
++ * the store's address. The name says better when it names a known brand, or a
++ * model whose maker is not in doubt (`brandFromModel`), and the page said
++ * nothing, or said the store's own name ("Intertop" on intertop.ua is the shop,
++ * not the maker), or said something we have never seen as a brand.
++ *
++ * `weak` is a brand the page only printed near the product, which the
++ * extension read rather than the page declared. The name beats it whenever the
++ * two differ. Up to here a printed brand the catalogue already knew was kept,
++ * and on GOAT the one printed first was the menu's "Air Jordan": after one
++ * import it was known, and from then on it held for every piece of the run.
++ *
++ * A stated brand the name confirms is kept, and so is one the page declares in
++ * structured data and the catalogue already knows: that is still the store's
++ * word over our reading of a name.
+  */
+ export function decideBrand(input: {
+   stated: string;
+   name: string;
+   host: string;
+   known: string[];
++  weak?: boolean;
+ }): BrandDecision {
+   const stated = (input.stated ?? "").replace(/\s+/g, " ").trim();
+   const statedFold = foldBrand(stated);
+@@ -220,20 +280,41 @@ export function decideBrand(input: {
+   const canonical =
+     (statedFold && input.known.find((b) => foldBrand(b) === statedFold)) || stated;
+ 
+-  const fromName = brandInName(input.name, input.known);
+-  if (!fromName || foldBrand(fromName) === statedFold) {
++  const inName = brandInName(input.name, input.known);
++  const named = inName || brandFromModel(input.name, input.known);
++  const viaModel = !inName && !!named;
++  const fromName = (): BrandDecision => ({ brand: named, fromName: true, ...(viaModel ? { viaModel } : {}) });
++
++  if (!named || foldBrand(named) === statedFold) {
+     return { brand: NOT_A_BRAND.has(statedFold) ? "" : canonical };
+   }
+ 
+-  if (!stated || NOT_A_BRAND.has(statedFold)) return { brand: fromName, fromName: true };
++  if (!stated || NOT_A_BRAND.has(statedFold)) return fromName();
+ 
+   // The name repeats the stated brand: it is confirmed, whatever else it names.
+   if (positionIn(input.name, stated) >= 0) return { brand: canonical };
+ 
++  // Printed, not declared: the name is the better witness.
++  if (input.weak) return fromName();
++
++  // One maker under another of its names ("Nike" for an Air Jordan), or a
++  // model's maker against what the page declares: the page's word.
++  if (brandsAgree(stated, named) || viaModel) return { brand: canonical };
++
+   // The store's own name, given as the brand.
+   const labels = (input.host ?? "").toLowerCase().split(".").map(compact).filter(Boolean);
+-  if (labels.includes(compact(stated))) return { brand: fromName, fromName: true };
++  if (labels.includes(compact(stated))) return fromName();
+ 
+   const statedIsKnown = input.known.some((b) => foldBrand(b) === statedFold);
+-  return statedIsKnown ? { brand: canonical } : { brand: fromName, fromName: true };
++  return statedIsKnown ? { brand: canonical } : fromName();
++}
++
++/**
++ * Is this the store's own name rather than a maker's? Used before a brand is
++ * added to the Brands list, so a shop that fills the brand with itself does
++ * not become a brand in the filter.
++ */
++export function isShopName(brand: string, host: string): boolean {
++  const labels = (host ?? "").toLowerCase().split(".").map(compact).filter(Boolean);
++  return labels.includes(compact(brand));
+ }
+diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
+index c7ed935..c5b72e8 100644
+--- a/src/lib/server/parser/extract.ts
++++ b/src/lib/server/parser/extract.ts
+@@ -1053,14 +1053,19 @@ export function extractProduct(
+     heading.title,
+   ].filter((v): v is string => !!v && !!v.trim());
+   const name = nameCandidates.find((v) => !isShopName(v)) ?? nameCandidates[0];
+-  const brand = pick(
++  const declaredBrand = pick(
+     ruleVal("brand"),
+     jsonld.brand,
+     meta.brand,
+     micro.brand,
+     specValue(evidence?.specs, BRAND_KEYS),
+-    evidence?.brandText,
+   );
++  const brand = pick(declaredBrand, evidence?.brandText);
++  // Only what the page printed near the product, as the extension read it,
++  // rather than anything it declares. The importer lets the product's name
++  // overrule it (`decideBrand`): read off the wrong element (GOAT's menu, up to
++  // extension 1.0.16), it put "Air Jordan" on every piece of a run.
++  const brandFromText = !!brand && !declaredBrand;
+ 
+   // Structured data routinely advertises a single photo for a page that shows
+   // a full gallery (an OpenGraph-only page always does — there is one og:image).
+@@ -1087,6 +1092,7 @@ export function extractProduct(
+     // designer as a link rather than a property puts it — the spec table, and
+     // whatever the page marks as the brand.
+     brand,
++    ...(brandFromText ? { brandFromText } : {}),
+     // The trail, from the markup and from the rendered page. The markup's own
+     // BreadcrumbList wins: it is data rather than a reading of the layout.
+     breadcrumbs: (() => {
+diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
+index ad89dee..7ffae10 100644
+--- a/src/lib/server/parser/import-product.ts
++++ b/src/lib/server/parser/import-product.ts
+@@ -33,7 +33,7 @@ import {
+   type IncomingItem,
+   type NamedItem,
+ } from "./same-item";
+-import { brandSearchWord, brandVocabulary, decideBrand } from "./brand-from-name";
++import { brandSearchWord, brandVocabulary, decideBrand, foldBrand, isShopName } from "./brand-from-name";
+ import { articleCodePatterns, articleCodes, modelWord, pieceName } from "./piece-name";
+ import { listingKey, sameListing, urlSpellings } from "./listing-url";
+ import { buildCatalogueIndex, type CatalogueIndex, type CataloguePiece } from "./catalogue-match";
+@@ -100,7 +100,8 @@ async function colorGroupIdsFor(names: string[]): Promise<number[] | undefined>
+ // seconds, and the list changes when an admin adds a brand, not per product.
+ 
+ const BRAND_TTL_MS = 5 * 60_000;
+-let brandCache: { at: number; brands: string[] } | null = null;
++/** `curated` is the Brands list alone; `brands` adds what the catalogue carries. */
++let brandCache: { at: number; brands: string[]; curated: string[] } | null = null;
+ 
+ async function loadKnownBrands(): Promise<string[]> {
+   if (brandCache && Date.now() - brandCache.at < BRAND_TTL_MS) return brandCache.brands;
+@@ -119,10 +120,38 @@ async function loadKnownBrands(): Promise<string[]> {
+     /* no connection — no list, and the page's own brand stands as it was */
+   }
+   const brands = brandVocabulary(curated, catalogue);
+-  brandCache = { at: Date.now(), brands };
++  brandCache = { at: Date.now(), brands, curated };
+   return brands;
+ }
+ 
++/**
++ * Put a brand on the Brands list if it is not there yet, so a maker first met
++ * in a collect run shows in the brand filter and the Brand Manager without an
++ * admin typing it in. Not the store's own name: a shop that fills the brand
++ * with itself does not become a brand. Returns whether it was added; a list
++ * that cannot be written (no table, no rights) leaves the product as it is.
++ */
++async function ensureBrandListed(brand: string, host: string): Promise<boolean> {
++  const name = brand.replace(/\s+/g, " ").trim();
++  if (!name || name.length > 60 || !/\p{L}/u.test(name) || isShopName(name, host)) return false;
++  // Within the vocabulary's rules: no one-letter "brands", no "Unknown".
++  if (!brandVocabulary([name]).length) return false;
++  await loadKnownBrands();
++  const curated = brandCache?.curated ?? [];
++  if (curated.some((b) => foldBrand(b) === foldBrand(name))) return false;
++  try {
++    const { error } = await supabase!
++      .from("brands")
++      .upsert({ name }, { onConflict: "name", ignoreDuplicates: true });
++    if (error) return false;
++  } catch {
++    return false;
++  }
++  curated.push(name);
++  if (brandCache && !brandCache.brands.some((b) => foldBrand(b) === foldBrand(name))) brandCache.brands.push(name);
++  return true;
++}
++
+ /** What the run's row says when a page's link was taken off another variant's card. */
+ function unlinkedNote(names: string[]): string {
+   return `its link taken off ${names.map((n) => `"${n}"`).join(", ")} (another variant)`;
+@@ -949,11 +978,22 @@ export async function importParsedProduct(
+     name,
+     host,
+     known: await loadKnownBrands(),
++    // Printed near the product rather than declared: the name overrules it.
++    weak: p.brandFromText === true,
+   });
+   const brand = brandDecision.brand.slice(0, 80);
+-  const brandNote = brandDecision.fromName
+-    ? `brand ${brand} from the name${statedBrand ? ` (page said ${statedBrand})` : ""}`
+-    : undefined;
++  // New makers join the Brands list on their own. Not on a links-only run,
++  // which creates nothing.
++  const brandListed = brand && !opts.linksOnly ? await ensureBrandListed(brand, host) : false;
++  const brandNote =
++    [
++      brandDecision.fromName
++        ? `brand ${brand} from ${brandDecision.viaModel ? "the model in " : ""}the name${statedBrand ? ` (page said ${statedBrand})` : ""}`
++        : "",
++      brandListed ? `${brand} added to the Brands list` : "",
++    ]
++      .filter(Boolean)
++      .join("; ") || undefined;
+ 
+   // The store's name and its "official store" flag come from the domain rules
+   // when the admin has written one, and from the guesses made off the link only
+diff --git a/src/lib/server/parser/normalize.ts b/src/lib/server/parser/normalize.ts
+index 6de6b5a..580feb2 100644
+--- a/src/lib/server/parser/normalize.ts
++++ b/src/lib/server/parser/normalize.ts
+@@ -254,6 +254,8 @@ export function normalizeExtract(
+   return {
+     name,
+     brand,
++    // An admin's override is their word, not the page's guess.
++    ...(raw.brandFromText && !config?.brandOverride ? { brandFromText: true } : {}),
+     category,
+     gender,
+     description: raw.description ?? "",
+diff --git a/src/lib/server/parser/types.ts b/src/lib/server/parser/types.ts
+index 78fc05a..ffad77b 100644
+--- a/src/lib/server/parser/types.ts
++++ b/src/lib/server/parser/types.ts
+@@ -197,6 +197,11 @@ export interface PageEvidence {
+ export interface RawExtract {
+   name?: string;
+   brand?: string;
++  /**
++   * The brand is only what the page printed near the product (the extension's
++   * `brandText`), not anything it declares. Weaker than the product's name.
++   */
++  brandFromText?: boolean;
+   price?: string;
+   priceOriginal?: string;
+   currency?: string;
+@@ -237,6 +242,8 @@ export interface RawExtract {
+ export interface ParsedProduct {
+   name: string;
+   brand: string;
++  /** See `RawExtract.brandFromText`: the importer lets the name overrule such a brand. */
++  brandFromText?: boolean;
+   category: Category;
+   /**
+    * The tree's label for what this piece is — "Bomber Jackets", "Sneakers".

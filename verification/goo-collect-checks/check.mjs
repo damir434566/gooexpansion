@@ -41,6 +41,8 @@ const routes = {
   "/ua/shopping/women/gucci-horsebit-1955-shoulder-bag-item-19356833.aspx": ["text/html; charset=utf-8", page("ff-product.html")],
   "/ua/shopping/women/denied-item-19356833.aspx": ["text/html; charset=utf-8", page("bot-check.html")],
   "/ua/shopping/women/hold-item-19356833.aspx": ["text/html; charset=utf-8", page("press-hold.html")],
+  "/sneakers/dunk-low-panda": ["text/html; charset=utf-8", page("goat.html")],
+  "/sneakers/new-balance-550-white-green": ["text/html; charset=utf-8", page("goat-brand.html")],
 };
 const server = createServer((req, res) => {
   const hit = routes[req.url.split("?")[0]];
@@ -183,6 +185,19 @@ cases.push(
     name: "PerimeterX «Press & Hold» — не товар",
     path: "/ua/shopping/women/hold-item-19356833.aspx",
     check: (r) => [["botCheck найден", !!r.botCheck, true], ["html не отправляется", r.html, ""]],
+  },
+);
+
+cases.push(
+  {
+    name: "GOAT: бренд не из меню, «похожих» и подвала (было «Air Jordan» у каждой вещи)",
+    path: "/sneakers/dunk-low-panda",
+    check: (r) => [["brandText", r.brandText, ""]],
+  },
+  {
+    name: "Бренд рядом с названием, в шапке самого товара (<header> внутри <article>)",
+    path: "/sneakers/new-balance-550-white-green",
+    check: (r) => [["brandText", r.brandText, "New Balance"]],
   },
 );
 

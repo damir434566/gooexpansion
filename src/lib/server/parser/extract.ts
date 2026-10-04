@@ -1053,14 +1053,19 @@ export function extractProduct(
     heading.title,
   ].filter((v): v is string => !!v && !!v.trim());
   const name = nameCandidates.find((v) => !isShopName(v)) ?? nameCandidates[0];
-  const brand = pick(
+  const declaredBrand = pick(
     ruleVal("brand"),
     jsonld.brand,
     meta.brand,
     micro.brand,
     specValue(evidence?.specs, BRAND_KEYS),
-    evidence?.brandText,
   );
+  const brand = pick(declaredBrand, evidence?.brandText);
+  // Only what the page printed near the product, as the extension read it,
+  // rather than anything it declares. The importer lets the product's name
+  // overrule it (`decideBrand`): read off the wrong element (GOAT's menu, up to
+  // extension 1.0.16), it put "Air Jordan" on every piece of a run.
+  const brandFromText = !!brand && !declaredBrand;
 
   // Structured data routinely advertises a single photo for a page that shows
   // a full gallery (an OpenGraph-only page always does — there is one og:image).
@@ -1087,6 +1092,7 @@ export function extractProduct(
     // designer as a link rather than a property puts it — the spec table, and
     // whatever the page marks as the brand.
     brand,
+    ...(brandFromText ? { brandFromText } : {}),
     // The trail, from the markup and from the rendered page. The markup's own
     // BreadcrumbList wins: it is data rather than a reading of the layout.
     breadcrumbs: (() => {
