@@ -21,6 +21,10 @@
  *            its categories) and at `/c/coats`, whose markup calls it one
  *            product (og:type product, a Product with an AggregateOffer).
  *            Product pages here carry a "You may also like" rail of three.
+ *   slow   — seven products, three of them the kind that used to hold a run
+ *            up: s2 is a good page with a tracker that never finishes loading
+ *            (the tab never reaches "complete"), s3 never answers at all, s4
+ *            drops the connection. The studio stub takes 8 s to import s6.
  *   bigmap — sitemaps the size Farfetch's are: an index naming three product
  *            sitemaps that list every address in ten languages, about 90 MB
  *            between them. The category page links two products; the other
@@ -50,6 +54,7 @@ const SPA_PATHS = [
 function products() {
   if (mode === "many") return Array.from({ length: 21 }, (_, i) => `p${i + 1}`);
   if (mode === "page") return Array.from({ length: PAGE_TOTAL }, (_, i) => `jacket-${i + 1}`);
+  if (mode === "slow") return ["s1", "s2", "s3", "s4", "s5", "s6", "s7"];
   return ["alpha", "beta", "gamma", "delta", "secret-hidden"];
 }
 
@@ -211,7 +216,7 @@ function robots() {
   const lines = ["User-agent: Googlebot", "Disallow:", "", "User-agent: *"];
   // A path the run must never open. If it does, the test fails loudly.
   lines.push("Disallow: /product/secret-");
-  if (mode !== "many" && mode !== "spa" && mode !== "bigmap" && mode !== "page") lines.push("Crawl-delay: 2");
+  if (!["many", "spa", "bigmap", "page", "slow"].includes(mode)) lines.push("Crawl-delay: 2");
   lines.push("", `Sitemap: ${ORIGIN}/sitemap.xml`);
   return lines.join("\n") + "\n";
 }
@@ -468,6 +473,20 @@ const server = http.createServer((req, res) => {
   };
 
   if (p === "/robots.txt") return send(200, "text/plain", robots());
+
+  if (mode === "slow") {
+    // A tracker that never answers: the page stays "loading" for as long as
+    // anyone waits. The request is simply never ended.
+    if (p === "/hang") return undefined;
+    if (p === "/product/s3") return undefined;
+    if (p === "/product/s4") {
+      req.socket.destroy();
+      return undefined;
+    }
+    if (p === "/product/s2") {
+      return send(200, "text/html", productPage("s2").replace("</body>", `<img src="${ORIGIN}/hang" alt=""></body>`));
+    }
+  }
 
   if (mode === "page") {
     const listing = PAGE_LISTINGS[p];

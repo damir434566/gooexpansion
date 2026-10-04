@@ -1085,6 +1085,63 @@ async function main() {
   }
   collect.close();
 
+  // ── Run S: pages that fail, and pages that only look like they do ─────────
+  //
+  // A page that does not load used to hold the run for 45 s before it was
+  // counted as failed — and a good page with one tracker that never finished
+  // was one of them. Two of those in a row and the run seemed to stop. Now a
+  // page is read once its own markup is in, a page that does not answer is
+  // skipped after 15 s, a dropped connection at once, and a slow import on the
+  // site no longer keeps the next page from opening.
+  console.log("\n— run S: failing and slow pages are skipped, not waited out —");
+  await storeControl({ mode: "slow", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  popup = await openPopup(extId);
+  {
+    const started = Date.now();
+    await popup.evaluate(
+      `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:7}})`,
+    );
+    let st = null;
+    for (let i = 0; i < 240; i++) {
+      await sleep(1000);
+      st = await popup.evaluate("chrome.runtime.sendMessage({type:'state'})");
+      if (st && !st.running && i > 1) break;
+    }
+    const took = Math.round((Date.now() - started) / 1000);
+    const { imported: importedS, events: evS } = await studioEvents();
+    const logS = (await storeLog()).log;
+    const last = await popup.evaluate("chrome.storage.local.get('lastRun').then((s) => s.lastRun)");
+    const reasons = Object.fromEntries((last?.failures || []).map((f) => [f.url.replace(/^.*\/product\//, ""), f.reason]));
+    const names = importedS.map((i) => i.url.replace(/^.*\/product\//, "")).sort();
+    check("run S went on to the end rather than stopping", !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    check(
+      "the good page with a tracker that never finishes was read, not failed",
+      names.includes("s2"),
+      JSON.stringify(names),
+    );
+    check("every page after the failures was collected too", ["s5", "s6", "s7"].every((n) => names.includes(n)), JSON.stringify(names));
+    check("the page that never answered was skipped, with a reason", /did not answer|did not load/i.test(reasons.s3 || ""), JSON.stringify(reasons));
+    check("the dropped connection was skipped, with a reason", /ERR_|did not load/i.test(reasons.s4 || ""), JSON.stringify(reasons));
+    // Seconds from one page being opened to the next: each includes the
+    // 1.5–2.1 s pause between pages. Up to 1.0.15 the first two were 45 s each.
+    const openedAt = (n) => (logS.find((l) => l.path === `/product/${n}`) || {}).at || 0;
+    const gap = (a, b) => Math.round((openedAt(b) - openedAt(a)) / 100) / 10;
+    const gaps = { "s2→s3": gap("s2", "s3"), "s3→s4": gap("s3", "s4"), "s4→s5": gap("s4", "s5"), took };
+    check("the good page with a tracker that never finishes was read within seconds", gaps["s2→s3"] > 0 && gaps["s2→s3"] < 12, JSON.stringify(gaps));
+    check("the page that never answered was given up after 15 s, not 45", gaps["s3→s4"] > 0 && gaps["s3→s4"] < 21, JSON.stringify(gaps));
+    check("the dropped connection was skipped at once", gaps["s4→s5"] > 0 && gaps["s4→s5"] < 6, JSON.stringify(gaps));
+    const s7Opened = (logS.find((l) => l.path === "/product/s7") || {}).at || Infinity;
+    const s6Imported = (evS.find((e) => e.kind === "ingest" && /\/product\/s6$/.test(e.detail.url)) || {}).at || 0;
+    check(
+      "a slow import on the site did not keep the next page from opening",
+      s6Imported > 0 && s7Opened < s6Imported,
+      JSON.stringify({ s7Opened, s6Imported }),
+    );
+  }
+  collect.close(); popup.close();
+
   // ── Run G: the extension is updated while the collect tab stays open ───────
   //
   // What an admin does after installing a new version: ↻ on the extensions
