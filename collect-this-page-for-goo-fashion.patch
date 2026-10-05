@@ -1,5 +1,5 @@
 diff --git a/extension/README.md b/extension/README.md
-index b36df98..ca21b4e 100644
+index b36df98..48050b6 100644
 --- a/extension/README.md
 +++ b/extension/README.md
 @@ -2,7 +2,7 @@
@@ -7,7 +7,7 @@ index b36df98..ca21b4e 100644
  Собирает каталог магазина в Goo Fashion, открывая страницы в твоём браузере:
  твой адрес, твои куки, уже пройденная проверка. Сервер решает, что собирать;
 -расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.3).
-+расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.17).
++расширение — только руки. Версия — в `manifest.json` (сейчас 1.0.18).
  
  **Когда нужно:** магазин отказывает нашему серверу (403, «Access denied»,
  проверка «Just a moment…»), а собрать надо каталог, а не один товар. Для одного
@@ -66,8 +66,8 @@ index b36df98..ca21b4e 100644
  | Поле | Что это |
  |---|---|
 -| **Products to collect** | Сколько товаров собрать за прогон: от 1 до 2000, по умолчанию 30. Запоминается. |
-+| **Everything on this page** | Собрать всё, что показывает страница, со всеми подгрузками и страницами (до 2000). По умолчанию включено. Запоминается. |
-+| **Or only the first** | Когда галочка снята: сколько первых вещей собрать, от 1 до 2000. Листание останавливается, как только ссылок заведомо хватает. Запоминается. |
++| **Everything on this page** | Стоит: страница листается до самого низа (с «Show more» и всеми страницами), считается, потом собирается всё (до 2000). По умолчанию включено. Запоминается. |
++| **Or only the first** | Когда галочка снята: сколько первых вещей собрать, от 1 до 2000. Берутся вещи, которые страница уже показывает, без прокрутки; если их меньше, страница листается ровно до нужного числа и не дальше. Запоминается. |
  | **Links only** | Только добавить ссылку и цену этого магазина к вещам, которые уже есть в каталоге; новых карточек не создаётся. Запоминается для каждого магазина. Галочка решает режим прогона вместо переключателя на экране Collect (нужен goo-fashion #889). |
  | **Goo Studio** | Адрес сайта. По умолчанию `https://www.goo-fashion.com` (сайт сам уводит с `www` на адрес без `www`, расширение знает оба). Для локальной разработки — `http://localhost:3000`. Запоминается. |
  
@@ -112,7 +112,7 @@ index b36df98..ca21b4e 100644
 +| `sitemap-pieces.js` | Сжимает сайтмап до того, что читает планировщик (`<loc>`, `<image:title>`), и режет на куски до 2 МБ, чтобы каждый план прошёл и в сообщении Chrome, и в запросе к сайту. |
  | `icons/` | Иконки. |
 diff --git a/extension/background.js b/extension/background.js
-index 73f3e5a..fdf967f 100644
+index 73f3e5a..437b991 100644
 --- a/extension/background.js
 +++ b/extension/background.js
 @@ -31,6 +31,9 @@
@@ -526,8 +526,8 @@ index 73f3e5a..fdf967f 100644
    state.phase = state.stopped ? "stopped" : "done";
    void tellPage("done", {});
 +  void saveLastRun();
- }
- 
++}
++
 +/** Hand one read page to the collect tab and record what the site made of it. */
 +async function ingest(url, snap, ctx) {
 +  const ingested = await withTimeout(
@@ -642,8 +642,8 @@ index 73f3e5a..fdf967f 100644
 +  } finally {
 +    await settle();
 +  }
-+}
-+
+ }
+ 
 +function newContext(limit, linksOnly) {
 +  return { limit, linksOnly, collected: 0, refusals: 0, sinceRest: 0, seen: [] };
 +}
@@ -708,7 +708,7 @@ index 73f3e5a..fdf967f 100644
        // The popup's "Links only": the site then looks in this store for the
        // pieces we already have, and opens no other pages.
        linksOnly,
-@@ -513,99 +897,389 @@ async function run({ storeUrl, limit, linksOnly = false }) {
+@@ -513,99 +897,416 @@ async function run({ storeUrl, limit, linksOnly = false }) {
      const plan = planned.data ?? {};
      const urls = Array.isArray(plan.urls) ? plan.urls : [];
      state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
@@ -828,6 +828,31 @@ index 73f3e5a..fdf967f 100644
 +  let note = "";
 +  let partial = false;
 +
++  // A run that asked for a number of pieces takes them from the page as the
++  // admin sees it: it looks before it scrolls, and scrolls only while the page
++  // shows fewer than that. Up to 1.0.17 it kept scrolling until it had seen
++  // twice the number in new links, which on most stores was the whole page and
++  // the next one too. "Everything on this page" walks to the end as before.
++  const counting = limit < MAX_LIMIT;
++  let checkedAt = -1;
++  /** Does the page already show as many pieces as were asked for? The planner counts. */
++  const enough = async () => {
++    if (!counting || links.length === checkedAt) return false;
++    checkedAt = links.length;
++    const looked = await askPage("plan", {
++      url: startUrl,
++      html: planHtml(heads, links),
++      robotsTxt,
++      sitemaps: [],
++      seen: [],
++      limit: MAX_LIMIT,
++      linksOnly,
++    });
++    if (!looked.ok || !Array.isArray(looked.data?.urls)) return false;
++    const listing = new Set([...visited].map(pagePath));
++    return looked.data.urls.filter((u) => !listing.has(pagePath(u))).length >= limit;
++  };
++
 +  state.listing = { pages, links: 0 };
 +  pushProgress();
 +
@@ -842,7 +867,9 @@ index 73f3e5a..fdf967f 100644
 +      const [out] = await chrome.scripting.executeScript({
 +        target: { tabId },
 +        func: listingStep,
-+        args: [{ first }],
++        // The run's first look starts the page's memory afresh, and in a
++        // counting run does not scroll.
++        args: [{ first, reset: initial < 0, scroll: !(counting && initial < 0) }],
 +      });
 +      res = out?.result ?? null;
 +    } catch (err) {
@@ -894,7 +921,7 @@ index 73f3e5a..fdf967f 100644
 +          ld.push(text);
 +        }
 +        heads.push({ ld, ogType: res.head.ogType || "" });
-       }
++      }
 +      // A page whose markup calls it one product is that product, unless it
 +      // already shows a grid: then it is a listing dressed as a product. The
 +      // planner says which links are pieces; the page is asked once, before
@@ -916,7 +943,7 @@ index 73f3e5a..fdf967f 100644
 +        if (looked.ok && others.length < GRID_MIN) {
 +          return { links, heads, pages, partial, note, product: true, walked: [here] };
 +        }
-+      }
+       }
 +    }
 +    state.listing = { pages, links: links.length };
  
@@ -945,17 +972,23 @@ index 73f3e5a..fdf967f 100644
 -      state.done = collected;
 -      if (ingested.ok) state.imported++;
 -      else state.failed++;
-+    if (!res.visible) {
-+      hiddenSince = hiddenSince || Date.now();
-+      state.message = KEEP_IN_FRONT;
-       pushProgress();
--
+-      pushProgress();
++    // Enough already: no further scrolling, whether or not the tab is in front.
++    if (await enough()) {
++      partial = true;
++      break;
++    }
+ 
 -      sinceRest++;
 -      if (sinceRest >= REST_EVERY && collected < limit && !state.stopped) {
 -        sinceRest = 0;
 -        state.message = "Resting so the store does not notice a rhythm…";
 -        await sleep(REST_MS);
 -        state.message = "";
++    if (!res.visible) {
++      hiddenSince = hiddenSince || Date.now();
++      state.message = KEEP_IN_FRONT;
++      pushProgress();
 +      if (Date.now() - hiddenSince > HIDDEN_MS) {
 +        note = "The store tab stayed in the background; collecting what it had shown by then.";
 +        break;
@@ -975,12 +1008,6 @@ index 73f3e5a..fdf967f 100644
 -    );
 -    if (!next.length) break;
 +    if (links.length >= LISTING_LINKS) break;
-+    // A run that asked for a few pieces does not need the whole category.
-+    // Links are not all pieces, so it reads well past the number first.
-+    if (limit < MAX_LIMIT && links.length - initial >= limit * 2 + 20) {
-+      partial = true;
-+      break;
-+    }
 +    if (!res.exhausted) continue;
  
 -    docs = [];
@@ -1038,8 +1065,8 @@ index 73f3e5a..fdf967f 100644
 +  if (!hello.ok) {
 +    halt(hello.error ?? NO_TAB);
 +    return;
-   }
- 
++  }
++
 +  const robotsTxt = (await fetchText(`${origin}/robots.txt`)) ?? "";
 +  const rules = robotsRules(robotsTxt);
 +  state.delayMs = Math.max(rules.crawlDelayMs ?? 0, MIN_DELAY_MS);
@@ -1050,8 +1077,8 @@ index 73f3e5a..fdf967f 100644
 +  if (walk.error) {
 +    halt(walk.error);
 +    return;
-+  }
-+
+   }
+ 
 +  state.phase = "planning";
 +  state.message = "";
 +  const planned = await askPage("plan", {
@@ -1103,9 +1130,9 @@ index 73f3e5a..fdf967f 100644
 +  pushProgress();
 +
 +  if (!(await collect(take, newContext(limit, linksOnly)))) return;
-   finish();
- }
- 
++  finish();
++}
++
 +/** Open again the pages the last run could not read or import. */
 +async function runRetry(last) {
 +  const wanted = (last.failures || []).map((f) => f && f.url).filter((u) => typeof u === "string");
@@ -1152,9 +1179,9 @@ index 73f3e5a..fdf967f 100644
 +  pushProgress();
 +
 +  if (!(await collect(urls, newContext(MAX_LIMIT, state.linksOnly)))) return;
-+  finish();
-+}
-+
+   finish();
+ }
+ 
 +/** Retry, asked for by the popup or by the collect tab's button. */
 +async function retry() {
 +  if (state.running) return { ok: false, error: "A run is already going." };
@@ -1169,7 +1196,7 @@ index 73f3e5a..fdf967f 100644
  function stop() {
    state.stopped = true;
    state.phase = "stopped";
-@@ -648,14 +1322,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+@@ -648,14 +1349,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
          return undefined;
        }
        const storeUrl = msg.payload?.storeUrl;
@@ -1225,10 +1252,10 @@ index f284f93..012ebd5 100644
  
 diff --git a/extension/listing.js b/extension/listing.js
 new file mode 100644
-index 0000000..09852b0
+index 0000000..ecda1c4
 --- /dev/null
 +++ b/extension/listing.js
-@@ -0,0 +1,401 @@
+@@ -0,0 +1,406 @@
 +/**
 + * Reading a whole listing: every card a category shows, however it shows them.
 + *
@@ -1265,13 +1292,18 @@ index 0000000..09852b0
 + * which is when the worker starts counting afresh anyway.
 + */
 +export function listingStep(opts) {
-+  const o = Object.assign({ first: false, stepMs: 350, settleMs: 2500, clickWaitMs: 4000 }, opts || {});
++  // `scroll: false` only looks: the links the page shows as it stands, nothing
++  // loaded, nothing moved. A run that asked for a few pieces starts with that.
++  const o = Object.assign({ first: false, reset: false, scroll: true, stepMs: 350, settleMs: 2500, clickWaitMs: 4000 }, opts || {});
 +  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 +  const host = location.hostname.replace(/^www\./, "");
-+  const st = (globalThis.__gooListing = globalThis.__gooListing || {
-+    seen: new Set(),
-+    dead: new WeakSet(),
-+  });
++  // `reset` starts a run afresh. What a page remembers lives as long as the
++  // page does, so without it a second run on the same tab, unreloaded, took
++  // the cards the first one had seen for old news and never reported them.
++  if (o.reset || !globalThis.__gooListing) {
++    globalThis.__gooListing = { seen: new Set(), dead: new WeakSet() };
++  }
++  const st = globalThis.__gooListing;
 +
 +  /** An address on this store, without its fragment, or "". */
 +  const resolve = (href) => {
@@ -1392,8 +1424,8 @@ index 0000000..09852b0
 +  }
 +
 +  // A page nobody can see loads nothing more: report what is there and let
-+  // the worker wait.
-+  if (!result.visible) return result;
++  // the worker wait. A look without scrolling ends here too.
++  if (!result.visible || !o.scroll) return result;
 +
 +  const MORE =
 +    /^(?:load|show|view|see)\s+more\b|^more\s+(?:products|items|results|styles)\b|^(?:показать|загрузить)\s+(?:ещ[её]|больше)|^(?:показати|завантажити)\s+(?:ще|більше)|^mehr\s+(?:anzeigen|laden)|^voir\s+plus|^(?:cargar|mostrar|ver)\s+más|^(?:carica|mostra)\s+altri/i;
@@ -1631,7 +1663,7 @@ index 0000000..09852b0
 +  return `<!doctype html><html><head>${head.join("\n")}</head><body>\n${body.join("\n")}\n</body></html>`;
 +}
 diff --git a/extension/manifest.json b/extension/manifest.json
-index 5e65ffa..e5f5aec 100644
+index 5e65ffa..7bdadd2 100644
 --- a/extension/manifest.json
 +++ b/extension/manifest.json
 @@ -1,7 +1,7 @@
@@ -1639,7 +1671,7 @@ index 5e65ffa..e5f5aec 100644
    "manifest_version": 3,
    "name": "Goo Collect",
 -  "version": "1.0.12",
-+  "version": "1.0.17",
++  "version": "1.0.18",
    "description": "Collect a store's catalogue into Goo Fashion from your own browser, at a polite pace.",
    "minimum_chrome_version": "116",
    "permissions": [
@@ -1668,7 +1700,7 @@ index 145da73..6c2c0c3 100644
 +  margin-top: 10px;
 +}
 diff --git a/extension/popup.html b/extension/popup.html
-index 8d28a48..9b3b07c 100644
+index 8d28a48..ab08194 100644
 --- a/extension/popup.html
 +++ b/extension/popup.html
 @@ -12,8 +12,16 @@
@@ -1680,7 +1712,7 @@ index 8d28a48..9b3b07c 100644
 +      <label class="row check" for="all">
 +        <span>
 +          Everything on this page
-+          <small>Scrolls this tab to the end, presses "Show more" and goes through every page of the listing first.</small>
++          <small>Ticked: scrolls this tab to the end, presses "Show more", goes through every page, then collects all of it. Unticked: collects the first N the page shows, scrolling only if it shows fewer.</small>
 +        </span>
 +        <input id="all" type="checkbox" checked />
 +      </label>

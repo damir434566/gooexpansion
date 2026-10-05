@@ -1016,7 +1016,43 @@ async function main() {
       JSON.stringify(opened),
     );
     check("and stopped reading the page early: page two was never opened", !logM.some((l) => l.path === "/c/jackets" && l.search === "?page=2"));
+    check(
+      "the page already showed eight: it did not scroll at all, no more cards were loaded",
+      !logM.some((l) => l.path === "/api/cards"),
+      JSON.stringify(logM.filter((l) => l.path === "/api/cards").map((l) => l.search)),
+    );
     check("the popup remembers the choice", (await popup.evaluate("chrome.storage.sync.get(['collectAll','limit'])")).collectAll === false);
+  }
+  popup.close();
+
+  // ── Run M2: the first twelve, when the page shows eight ──────────────────
+  //
+  // Scrolled only as far as it takes: one more batch of cards, then it stops.
+  // Up to 1.0.17 a numbered run read until it had seen twice the number in new
+  // links, which here was the whole page, "Show more" and page two.
+  //
+  // It also runs on the tab run M left, not reloaded since. The page kept
+  // what the last run had seen there, and the second run took jacket-1 to 8
+  // for already reported and collected 9 to 20.
+  //
+  console.log("\n— run M2: \"or only the first\" twelve, the page showing eight —");
+  await storeControl({ mode: "page", reset: true });
+  await studioReset();
+  popup = await startOnPage(`if (document.getElementById("all").checked) document.getElementById("all").click(); document.getElementById("limit").value = "12";`);
+  {
+    const st = await untilEnded(popup, 150);
+    const logM2 = (await storeLog()).log;
+    const opened = logM2.filter((l) => /^\/product\/jacket-\d+$/.test(l.path)).map((l) => l.path);
+    const loads = logM2.filter((l) => l.path === "/api/cards").map((l) => l.search);
+    check("run M2 finished", !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    check(
+      "it collected the first twelve the page showed",
+      JSON.stringify(opened) === JSON.stringify(Array.from({ length: 12 }, (_, i) => `/product/jacket-${i + 1}`)),
+      JSON.stringify(opened),
+    );
+    check("it scrolled for the cards it needed", loads.some((q) => /from=8/.test(q)), JSON.stringify(loads));
+    check("and no further: \"Show more\" was never pressed", !loads.some((q) => /from=24/.test(q)), JSON.stringify(loads));
+    check("nor page two opened", !logM2.some((l) => l.path === "/c/jackets" && l.search === "?page=2"));
   }
   popup.close();
   collect.close();

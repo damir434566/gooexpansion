@@ -994,6 +994,31 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
   let note = "";
   let partial = false;
 
+  // A run that asked for a number of pieces takes them from the page as the
+  // admin sees it: it looks before it scrolls, and scrolls only while the page
+  // shows fewer than that. Up to 1.0.17 it kept scrolling until it had seen
+  // twice the number in new links, which on most stores was the whole page and
+  // the next one too. "Everything on this page" walks to the end as before.
+  const counting = limit < MAX_LIMIT;
+  let checkedAt = -1;
+  /** Does the page already show as many pieces as were asked for? The planner counts. */
+  const enough = async () => {
+    if (!counting || links.length === checkedAt) return false;
+    checkedAt = links.length;
+    const looked = await askPage("plan", {
+      url: startUrl,
+      html: planHtml(heads, links),
+      robotsTxt,
+      sitemaps: [],
+      seen: [],
+      limit: MAX_LIMIT,
+      linksOnly,
+    });
+    if (!looked.ok || !Array.isArray(looked.data?.urls)) return false;
+    const listing = new Set([...visited].map(pagePath));
+    return looked.data.urls.filter((u) => !listing.has(pagePath(u))).length >= limit;
+  };
+
   state.listing = { pages, links: 0 };
   pushProgress();
 
@@ -1008,7 +1033,9 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
       const [out] = await chrome.scripting.executeScript({
         target: { tabId },
         func: listingStep,
-        args: [{ first }],
+        // The run's first look starts the page's memory afresh, and in a
+        // counting run does not scroll.
+        args: [{ first, reset: initial < 0, scroll: !(counting && initial < 0) }],
       });
       res = out?.result ?? null;
     } catch (err) {
@@ -1081,6 +1108,12 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
     }
     state.listing = { pages, links: links.length };
 
+    // Enough already: no further scrolling, whether or not the tab is in front.
+    if (await enough()) {
+      partial = true;
+      break;
+    }
+
     if (!res.visible) {
       hiddenSince = hiddenSince || Date.now();
       state.message = KEEP_IN_FRONT;
@@ -1097,12 +1130,6 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
     pushProgress();
 
     if (links.length >= LISTING_LINKS) break;
-    // A run that asked for a few pieces does not need the whole category.
-    // Links are not all pieces, so it reads well past the number first.
-    if (limit < MAX_LIMIT && links.length - initial >= limit * 2 + 20) {
-      partial = true;
-      break;
-    }
     if (!res.exhausted) continue;
 
     const next = res.next;
