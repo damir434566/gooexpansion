@@ -134,7 +134,15 @@
   ok   run M finished
   ok   it collected the first five the page showed, no more
   ok   and stopped reading the page early: page two was never opened
+  ok   the page already showed eight: it did not scroll at all, no more cards were loaded
   ok   the popup remembers the choice
+
+— run M2: "or only the first" twelve, the page showing eight —
+  ok   run M2 finished
+  ok   it collected the first twelve the page showed
+  ok   it scrolled for the cards it needed
+  ok   and no further: "Show more" was never pressed
+  ok   nor page two opened
 
 — run N: a category that looks like a product, and a product —
   ok   a category numbered like a piece: the run finished
@@ -162,5 +170,5 @@
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
 
-  130 passed, 0 failed
+  136 passed, 0 failed
 

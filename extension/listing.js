@@ -34,13 +34,18 @@
  * which is when the worker starts counting afresh anyway.
  */
 export function listingStep(opts) {
-  const o = Object.assign({ first: false, stepMs: 350, settleMs: 2500, clickWaitMs: 4000 }, opts || {});
+  // `scroll: false` only looks: the links the page shows as it stands, nothing
+  // loaded, nothing moved. A run that asked for a few pieces starts with that.
+  const o = Object.assign({ first: false, reset: false, scroll: true, stepMs: 350, settleMs: 2500, clickWaitMs: 4000 }, opts || {});
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const host = location.hostname.replace(/^www\./, "");
-  const st = (globalThis.__gooListing = globalThis.__gooListing || {
-    seen: new Set(),
-    dead: new WeakSet(),
-  });
+  // `reset` starts a run afresh. What a page remembers lives as long as the
+  // page does, so without it a second run on the same tab, unreloaded, took
+  // the cards the first one had seen for old news and never reported them.
+  if (o.reset || !globalThis.__gooListing) {
+    globalThis.__gooListing = { seen: new Set(), dead: new WeakSet() };
+  }
+  const st = globalThis.__gooListing;
 
   /** An address on this store, without its fragment, or "". */
   const resolve = (href) => {
@@ -161,8 +166,8 @@ export function listingStep(opts) {
   }
 
   // A page nobody can see loads nothing more: report what is there and let
-  // the worker wait.
-  if (!result.visible) return result;
+  // the worker wait. A look without scrolling ends here too.
+  if (!result.visible || !o.scroll) return result;
 
   const MORE =
     /^(?:load|show|view|see)\s+more\b|^more\s+(?:products|items|results|styles)\b|^(?:показать|загрузить)\s+(?:ещ[её]|больше)|^(?:показати|завантажити)\s+(?:ще|більше)|^mehr\s+(?:anzeigen|laden)|^voir\s+plus|^(?:cargar|mostrar|ver)\s+más|^(?:carica|mostra)\s+altri/i;
