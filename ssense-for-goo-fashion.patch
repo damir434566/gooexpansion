@@ -77,7 +77,7 @@ index f282fcf..b3b5d36 100644
          }
  
 diff --git a/src/lib/server/parser/gallery.ts b/src/lib/server/parser/gallery.ts
-index 674984f..9729b40 100644
+index 674984f..52db039 100644
 --- a/src/lib/server/parser/gallery.ts
 +++ b/src/lib/server/parser/gallery.ts
 @@ -86,6 +86,219 @@ const NOISE = /(?:sprite|placeholder|transparent|blank|pixel|spacer|logo|favicon
@@ -373,7 +373,40 @@ index 674984f..9729b40 100644
      return file
        .replace(IMAGE_EXT, "")
        .toLowerCase()
-@@ -360,12 +600,7 @@ function collectCandidates(html: string): string[] {
+@@ -332,6 +572,32 @@ const STEM_MATCH_MIN = 10;
+  */
+ const STEM_TAIL_MAX = 12;
+ 
++/**
++ * A file named `<code>_<frame>`: SSENSE's `251149M237012_1`, and every store
++ * that numbers a piece's shots after its style code. The frame is after the
++ * underscore and the code before it is the piece, so a photo of another code is
++ * another piece's, however much of the code the two share. SSENSE's codes begin
++ * with the season, the brand and the category — every Saucony sneaker of a
++ * season starts `251149M237` — and the prefix and numbered-frame tests read
++ * that as one shoot: the rail of the brand's other sneakers under the piece
++ * came into its gallery.
++ */
++const CODE_FRAME = /^([a-z0-9]*\d[a-z0-9]*)_\d{1,2}$/;
++const CODE_MIN = 6;
++
++function frameCode(url: string): string | null {
++  try {
++    const cloudinary = cloudinaryPhoto(url);
++    const file = cloudinary
++      ? cloudinary.id.split("/").pop() ?? ""
++      : decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "").replace(IMAGE_EXT, "").toLowerCase();
++    const m = file.match(CODE_FRAME);
++    return m && m[1].length >= CODE_MIN ? m[1] : null;
++  } catch {
++    return null;
++  }
++}
++
+ /** Pull every image reference out of the markup, in document order. */
+ function collectCandidates(html: string): string[] {
+   const out: string[] = [];
+@@ -360,12 +626,7 @@ function collectCandidates(html: string): string[] {
    // srcset on <img> and <source>: take every candidate; the largest wins after
    // the rendition suffix and size params are stripped, so order is irrelevant.
    const srcsetRe = /\b(?:data-)?srcset\s*=\s*["']([^"']+)["']/gi;
@@ -387,7 +420,7 @@ index 674984f..9729b40 100644
  
    // <link rel="preload" as="image"> — browsers preload the gallery's hero shots.
    const preloadRe = /<link\b[^>]*\bas=["']image["'][^>]*>/gi;
-@@ -373,12 +608,7 @@ function collectCandidates(html: string): string[] {
+@@ -373,12 +634,7 @@ function collectCandidates(html: string): string[] {
      const href = m[0].match(/\bhref\s*=\s*["']([^"']+)["']/i);
      if (href) out.push(href[1]);
      const imagesrcset = m[0].match(/\bimagesrcset\s*=\s*["']([^"']+)["']/i);
@@ -401,7 +434,7 @@ index 674984f..9729b40 100644
    }
  
    // Inline JSON blobs (Shopify/Next hydration payloads) reference the gallery
-@@ -403,7 +633,10 @@ function collectCandidates(html: string): string[] {
+@@ -403,7 +659,10 @@ function collectCandidates(html: string): string[] {
   * `trusted` are the images structured data already gave us — they anchor the
   * search, and are also what a candidate must resemble to be accepted. Returns
   * only the NEW images, in document order; the caller keeps the trusted ones
@@ -413,9 +446,11 @@ index 674984f..9729b40 100644
   *
   * `extra` is for candidates the markup does not contain. The collect extension
   * reads the rendered page, so it sees what a virtualised carousel mounted, what
-@@ -427,18 +660,20 @@ export function harvestGalleryImages(
+@@ -426,19 +685,24 @@ export function harvestGalleryImages(
+ 
    const trustedHosts = new Set<string>();
    const trustedStems: string[] = [];
++  const trustedCodes = new Set<string>();
    for (const u of trustedUrls) {
 -    try {
 -      trustedHosts.add(new URL(u).hostname.replace(/^www\./, ""));
@@ -426,6 +461,8 @@ index 674984f..9729b40 100644
 +    if (host) trustedHosts.add(host);
      const s = stem(u);
      if (s) trustedStems.push(s);
++    const code = frameCode(u);
++    if (code) trustedCodes.add(code);
    }
  
    const { phrases: slugPhrases, codes } = urlIdentity(baseUrl);
@@ -440,7 +477,7 @@ index 674984f..9729b40 100644
    const out: string[] = [];
  
    const candidates = [...collectCandidates(html), ...extra]
-@@ -447,14 +682,21 @@ export function harvestGalleryImages(
+@@ -447,14 +711,21 @@ export function harvestGalleryImages(
  
    for (const url of candidates) {
      const key = imageKey(url);
@@ -467,17 +504,34 @@ index 674984f..9729b40 100644
      } catch {
        continue;
      }
-@@ -479,7 +721,7 @@ export function harvestGalleryImages(
+@@ -479,21 +750,27 @@ export function harvestGalleryImages(
      } else {
        // A different host is someone else's imagery — review photos, ad pixels,
        // partner badges. The product's gallery is served where its main photo is.
 -      if (!trustedHosts.has(host)) continue;
+-      const sibling =
+-        named ||
+-        trustedStems.some(
 +      if (!host || !trustedHosts.has(host)) continue;
-       const sibling =
-         named ||
-         trustedStems.some(
-@@ -493,7 +735,7 @@ export function harvestGalleryImages(
-       if (!sibling) continue;
++      // Both named `<code>_<frame>`: the code decides, and nothing else does.
++      const code = frameCode(url);
++      if (code && trustedCodes.size) {
++        if (!trustedCodes.has(code)) continue;
++      } else if (
++        !named &&
++        !trustedStems.some(
+           (t) =>
+             // a numbered frame beside a photo we trust, either by shared prefix…
+             (commonPrefixLength(t, s) >= STEM_MATCH_MIN &&
+               s.length - commonPrefixLength(t, s) <= STEM_TAIL_MAX) ||
+             // …or by being the same filename with a different frame in it
+             isNumberedFrame(t, s),
+-        );
+-      if (!sibling) continue;
++        )
++      ) {
++        continue;
++      }
      }
  
 -    seen.add(key);

@@ -166,9 +166,16 @@
   ok   the dropped connection was skipped at once
   ok   a slow import on the site did not keep the next page from opening
 
+— run T: a second bridge injected into a collect tab that has one —
+  ok   a second bridge went into the collect tab
+  ok   run T finished
+  ok   every piece reached the collect screen once
+  ok   the run was greeted once, not once per bridge
+  ok   and no plan round was asked for twice
+
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
 
-  136 passed, 0 failed
+  141 passed, 0 failed
 
