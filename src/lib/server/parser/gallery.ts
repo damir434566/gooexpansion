@@ -55,6 +55,32 @@ const RENDITION_SUFFIX =
 
 const IMAGE_EXT = /\.(?:jpe?g|png|webp|avif)$/i;
 
+/** Every image extension at the end of a name: GOAT writes `1111426_00.png.png`. */
+const IMAGE_EXTS = /(?:\.(?:jpe?g|png|webp|avif))+$/i;
+
+/**
+ * What a store shows, and states in its markup, where a piece has no photo:
+ * its placeholder ("no image", "coming soon", `missing.png`), or its own logo
+ * or social-share card standing in as `og:image`. Read on the file name — the
+ * whole name for the short words, so a "Logo Tee" shot named
+ * `logo-tee-black-front.jpg` is still a photo.
+ */
+const NO_PHOTO_WORDS =
+  /(?:^|[-_.])(?:placeholder|no[-_]?(?:image|photo|picture|img)|noimage|nophoto|nopicture|image[-_]?(?:not[-_]?)?(?:available|unavailable)|coming[-_]?soon|missing[-_]?(?:image|photo|picture|product))(?:[-_.]|$)/i;
+const NO_PHOTO_NAME =
+  /^(?:missing|default|blank|empty|none|null|undefined|logo|(?:store|site|shop|brand)[-_]?logo|og[-_]?(?:image|default)|social[-_]?(?:share|image)|share[-_]?image|default[-_]?(?:image|og|share|product))$/i;
+
+/** Is this address a stand-in for a photo the piece does not have? */
+export function isPlaceholderPhoto(url: string): boolean {
+  try {
+    const path = decodeURIComponent(new URL(url, "https://page.invalid/").pathname).toLowerCase();
+    const name = (path.split("/").pop() ?? "").replace(IMAGE_EXTS, "");
+    return NO_PHOTO_NAME.test(name) || NO_PHOTO_WORDS.test(name) || /\/placeholders?\//.test(path);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Extensions that are certainly not a photo. Needed because the extension test
  * below had to be loosened: plenty of image CDNs address a photo with no file
@@ -347,7 +373,7 @@ export function upgradeImageUrl(src: string, baseUrl: string): string | null {
  *   - a size in the name: Shopify's `_600x`, WordPress's `-300x300`/`-scaled`,
  *     Farfetch's `_480`/`_1000`, a retina `@2x`;
  *   - a format: `coat.jpg`, `coat.webp`, and the `coat.jpg.webp` an image
- *     optimiser writes beside it.
+ *     optimiser writes beside it (GOAT's own names end `.png.png`).
  *
  *   - a Cloudinary transformation (`…/upload/w_480,dpr_2.0/<id>.jpg`), or the
  *     template blank in its place: the upload is one photo, whichever account
@@ -377,7 +403,7 @@ export function imageKey(url: string): string {
     path = path
       .replace(/@[23]x(?=\.[a-z0-9]+$)/, "")
       .replace(/\.(?:jpe?g|png)\.(?:webp|avif)$/, ".jpg")
-      .replace(/\.(?:jpe?g|png|webp|avif)$/, "");
+      .replace(IMAGE_EXTS, "");
     if (host.endsWith("farfetch-contents.com")) path = path.replace(/(\d+_\d+)_\d{3,4}$/, "$1");
     return `${host}${path}`;
   } catch {
@@ -414,7 +440,7 @@ function stem(url: string): string {
     const cloudinary = cloudinaryPhoto(url);
     const file = cloudinary ? cloudinary.id.split("/").pop() ?? "" : new URL(url).pathname.split("/").pop() ?? "";
     return file
-      .replace(IMAGE_EXT, "")
+      .replace(IMAGE_EXTS, "")
       .toLowerCase()
       .replace(/[^a-z0-9]/g, "")
       .replace(/[0-9a-f]{32}$/, "");
@@ -590,7 +616,7 @@ function frameCode(url: string): string | null {
     const cloudinary = cloudinaryPhoto(url);
     const file = cloudinary
       ? cloudinary.id.split("/").pop() ?? ""
-      : decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "").replace(IMAGE_EXT, "").toLowerCase();
+      : decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "").replace(IMAGE_EXTS, "").toLowerCase();
     const m = file.match(CODE_FRAME);
     return m && m[1].length >= CODE_MIN ? m[1] : null;
   } catch {
@@ -646,8 +672,13 @@ function collectCandidates(html: string): string[] {
   // `https:\/\/cdn.shopify.com\/s\/files\/1\/photo.jpg`, and a pattern that
   // stops at the first backslash never reaches the extension that identifies it
   // as an image. It matched the scheme and then quietly found nothing.
+  //
+  // Every extension at the end, not the first: GOAT names a photo
+  // `1111426_00.png.png`, and a match stopping at the first `.png` was an
+  // address with no picture behind it, filed beside the real one as a second
+  // photo.
   const jsonUrlRe =
-    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
+    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?(?:\.(?:jpe?g|png|webp|avif))+(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
   while ((m = jsonUrlRe.exec(html))) out.push(m[0].replace(/\\\//g, "/"));
 
   return out;
@@ -751,10 +782,14 @@ export function harvestGalleryImages(
       // A different host is someone else's imagery — review photos, ad pixels,
       // partner badges. The product's gallery is served where its main photo is.
       if (!host || !trustedHosts.has(host)) continue;
-      // Both named `<code>_<frame>`: the code decides, and nothing else does.
+      // A store that names the piece's photos by its code (`<code>_<frame>`):
+      // the code decides, and nothing else does — a file named in words is
+      // not one of this store's photos of the piece, however many of the
+      // piece's words it carries. GOAT's rail is the same model in other
+      // colours, `…-retro-high-og-chicago-reimagined.png`.
       const code = frameCode(url);
-      if (code && trustedCodes.size) {
-        if (!trustedCodes.has(code)) continue;
+      if (trustedCodes.size) {
+        if (!code || !trustedCodes.has(code)) continue;
       } else if (
         !named &&
         !trustedStems.some(
