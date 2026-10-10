@@ -572,6 +572,32 @@ const STEM_MATCH_MIN = 10;
  */
 const STEM_TAIL_MAX = 12;
 
+/**
+ * A file named `<code>_<frame>`: SSENSE's `251149M237012_1`, and every store
+ * that numbers a piece's shots after its style code. The frame is after the
+ * underscore and the code before it is the piece, so a photo of another code is
+ * another piece's, however much of the code the two share. SSENSE's codes begin
+ * with the season, the brand and the category — every Saucony sneaker of a
+ * season starts `251149M237` — and the prefix and numbered-frame tests read
+ * that as one shoot: the rail of the brand's other sneakers under the piece
+ * came into its gallery.
+ */
+const CODE_FRAME = /^([a-z0-9]*\d[a-z0-9]*)_\d{1,2}$/;
+const CODE_MIN = 6;
+
+function frameCode(url: string): string | null {
+  try {
+    const cloudinary = cloudinaryPhoto(url);
+    const file = cloudinary
+      ? cloudinary.id.split("/").pop() ?? ""
+      : decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "").replace(IMAGE_EXT, "").toLowerCase();
+    const m = file.match(CODE_FRAME);
+    return m && m[1].length >= CODE_MIN ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Pull every image reference out of the markup, in document order. */
 function collectCandidates(html: string): string[] {
   const out: string[] = [];
@@ -659,11 +685,14 @@ export function harvestGalleryImages(
 
   const trustedHosts = new Set<string>();
   const trustedStems: string[] = [];
+  const trustedCodes = new Set<string>();
   for (const u of trustedUrls) {
     const host = photoHost(u);
     if (host) trustedHosts.add(host);
     const s = stem(u);
     if (s) trustedStems.push(s);
+    const code = frameCode(u);
+    if (code) trustedCodes.add(code);
   }
 
   const { phrases: slugPhrases, codes } = urlIdentity(baseUrl);
@@ -722,17 +751,23 @@ export function harvestGalleryImages(
       // A different host is someone else's imagery — review photos, ad pixels,
       // partner badges. The product's gallery is served where its main photo is.
       if (!host || !trustedHosts.has(host)) continue;
-      const sibling =
-        named ||
-        trustedStems.some(
+      // Both named `<code>_<frame>`: the code decides, and nothing else does.
+      const code = frameCode(url);
+      if (code && trustedCodes.size) {
+        if (!trustedCodes.has(code)) continue;
+      } else if (
+        !named &&
+        !trustedStems.some(
           (t) =>
             // a numbered frame beside a photo we trust, either by shared prefix…
             (commonPrefixLength(t, s) >= STEM_MATCH_MIN &&
               s.length - commonPrefixLength(t, s) <= STEM_TAIL_MAX) ||
             // …or by being the same filename with a different frame in it
             isNumberedFrame(t, s),
-        );
-      if (!sibling) continue;
+        )
+      ) {
+        continue;
+      }
     }
 
     held.set(key, rank);

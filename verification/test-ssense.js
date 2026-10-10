@@ -253,6 +253,59 @@ const OPTS = {
     ok("main photo first in the gallery", p.images[0] === p.imageUrl, JSON.stringify(p.images));
   }
 
+  // The second SSENSE run (Saucony, BAPE): the gallery held a dozen copies of
+  // one shot and photos of OTHER sneakers. SSENSE codes begin with the season,
+  // the brand and the category, so every Saucony sneaker of a season starts
+  // `251149M237`, and the rail under the piece (its classes are generated, the
+  // extension cannot tell it is a rail) is the same brand's other sneakers.
+  // Ten characters in common read as "a numbered frame of the same shoot".
+  const CODE = "251149M237012";
+  const RAIL = ["251149M237015", "251149M237009", "251149M237013"];
+  const SNEAKER = "https://www.ssense.com/en-gb/men/product/saucony/white-progrid-ride-1-sneakers/17654321";
+  const WIDTHS = [200, 300, 400, 500, 600, 800, 1000, 1200, 1400, 1600];
+  for (const [label, at] of [
+    ["img.ssensemedia.com", (code, n, chain, slug = "saucony-white-progrid-ride-1-sneakers") =>
+      `https://img.ssensemedia.com/images/${chain}/${code}_${n}/${slug}.jpg`],
+    ["res.cloudinary.com", (code, n, chain) => `https://res.cloudinary.com/ssenseweb/image/upload/${chain}/${code}_${n}.jpg`],
+  ]) {
+    console.log(`— Saucony: a dozen widths a shot and the brand's other sneakers beside it, on ${label} —`);
+    const chain = (w) => `b_white,c_pad,g_center,w_${w}/f_auto,q_auto`;
+    const srcset = (code, n, slug) => WIDTHS.map((w) => `${at(code, n, chain(w), slug)} ${w}w`).join(", ");
+    const ld = {
+      "@context": "http://schema.org/",
+      "@type": "Product",
+      name: "White ProGrid Ride 1 Sneakers",
+      sku: CODE,
+      brand: { "@type": "Brand", name: "Saucony" },
+      image: `https://res.cloudinary.com/ssenseweb/image/upload/__IMAGE_PARAMS__/${CODE}_1.jpg`,
+      offers: { "@type": "Offer", price: 140, priceCurrency: "GBP" },
+    };
+    const shots = [1, 2, 3, 4, 5];
+    const html = `<html><head><title>Saucony - White ProGrid Ride 1 Sneakers | SSENSE UK</title>
+      <script type="application/ld+json">${JSON.stringify(ld)}</script></head><body>
+      <h1>White ProGrid Ride 1 Sneakers</h1>
+      <div class="css-8k2x1q">${shots.map((n) => `<img src="${at(CODE, n, chain(600))}" srcset="${srcset(CODE, n)}">`).join("")}</div>
+      <div class="css-19fjz3">${RAIL.map((c, i) =>
+        `<a href="/en-gb/men/product/saucony/white-progrid-omni-9-sneakers/1765${i}"><img src="${at(c, 1, chain(400), "saucony-white-progrid-omni-9-sneakers")}" srcset="${srcset(c, 1, "saucony-white-progrid-omni-9-sneakers")}"></a>`).join("")}</div>
+      </body></html>`;
+    // The extension sends every picture the page shows: the rail's too.
+    const images = [
+      ...shots.flatMap((n) => WIDTHS.map((w) => at(CODE, n, chain(w)))),
+      ...RAIL.flatMap((c) => WIDTHS.map((w) => at(c, 1, chain(w), "saucony-white-progrid-omni-9-sneakers"))),
+    ];
+    const result = await parsePage(SNEAKER, { ...OPTS, html, evidence: { images, priceText: "£140", titleText: "White ProGrid Ride 1 Sneakers" } });
+    const p = result.products[0];
+    ok("read as one product", !result.isListing && !!p);
+    if (!p) continue;
+    const codeOf = (u) => (u.match(/(\d{6}M\d{6})_(\d)/) ?? [])[1];
+    const frameOf = (u) => (u.match(/\d{6}M\d{6}_(\d)/) ?? [])[1];
+    check("only this sneaker's photos", [...new Set(p.images.map(codeOf))], [CODE]);
+    check("each shot once, in order", p.images.map(frameOf), ["1", "2", "3", "4", "5"]);
+    ok("each the biggest width the page offered", p.images.every((u) => u.includes("w_1600")), JSON.stringify(p.images));
+    check("main photo is shot 1", frameOf(p.imageUrl), "1");
+    ok("main photo is an address, not a template", !blank(p.imageUrl), p.imageUrl);
+  }
+
   console.log("");
   if (failures.length) {
     for (const f of failures) console.log(`  ✗ ${f}`);
