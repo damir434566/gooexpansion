@@ -43,6 +43,7 @@ const routes = {
   "/ua/shopping/women/hold-item-19356833.aspx": ["text/html; charset=utf-8", page("press-hold.html")],
   "/sneakers/dunk-low-panda": ["text/html; charset=utf-8", page("goat.html")],
   "/sneakers/new-balance-550-white-green": ["text/html; charset=utf-8", page("goat-brand.html")],
+  "/en-gb/men/product/balenciaga/black-venom-boots/18128871": ["text/html; charset=utf-8", page("ssense.html")],
 };
 const server = createServer((req, res) => {
   const hit = routes[req.url.split("?")[0]];
@@ -200,6 +201,23 @@ cases.push(
     check: (r) => [["brandText", r.brandText, "New Balance"]],
   },
 );
+
+cases.push({
+  name: "SSENSE: адреса Cloudinary из srcset целиком, с запятыми внутри (было «…/images/b_white», «c_lpad»)",
+  path: "/en-gb/men/product/balenciaga/black-venom-boots/18128871",
+  check: (r) => {
+    const images = r.images ?? [];
+    const shots = [...new Set(images.map((u) => (u.match(/252342M223005_(\d)\//) ?? [])[1]).filter(Boolean))].sort();
+    return [
+      // Шаблон из JSON-LD уходит кандидатом как есть: заполняет его сервер (gallery.ts).
+      ["каждый адрес — фото .jpg, без обрывков", images.filter((u) => !/\/252342M223005_\d\/balenciaga-black-venom-boots\.jpg$/.test(u) && !u.includes("/__IMAGE_PARAMS__/")), []],
+      ["все три кадра", shots, ["1", "2", "3"]],
+      ["2× из srcset целиком", images.some((u) => u.includes("/c_scale,h_680/f_auto,dpr_2.0/252342M223005_1/")), true],
+      ["960w из srcset целиком", images.some((u) => u.includes("/b_white,g_center,f_auto,q_auto:best/252342M223005_3/")), true],
+      ["не «похожие»", images.some((u) => u.includes("251342M237001")), false],
+    ];
+  },
+});
 
 const browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
 let failed = 0;

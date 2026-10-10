@@ -1184,10 +1184,49 @@ async function main() {
   // page. The open collect tab keeps a bridge from the old copy, which cannot
   // reach the new worker, and the new worker has forgotten the tab. Before
   // 1.0.6 the next run died at once with "The collect tab is not reachable".
+  // ── Run T: two bridges in one collect tab ────────────────────────────────
+  //
+  // The worker injects bridge.js into a collect tab whose bridge does not
+  // answer, and Chrome runs the manifest's copy once the page has loaded: a
+  // tab reloaded just before a run ends up with both. Up to 1.0.18 both took
+  // every request, the screen imported every piece twice at once, and SSENSE
+  // came back as "New" plus "Failed — duplicate key" for each piece.
+  console.log("\n— run T: a second bridge injected into a collect tab that has one —");
+  const front = startGooFashionFront();
+  await storeControl({ mode: "normal", reset: true });
+  collect = await openCollect(GF_COLLECT);
+  popup = await openPopup(extId);
+  {
+    // Exactly what `reconnect()` in the worker does to a tab it cannot reach.
+    const injected = await popup.evaluate(`(async () => {
+      const [tab] = await chrome.tabs.query({ url: "${GF_COLLECT}*" });
+      if (!tab) return "no collect tab";
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["bridge.js"] });
+      return "ok";
+    })()`);
+    check("a second bridge went into the collect tab", injected === "ok", String(injected));
+    await sleep(500);
+    await studioReset();
+    await popup.evaluate(
+      `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:10}})`,
+    );
+    const doneT = await waitForEvent("done", 120000);
+    check("run T finished", !!doneT);
+    const { events: eventsT } = await studioEvents();
+    const ingestsT = eventsT.filter((e) => e.kind === "ingest").map((e) => e.detail.url);
+    const twice = ingestsT.filter((u, i) => ingestsT.indexOf(u) !== i);
+    check("every piece reached the collect screen once", ingestsT.length === 4 && twice.length === 0, JSON.stringify(ingestsT));
+    check("the run was greeted once, not once per bridge", eventsT.filter((e) => e.kind === "hello").length === 1,
+      String(eventsT.filter((e) => e.kind === "hello").length));
+    const plansT = eventsT.filter((e) => e.kind === "plan").map((e) => JSON.stringify(e.detail));
+    check("and no plan round was asked for twice", plansT.length > 0 && new Set(plansT).size === plansT.length,
+      `${plansT.length} plan calls, ${new Set(plansT).size} different`);
+  }
+  collect.close(); popup.close();
+
   console.log("\n— run G: the extension reloaded under an open collect tab —");
   await storeControl({ mode: "normal", reset: true });
   await studioReset();
-  const front = startGooFashionFront();
   collect = await openCollect(GF_COLLECT);
   popup = await openPopup(extId);
   // The ↻ button on chrome://extensions, which is what an admin presses.
