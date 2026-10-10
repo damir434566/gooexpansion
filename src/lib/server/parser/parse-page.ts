@@ -202,7 +202,7 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
       if (result.error) {
         aiError = result.error;
       } else {
-        const merged = mergeAiIntoRaw(raw, result.fields);
+        const merged = mergeAiIntoRaw(raw, result.fields, pageUrl);
         raw = merged.raw;
         aiFields = merged.used;
       }

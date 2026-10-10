@@ -44,6 +44,7 @@ const routes = {
   "/sneakers/dunk-low-panda": ["text/html; charset=utf-8", page("goat.html")],
   "/sneakers/new-balance-550-white-green": ["text/html; charset=utf-8", page("goat-brand.html")],
   "/en-gb/men/product/balenciaga/black-venom-boots/18128871": ["text/html; charset=utf-8", page("ssense.html")],
+  "/sneakers/air-jordan-1-retro-high-og-dz5485-612": ["text/html; charset=utf-8", page("goat-photos.html")],
 };
 const server = createServer((req, res) => {
   const hit = routes[req.url.split("?")[0]];
@@ -215,6 +216,18 @@ cases.push({
       ["2× из srcset целиком", images.some((u) => u.includes("/c_scale,h_680/f_auto,dpr_2.0/252342M223005_1/")), true],
       ["960w из srcset целиком", images.some((u) => u.includes("/b_white,g_center,f_auto,q_auto:best/252342M223005_3/")), true],
       ["не «похожие»", images.some((u) => u.includes("251342M237001")), false],
+    ];
+  },
+});
+
+cases.push({
+  name: "GOAT: адрес фото из скрипта целиком, с «.png.png» (было обрезано до первого «.png»)",
+  path: "/sneakers/air-jordan-1-retro-high-og-dz5485-612",
+  check: (r) => {
+    const images = r.images ?? [];
+    return [
+      ["кадры 01 и 02 из скрипта целиком", ["01", "02"].every((f) => images.some((u) => u.includes(`/1111400_${f}.png.png?action=crop`))), true],
+      ["ни одного обрезанного адреса", images.filter((u) => /1111400_\d\d\.png(?!\.png)/.test(u)), []],
     ];
   },
 });

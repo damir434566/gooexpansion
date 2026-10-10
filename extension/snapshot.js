@@ -91,10 +91,12 @@
    * payload that has been JSON-encoded twice escapes every slash in the path,
    * and a pattern that stops at the first backslash matches the scheme and then
    * finds no file extension to confirm. Same pattern as the server's harvester,
-   * which unescapes the result the same way.
+   * which unescapes the result the same way. Every extension at the end, not
+   * the first: GOAT names a photo `1111426_00.png.png`, and a match stopping at
+   * the first `.png` was an address with no picture behind it.
    */
   const JSON_IMAGE =
-    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
+    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?(?:\.(?:jpe?g|png|webp|avif))+(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
 
   /**
    * A price: a currency marker with an amount right beside it, either order.

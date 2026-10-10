@@ -1,0 +1,220 @@
+diff --git a/src/lib/server/parser/ai-extract.ts b/src/lib/server/parser/ai-extract.ts
+index 275b108..37f8f0e 100644
+--- a/src/lib/server/parser/ai-extract.ts
++++ b/src/lib/server/parser/ai-extract.ts
+@@ -16,6 +16,7 @@
+  */
+ import OpenAI from "openai";
+ import { getOpenAIKey } from "@/lib/server/get-openai-key";
++import { harvestGalleryImages } from "./gallery";
+ import type { RawExtract } from "./types";
+ 
+ /** Cheap, fast, and good at reading messy markup. */
+@@ -233,8 +234,9 @@ export async function aiExtract(
+ /**
+  * Merge AI output into a deterministic extract. Structured data always wins;
+  * AI only fills holes. Returns a new RawExtract plus the fields it contributed.
++ * `pageUrl` resolves and judges the photos it offers (`harvestGalleryImages`).
+  */
+-export function mergeAiIntoRaw(raw: RawExtract, ai: AiFields): { raw: RawExtract; used: string[] } {
++export function mergeAiIntoRaw(raw: RawExtract, ai: AiFields, pageUrl: string): { raw: RawExtract; used: string[] } {
+   const used: string[] = [];
+   const next: RawExtract = { ...raw, images: [...(raw.images ?? [])], sizes: [...(raw.sizes ?? [])] };
+ 
+@@ -260,14 +262,22 @@ export function mergeAiIntoRaw(raw: RawExtract, ai: AiFields): { raw: RawExtract
+   // so below a real gallery the model's reading is appended behind whatever the
+   // deterministic pass found, which keeps the primary photo where it was. Above
+   // it, a working gallery is never diluted.
+-  if (ai.images?.length && next.images.length < THIN_GALLERY) {
++  //
++  // Only beside a photo the page itself stated, and only what the gallery
++  // harvester accepts as that photo's own frames. Asked for "every photo of
++  // this product" on a GOAT page whose piece had none, the model returned the
++  // rail of recommended pieces, and the first of them became the card's main
++  // photo. A page with no photo of its own gets none from here, and the model
++  // never picks the main photo.
++  const own = [raw.image, ...(raw.images ?? [])].filter((u): u is string => !!u);
++  if (ai.images?.length && own.length && next.images.length < THIN_GALLERY) {
+     const before = next.images.length;
+-    for (const url of ai.images) {
++    for (const url of harvestGalleryImages("", pageUrl, own, next.name ?? "", ai.images)) {
+       if (!next.images.includes(url)) next.images.push(url);
+     }
+     if (next.images.length > before) used.push("images");
+   }
+-  if (!next.image && next.images.length) next.image = next.images[0];
++  if (!next.image && own.length) next.image = own[0];
+   if (!next.sizes.length && ai.sizes?.length) {
+     next.sizes = ai.sizes;
+     used.push("sizes");
+diff --git a/src/lib/server/parser/extract.ts b/src/lib/server/parser/extract.ts
+index 8eb036b..a06a012 100644
+--- a/src/lib/server/parser/extract.ts
++++ b/src/lib/server/parser/extract.ts
+@@ -10,7 +10,7 @@
+  * No DOM library — pure regex/JSON parsing so it runs in any serverless route.
+  */
+ import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
+-import { harvestGalleryImages } from "./gallery";
++import { harvestGalleryImages, isPlaceholderPhoto } from "./gallery";
+ import { chooseColour } from "./colour-choice";
+ import {
+   canonicalColor,
+@@ -1008,7 +1008,10 @@ export function extractProduct(
+   const pick = (...vals: (string | undefined)[]): string | undefined =>
+     vals.find((v) => v !== undefined && v !== "");
+ 
+-  const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
++  // The page's own photos: what its structured data and OpenGraph state, less
++  // a placeholder or the store's share card standing in for one it lacks.
++  const ownPhoto = (u?: string) => (u && !isPlaceholderPhoto(u) ? u : undefined);
++  const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter((u) => !!ownPhoto(u));
+   const shownPrice = sizeReadAsPrice(evidence) ? "" : evidence?.priceText ? priceInDisplay(evidence.priceText) : "";
+ 
+   // Sizes, in order of how directly the page said it: a recipe rule an admin
+@@ -1037,7 +1040,7 @@ export function extractProduct(
+     meta.description,
+   );
+ 
+-  const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
++  const image = pick(ruleVal("image"), ownPhoto(jsonld.image), ownPhoto(meta.image), images[0]);
+   // The product's name: the first candidate that is not the store's own name.
+   // The title the extension read beside the buy button sits after the h1s —
+   // on most stores the h1 is the product — and before `og:title`, which is
+@@ -1068,9 +1071,15 @@ export function extractProduct(
+   // Harvest the rest from the markup, anchored to what we already trust so the
+   // recommendations carousel and page furniture stay out. Trusted images keep
+   // their position, so the primary photo never changes.
++  //
++  // No photo of its own, no gallery. With nothing to anchor to, a file name
++  // sharing two words with the piece's was enough — and on a GOAT page whose
++  // piece has no photo that was the rail beneath it, the same model in other
++  // colours, which became the card. A page without a photo of its piece is
++  // skipped instead (`collect/route.ts`).
+   let galleryImages: string[] = [];
+-  if (baseUrl) {
+-    const anchor = image ? [image, ...images] : images;
++  if (baseUrl && image) {
++    const anchor = [image, ...images];
+     const productName = name ?? "";
+     galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName, evidence?.images ?? []);
+     if (galleryImages.length) strategies.push("gallery");
+diff --git a/src/lib/server/parser/gallery.ts b/src/lib/server/parser/gallery.ts
+index 52db039..c8a672d 100644
+--- a/src/lib/server/parser/gallery.ts
++++ b/src/lib/server/parser/gallery.ts
+@@ -55,6 +55,32 @@ const RENDITION_SUFFIX =
+ 
+ const IMAGE_EXT = /\.(?:jpe?g|png|webp|avif)$/i;
+ 
++/** Every image extension at the end of a name: GOAT writes `1111426_00.png.png`. */
++const IMAGE_EXTS = /(?:\.(?:jpe?g|png|webp|avif))+$/i;
++
++/**
++ * What a store shows, and states in its markup, where a piece has no photo:
++ * its placeholder ("no image", "coming soon", `missing.png`), or its own logo
++ * or social-share card standing in as `og:image`. Read on the file name — the
++ * whole name for the short words, so a "Logo Tee" shot named
++ * `logo-tee-black-front.jpg` is still a photo.
++ */
++const NO_PHOTO_WORDS =
++  /(?:^|[-_.])(?:placeholder|no[-_]?(?:image|photo|picture|img)|noimage|nophoto|nopicture|image[-_]?(?:not[-_]?)?(?:available|unavailable)|coming[-_]?soon|missing[-_]?(?:image|photo|picture|product))(?:[-_.]|$)/i;
++const NO_PHOTO_NAME =
++  /^(?:missing|default|blank|empty|none|null|undefined|logo|(?:store|site|shop|brand)[-_]?logo|og[-_]?(?:image|default)|social[-_]?(?:share|image)|share[-_]?image|default[-_]?(?:image|og|share|product))$/i;
++
++/** Is this address a stand-in for a photo the piece does not have? */
++export function isPlaceholderPhoto(url: string): boolean {
++  try {
++    const path = decodeURIComponent(new URL(url, "https://page.invalid/").pathname).toLowerCase();
++    const name = (path.split("/").pop() ?? "").replace(IMAGE_EXTS, "");
++    return NO_PHOTO_NAME.test(name) || NO_PHOTO_WORDS.test(name) || /\/placeholders?\//.test(path);
++  } catch {
++    return false;
++  }
++}
++
+ /**
+  * Extensions that are certainly not a photo. Needed because the extension test
+  * below had to be loosened: plenty of image CDNs address a photo with no file
+@@ -347,7 +373,7 @@ export function upgradeImageUrl(src: string, baseUrl: string): string | null {
+  *   - a size in the name: Shopify's `_600x`, WordPress's `-300x300`/`-scaled`,
+  *     Farfetch's `_480`/`_1000`, a retina `@2x`;
+  *   - a format: `coat.jpg`, `coat.webp`, and the `coat.jpg.webp` an image
+- *     optimiser writes beside it.
++ *     optimiser writes beside it (GOAT's own names end `.png.png`).
+  *
+  *   - a Cloudinary transformation (`…/upload/w_480,dpr_2.0/<id>.jpg`), or the
+  *     template blank in its place: the upload is one photo, whichever account
+@@ -377,7 +403,7 @@ export function imageKey(url: string): string {
+     path = path
+       .replace(/@[23]x(?=\.[a-z0-9]+$)/, "")
+       .replace(/\.(?:jpe?g|png)\.(?:webp|avif)$/, ".jpg")
+-      .replace(/\.(?:jpe?g|png|webp|avif)$/, "");
++      .replace(IMAGE_EXTS, "");
+     if (host.endsWith("farfetch-contents.com")) path = path.replace(/(\d+_\d+)_\d{3,4}$/, "$1");
+     return `${host}${path}`;
+   } catch {
+@@ -414,7 +440,7 @@ function stem(url: string): string {
+     const cloudinary = cloudinaryPhoto(url);
+     const file = cloudinary ? cloudinary.id.split("/").pop() ?? "" : new URL(url).pathname.split("/").pop() ?? "";
+     return file
+-      .replace(IMAGE_EXT, "")
++      .replace(IMAGE_EXTS, "")
+       .toLowerCase()
+       .replace(/[^a-z0-9]/g, "")
+       .replace(/[0-9a-f]{32}$/, "");
+@@ -590,7 +616,7 @@ function frameCode(url: string): string | null {
+     const cloudinary = cloudinaryPhoto(url);
+     const file = cloudinary
+       ? cloudinary.id.split("/").pop() ?? ""
+-      : decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "").replace(IMAGE_EXT, "").toLowerCase();
++      : decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "").replace(IMAGE_EXTS, "").toLowerCase();
+     const m = file.match(CODE_FRAME);
+     return m && m[1].length >= CODE_MIN ? m[1] : null;
+   } catch {
+@@ -646,8 +672,13 @@ function collectCandidates(html: string): string[] {
+   // `https:\/\/cdn.shopify.com\/s\/files\/1\/photo.jpg`, and a pattern that
+   // stops at the first backslash never reaches the extension that identifies it
+   // as an image. It matched the scheme and then quietly found nothing.
++  //
++  // Every extension at the end, not the first: GOAT names a photo
++  // `1111426_00.png.png`, and a match stopping at the first `.png` was an
++  // address with no picture behind it, filed beside the real one as a second
++  // photo.
+   const jsonUrlRe =
+-    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?\.(?:jpe?g|png|webp|avif)(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
++    /(?:https?:)?(?:\\?\/){2}(?:[^"'\s\\)>]|\\\/)+?(?:\.(?:jpe?g|png|webp|avif))+(?:\?(?:[^"'\s\\)>]|\\\/)*)?/gi;
+   while ((m = jsonUrlRe.exec(html))) out.push(m[0].replace(/\\\//g, "/"));
+ 
+   return out;
+@@ -751,10 +782,14 @@ export function harvestGalleryImages(
+       // A different host is someone else's imagery — review photos, ad pixels,
+       // partner badges. The product's gallery is served where its main photo is.
+       if (!host || !trustedHosts.has(host)) continue;
+-      // Both named `<code>_<frame>`: the code decides, and nothing else does.
++      // A store that names the piece's photos by its code (`<code>_<frame>`):
++      // the code decides, and nothing else does — a file named in words is
++      // not one of this store's photos of the piece, however many of the
++      // piece's words it carries. GOAT's rail is the same model in other
++      // colours, `…-retro-high-og-chicago-reimagined.png`.
+       const code = frameCode(url);
+-      if (code && trustedCodes.size) {
+-        if (!trustedCodes.has(code)) continue;
++      if (trustedCodes.size) {
++        if (!code || !trustedCodes.has(code)) continue;
+       } else if (
+         !named &&
+         !trustedStems.some(
+diff --git a/src/lib/server/parser/parse-page.ts b/src/lib/server/parser/parse-page.ts
+index 1f5c21b..4e0453f 100644
+--- a/src/lib/server/parser/parse-page.ts
++++ b/src/lib/server/parser/parse-page.ts
+@@ -214,7 +214,7 @@ export async function parsePage(url: string, opts: ParsePageOptions): Promise<Pa
+       if (result.error) {
+         aiError = result.error;
+       } else {
+-        const merged = mergeAiIntoRaw(raw, result.fields);
++        const merged = mergeAiIntoRaw(raw, result.fields, pageUrl);
+         raw = merged.raw;
+         aiFields = merged.used;
+       }

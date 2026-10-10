@@ -10,7 +10,7 @@
  * No DOM library — pure regex/JSON parsing so it runs in any serverless route.
  */
 import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
-import { harvestGalleryImages } from "./gallery";
+import { harvestGalleryImages, isPlaceholderPhoto } from "./gallery";
 import { chooseColour } from "./colour-choice";
 import {
   canonicalColor,
@@ -1007,7 +1007,10 @@ export function extractProduct(
   const pick = (...vals: (string | undefined)[]): string | undefined =>
     vals.find((v) => v !== undefined && v !== "");
 
-  const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter(Boolean);
+  // The page's own photos: what its structured data and OpenGraph state, less
+  // a placeholder or the store's share card standing in for one it lacks.
+  const ownPhoto = (u?: string) => (u && !isPlaceholderPhoto(u) ? u : undefined);
+  const images = [...new Set([...(jsonld.images ?? []), ...(meta.images ?? [])])].filter((u) => !!ownPhoto(u));
   const shownPrice = sizeReadAsPrice(evidence) ? "" : evidence?.priceText ? priceInDisplay(evidence.priceText) : "";
 
   // Sizes, in order of how directly the page said it: a recipe rule an admin
@@ -1036,7 +1039,7 @@ export function extractProduct(
     meta.description,
   );
 
-  const image = pick(ruleVal("image"), jsonld.image, meta.image, images[0]);
+  const image = pick(ruleVal("image"), ownPhoto(jsonld.image), ownPhoto(meta.image), images[0]);
   // The product's name: the first candidate that is not the store's own name.
   // The title the extension read beside the buy button sits after the h1s —
   // on most stores the h1 is the product — and before `og:title`, which is
@@ -1072,9 +1075,15 @@ export function extractProduct(
   // Harvest the rest from the markup, anchored to what we already trust so the
   // recommendations carousel and page furniture stay out. Trusted images keep
   // their position, so the primary photo never changes.
+  //
+  // No photo of its own, no gallery. With nothing to anchor to, a file name
+  // sharing two words with the piece's was enough — and on a GOAT page whose
+  // piece has no photo that was the rail beneath it, the same model in other
+  // colours, which became the card. A page without a photo of its piece is
+  // skipped instead (`collect/route.ts`).
   let galleryImages: string[] = [];
-  if (baseUrl) {
-    const anchor = image ? [image, ...images] : images;
+  if (baseUrl && image) {
+    const anchor = [image, ...images];
     const productName = name ?? "";
     galleryImages = harvestGalleryImages(html, baseUrl, anchor, productName, evidence?.images ?? []);
     if (galleryImages.length) strategies.push("gallery");
