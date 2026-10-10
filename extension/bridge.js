@@ -38,7 +38,22 @@
   /** How long to wait for the page before calling a request lost. */
   const REPLY_TIMEOUT_MS = 120_000;
 
-  let nextId = 1;
+  /**
+   * One bridge per page. The worker injects this file into a collect tab whose
+   * bridge does not answer, and Chrome runs the manifest's copy when the page
+   * finishes loading — so a tab reloaded just before a run could end up with
+   * both. Every request then reached the page twice, and every piece was
+   * imported twice at once: one card, and a "duplicate key" failure beside it.
+   * Now each bridge announces itself as it starts, and every older one stops
+   * taking requests; the newest is the one the worker can reach.
+   */
+  const FROM_BRIDGE = "goo-collect/bridge";
+  const self = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  let retired = false;
+
+  // Each bridge numbers its requests from its own random start: a retired one
+  // still waiting on the page must not take the answer to a newer one's.
+  let nextId = 1 + Math.floor(Math.random() * 2 ** 40);
   /** id → resolver, for requests the page has not answered yet. */
   const pending = new Map();
 
@@ -49,6 +64,10 @@
     if (event.origin !== window.location.origin) return;
 
     const msg = event.data;
+    if (msg && msg.source === FROM_BRIDGE && msg.type === "claim" && msg.self !== self) {
+      retire();
+      return;
+    }
     if (!msg || msg.source !== FROM_PAGE) return;
 
     if (typeof msg.id === "number") {
@@ -62,7 +81,9 @@
     // One-way instructions from the screen. Stop is the one that matters, and it
     // has to reach the worker whatever it is in the middle of. Retry asks the
     // worker to open again the pages it recorded as failed; the page names no
-    // addresses, so it cannot point the worker anywhere else.
+    // addresses, so it cannot point the worker anywhere else. Passed on by the
+    // live bridge only, so a Retry is not asked for twice.
+    if (retired) return;
     if (msg.type === "stop") {
       chrome.runtime.sendMessage({ type: "stop" }).catch(() => {});
     } else if (msg.type === "retry") {
@@ -94,8 +115,8 @@
     window.postMessage({ source: FROM_EXT, type, payload: payload ?? {} }, window.location.origin);
   }
 
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (!msg || msg.target !== "bridge") return undefined;
+  function onWorkerMessage(msg, _sender, sendResponse) {
+    if (retired || !msg || msg.target !== "bridge") return undefined;
 
     if (msg.type === "ping") {
       sendResponse({ ok: true });
@@ -111,7 +132,25 @@
 
     ask(msg.type, msg.payload).then(sendResponse);
     return true; // keep the channel open for the async reply
-  });
+  }
+
+  /**
+   * Stop taking requests from the worker. Requests already handed to the page
+   * are still answered: the page's replies keep arriving here, and the worker
+   * is waiting for them.
+   */
+  function retire() {
+    if (retired) return;
+    retired = true;
+    try {
+      chrome.runtime.onMessage.removeListener(onWorkerMessage);
+    } catch {
+      /* a bridge left from before an extension update has no runtime left */
+    }
+  }
+
+  chrome.runtime.onMessage.addListener(onWorkerMessage);
+  window.postMessage({ source: FROM_BRIDGE, type: "claim", self }, window.location.origin);
 
   // Introduce this tab to the worker, and greet the page so it can show that the
   // extension is connected rather than leaving the admin guessing.

@@ -1333,7 +1333,25 @@ export async function importParsedProduct(
       }
 
       const { data, error, dropped } = await writeProductRow<{ id: string }>(dbRow, insert);
-      if (error) throw new Error(error.message);
+      if (error) {
+        // Two imports of one page at once — the collect tab passing one
+        // request twice, or a page retried while it was still saving — both
+        // looked for its card, neither found one, and the second insert met
+        // the unique address. The card is there: this page is in the catalogue.
+        const { data: saved } = error.code === "23505" && sourceUrl
+          ? await supabase.from("products").select("id").in("source_url", urlSpellings(sourceUrl)).limit(1).maybeSingle()
+          : { data: null };
+        const savedId = (saved as { id: string } | null)?.id;
+        if (!savedId) throw new Error(error.message);
+        return {
+          ok: true,
+          productId: savedId,
+          updated: true,
+          priceNote,
+          brandNote,
+          linkNote: "saved a moment ago by another import of this page — that card is kept",
+        };
+      }
       productId = data?.id ?? null;
       droppedColumns = dropped;
       if (miss) newCardNote = `new card — ${miss}`;

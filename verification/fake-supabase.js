@@ -5,14 +5,35 @@
  * jsonb `cs` filter on retailers), `brands` reads from the Brands list a test
  * sets, and every other table with nothing, and records inserts, updates and
  * upserts instead of performing them — the importer's writes are the result.
+ *
+ * Two opt-ins for the SSENSE tests: `storage`, a bucket that takes uploads, and
+ * `lateRows`, rows a parallel import commits between this import's lookup and
+ * its insert — invisible to the lookup, there for the insert to collide with.
  */
 let rows = [];
 let writes = [];
 let brands = [];
+let lateRows = [];
+let storage = false;
+let uploads = [];
+const STORAGE_ORIGIN = "https://own.supabase.co";
 
 function builder(table) {
   const q = { table, filters: [], op: "select", row: null, single: false, limit: 0 };
   const run = () => {
+    if (q.op === "insert" && table === "products") {
+      const late = lateRows.findIndex((r) => r.source_url && r.source_url === q.row?.source_url);
+      if (late >= 0) {
+        // `invisible`: the collision is on some other unique column, and
+        // nothing ever appears at this address.
+        const [row] = lateRows.splice(late, 1);
+        if (!row.invisible) rows.push(row);
+        return {
+          data: null,
+          error: { code: "23505", message: 'duplicate key value violates unique constraint "products_source_url_idx"' },
+        };
+      }
+    }
     if (q.op === "insert" || q.op === "update" || q.op === "upsert") {
       writes.push({ table, op: q.op, row: q.row, filters: q.filters });
       return { data: q.single ? { id: q.op === "insert" ? "new-id" : q.filters.find((f) => f[1] === "id")?.[2] } : [], error: null };
@@ -69,18 +90,36 @@ function builder(table) {
 const supabase = {
   from: (table) => builder(table),
   rpc: async () => ({ data: null, error: null }),
-  storage: { from: () => ({ upload: async () => ({ error: { message: "no storage" } }), getPublicUrl: () => ({ data: { publicUrl: "" } }) }) },
+  storage: {
+    createBucket: async () => ({ error: storage ? { message: "The resource already exists" } : { message: "no storage" } }),
+    from: () => ({
+      upload: async (path) => {
+        if (!storage) return { error: { message: "no storage" } };
+        uploads.push(path);
+        return { error: null };
+      },
+      getPublicUrl: (path) => ({
+        data: { publicUrl: storage ? `${STORAGE_ORIGIN}/storage/v1/object/public/product-images/${path}` : "" },
+      }),
+    }),
+  },
 };
 
 module.exports = {
   supabase,
   isSupabaseConfigured: true,
   dbToColorGroup: (r) => r,
+  STORAGE_ORIGIN,
   reset(list, opts = {}) {
     rows = list.map((r) => ({ ...r }));
     writes = [];
     if (opts.brands) brands = [...opts.brands];
+    lateRows = (opts.lateRows ?? []).map((r) => ({ ...r }));
+    storage = !!opts.storage;
+    uploads = [];
   },
+  /** Paths put in the bucket since the last reset. */
+  uploads: () => [...uploads],
   /** Brands the importer put on the Brands list. */
   brandsAdded: () => writes.filter((w) => w.table === "brands" && w.op === "upsert").map((w) => w.row.name),
   inserts: () => writes.filter((w) => w.table === "products" && w.op === "insert"),

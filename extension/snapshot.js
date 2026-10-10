@@ -176,6 +176,39 @@
   }
 
   /**
+   * The addresses in a `srcset`, whole — the same reading as `srcsetUrls` in
+   * the site's `gallery.ts`. Split on every comma, a Cloudinary rendition
+   * (`…/upload/b_white,c_lpad,w_960/photo.jpg 960w`, SSENSE's every photo)
+   * came apart into `…/upload/b_white`, `c_lpad` and `w_960/photo.jpg`. A
+   * candidate runs to whitespace, and the comma that ends it is the one after
+   * its descriptor, or one the address itself ends with.
+   */
+  function srcsetUrls(value) {
+    const out = [];
+    const s = String(value);
+    let i = 0;
+    while (i < s.length) {
+      while (i < s.length && /[\s,]/.test(s[i])) i++;
+      if (i >= s.length) break;
+      let j = i;
+      while (j < s.length && !/\s/.test(s[j])) j++;
+      const word = s.slice(i, j);
+      i = j;
+      const url = word.replace(/,+$/, "");
+      if (url) out.push(url);
+      if (url !== word) continue; // the comma closed it: no descriptor
+      let depth = 0;
+      while (i < s.length) {
+        const ch = s[i++];
+        if (ch === "(") depth++;
+        else if (ch === ")") depth = Math.max(0, depth - 1);
+        else if (ch === "," && depth === 0) break;
+      }
+    }
+    return out;
+  }
+
+  /**
    * Every address on the page that could be a photo of this product.
    *
    * Deliberately greedy: it costs a few hundred strings, and the server rejects
@@ -190,10 +223,7 @@
       if (url && found.size < MAX_IMAGES) found.add(url);
     };
     const addSrcset = (value) => {
-      if (!value) return;
-      for (const part of String(value).split(",")) {
-        add(part.trim().split(/\s+/)[0]);
-      }
+      if (value) for (const url of srcsetUrls(value)) add(url);
     };
 
     // `currentSrc` first: on a responsive image it is the rendition the browser

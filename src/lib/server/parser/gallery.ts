@@ -86,6 +86,219 @@ const NOISE = /(?:sprite|placeholder|transparent|blank|pixel|spacer|logo|favicon
 const WP_UPLOADS = /\/wp-content\/uploads\//i;
 const WP_SIZE = /-(?:\d{2,5}x\d{2,5}|scaled)(?=\.[a-z0-9]+$)/i;
 
+/**
+ * A path segment that is a blank for the page's script to fill, not part of an
+ * address: SSENSE's `__IMAGE_PARAMS__`, or a `{width}` / `{size}`. A page's
+ * structured data hands these over as they stand — SSENSE's JSON-LD names its
+ * main photo `…/image/upload/__IMAGE_PARAMS__/242232M188005_1.jpg` — and the CDN
+ * has no such picture, so the card's main photo was a broken image.
+ */
+const PLACEHOLDER_SEGMENT = /^(?:__[a-z0-9_]+__|\{[^{}/]*\}|%7b(?:(?!%7d).)*%7d)$/i;
+const PLACEHOLDER = /(?:^|\/)(?:__[a-z0-9_]+__|\{[^{}/]*\}|%7b(?:(?!%7d)[^/])*%7d)(?=\/|$)/i;
+
+/** Shopify's lazy-loading blank for a rendition: `photo_{width}x.jpg`. The original has none. */
+const SHOPIFY_WIDTH_BLANK = /_(?:\{width\}|%7Bwidth%7D)x(?=\.[a-z0-9]+$)/i;
+
+/**
+ * Cloudinary addresses one upload as
+ * `…/image/upload/<transformations>/<v123>/<public id>.<ext>`, or with an SEO
+ * name as `…/images/<transformations>/<public id>/<name>.<ext>`. Every
+ * rendition of a photo — the slide, the 2× retina copy, the zoom — differs only
+ * in the transformations: `key_value` pairs joined by commas, chained by
+ * slashes, keys from Cloudinary's closed list. Read as plain paths they were six
+ * photos of one shot.
+ */
+const CLOUDINARY_PARAM =
+  /^(?:a|ac|af|ar|b|bo|br|c|co|cs|d|dl|dn|dpr|du|e|eo|f|fl|fn|fps|g|h|ki|l|o|p|pg|q|r|so|sp|t|u|vc|vs|w|x|y|z)_[^,/]*$/;
+
+/**
+ * Store domains that serve a Cloudinary account under their own name, by that
+ * account's name: the photo is one whichever address the page used. SSENSE's
+ * structured data names `res.cloudinary.com/ssenseweb`, its pages render
+ * `img.ssensemedia.com`.
+ */
+const CLOUDINARY_DOMAINS: Record<string, string> = {
+  "img.ssensemedia.com": "ssenseweb",
+};
+
+interface CloudinaryPhoto {
+  /** The account: its name on `res.cloudinary.com`, or the domain that serves it. */
+  cloud: string;
+  /** The address up to the transformations, slash included. */
+  head: string;
+  /** Transformation segments in order, a placeholder among them as it stands. */
+  transforms: string[];
+  /** What follows them: version, public id, SEO name, extension. */
+  tail: string;
+  /** The upload itself — public id without version or extension, lowercased. */
+  id: string;
+}
+
+function isTransformSegment(segment: string): boolean {
+  return PLACEHOLDER_SEGMENT.test(segment) || segment.split(",").every((part) => CLOUDINARY_PARAM.test(part));
+}
+
+function cloudinaryPhoto(url: string): CloudinaryPhoto | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^www\./, "").toLowerCase();
+  const onCloudinary = /(?:^|\.)cloudinary\.com$/.test(host);
+  const m =
+    u.pathname.match(/^(\/(?:([^/]+)\/)?image\/(?:upload|private)\/)(.+)$/) ??
+    u.pathname.match(/^(\/(?:([^/]+)\/)?images\/)(.+)$/);
+  if (!m) return null;
+  const seo = !/\/image\/(?:upload|private)\/$/.test(m[1]);
+
+  const segments = m[3].split("/");
+  let n = 0;
+  while (n < segments.length - 1 && isTransformSegment(segments[n])) n++;
+  const transforms = segments.slice(0, n);
+  let rest = segments.slice(n);
+  // `/images/…` is everyone's folder name. It is read as Cloudinary's SEO form
+  // only on Cloudinary itself or a domain known to front it, or when what
+  // follows is a transformation chain no ordinary folder is named like.
+  if (seo && !onCloudinary && !CLOUDINARY_DOMAINS[host] && !transforms.length) return null;
+  if (rest[0] && /^v\d+$/.test(rest[0])) rest = rest.slice(1);
+  // The SEO form ends in a name for search engines; the upload is before it.
+  if (seo) rest = rest.slice(0, -1);
+  if (!rest.length || !rest.join("")) return null;
+
+  const cloud = CLOUDINARY_DOMAINS[host] ?? (onCloudinary ? m[2] ?? host : m[2] ? `${host}/${m[2]}` : host);
+  const id = decodeURIComponent(rest.join("/")).replace(/\.[a-z0-9]+$/i, "").toLowerCase();
+  return {
+    cloud: cloud.toLowerCase(),
+    head: `${u.origin}${m[1]}`,
+    transforms,
+    tail: segments.slice(n).join("/") + u.search,
+    id,
+  };
+}
+
+/** Does this address still carry a blank its page was meant to fill? */
+export function hasPlaceholder(url: string): boolean {
+  try {
+    return PLACEHOLDER.test(new URL(url).pathname);
+  } catch {
+    return PLACEHOLDER.test(url);
+  }
+}
+
+/**
+ * How good a copy of its photo an address is, to choose between two addresses
+ * of one photo: the bigger rendition, an address over a blank, and no opinion
+ * (0) outside Cloudinary, where `upgradeImageUrl` has already asked for the
+ * original and two addresses of one photo are the same picture.
+ */
+export function renditionRank(url: string): number {
+  const c = cloudinaryPhoto(url);
+  if (!c) return hasPlaceholder(url) ? -1 : 0;
+  if (c.transforms.some((t) => PLACEHOLDER_SEGMENT.test(t))) return -1;
+  // A chain can only shrink what the step before it made, so the photo is the
+  // size of its smallest step. A chain that sets no size is the full upload.
+  let size = Number.MAX_SAFE_INTEGER;
+  let dpr = 1;
+  for (const segment of c.transforms) {
+    let step = 0;
+    for (const part of segment.split(",")) {
+      const dim = part.match(/^[wh]_(\d+)$/);
+      if (dim) step = Math.max(step, Number(dim[1]));
+      const density = part.match(/^dpr_(\d+(?:\.\d+)?)$/);
+      if (density) dpr = Number(density[1]);
+    }
+    if (step) size = Math.min(size, step);
+  }
+  return size === Number.MAX_SAFE_INTEGER ? size : size * dpr;
+}
+
+/**
+ * An address for a photo its page named only by template, or null when there
+ * is none to make.
+ *
+ * On Cloudinary the blank is the transformation, and the page's own photos
+ * show which ones the account serves (an account can refuse any it has not
+ * allowed), so the blank takes the chain of its biggest real sibling. With no
+ * sibling the blank is dropped: no transformation is the upload itself.
+ */
+export function fillPhotoTemplate(url: string, siblings: string[] = []): string | null {
+  const c = cloudinaryPhoto(url);
+  if (!c) return null;
+  let chain: string[] = [];
+  let best = -1;
+  for (const s of siblings) {
+    const sc = cloudinaryPhoto(s);
+    if (!sc || sc.cloud !== c.cloud) continue;
+    const rank = renditionRank(s);
+    if (rank > best) {
+      best = rank;
+      chain = sc.transforms;
+    }
+  }
+  const transforms = c.transforms.flatMap((t) => (PLACEHOLDER_SEGMENT.test(t) ? chain : [t]));
+  return `${c.head}${[...transforms, c.tail].join("/")}`;
+}
+
+/**
+ * One address per photo, keyed by `imageKey`, in the order the photos first
+ * appear — the best copy of each (`renditionRank`), and an address the page
+ * named by template filled from its siblings or, when nothing can fill it,
+ * left out.
+ */
+export function dedupePhotos(urls: string[]): Map<string, string> {
+  const best = new Map<string, string>();
+  for (const url of urls) {
+    if (!url) continue;
+    const key = imageKey(url);
+    const held = best.get(key);
+    if (held === undefined || renditionRank(url) > renditionRank(held)) best.set(key, url);
+  }
+  const all = [...best.values()];
+  for (const [key, url] of best) {
+    if (!hasPlaceholder(url)) continue;
+    const filled = fillPhotoTemplate(url, all);
+    if (filled && !hasPlaceholder(filled)) best.set(key, filled);
+    else best.delete(key);
+  }
+  return best;
+}
+
+/**
+ * The addresses in a `srcset`, whole.
+ *
+ * Split on every comma, a Cloudinary rendition
+ * (`…/upload/b_white,c_pad,w_960/photo.jpg 960w`) came apart into
+ * `…/upload/b_white`, `c_pad` and `w_960/photo.jpg`. A candidate is the run up
+ * to whitespace, and the comma that ends it is the one after its descriptor —
+ * or a comma the address itself ends with — as the HTML standard reads it.
+ */
+export function srcsetUrls(value: string): string[] {
+  const out: string[] = [];
+  const s = String(value ?? "");
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /[\s,]/.test(s[i])) i++;
+    if (i >= s.length) break;
+    let j = i;
+    while (j < s.length && !/\s/.test(s[j])) j++;
+    const word = s.slice(i, j);
+    i = j;
+    const url = word.replace(/,+$/, "");
+    if (url) out.push(url);
+    if (url !== word) continue; // the comma closed it: no descriptor
+    let depth = 0;
+    while (i < s.length) {
+      const ch = s[i++];
+      if (ch === "(") depth++;
+      else if (ch === ")") depth = Math.max(0, depth - 1);
+      else if (ch === "," && depth === 0) break;
+    }
+  }
+  return out;
+}
+
 /** Resolve, upgrade to full resolution, and drop tracking/size noise. */
 export function upgradeImageUrl(src: string, baseUrl: string): string | null {
   if (!src) return null;
@@ -111,8 +324,11 @@ export function upgradeImageUrl(src: string, baseUrl: string): string | null {
       .filter((part) => part && !SIZE_PARAMS.includes(part.split("=")[0].toLowerCase()));
     if (kept.length !== u.search.slice(1).split("&").length) u.search = kept.join("&");
   }
-  u.pathname = u.pathname.replace(RENDITION_SUFFIX, "");
+  u.pathname = u.pathname.replace(SHOPIFY_WIDTH_BLANK, "").replace(RENDITION_SUFFIX, "");
   if (WP_UPLOADS.test(u.pathname)) u.pathname = u.pathname.replace(/-\d{2,5}x\d{2,5}(?=\.[a-z0-9]+$)/i, "");
+  // A blank only a Cloudinary address can have filled (`dedupePhotos`);
+  // anywhere else it names no picture at all.
+  if (PLACEHOLDER.test(u.pathname) && !cloudinaryPhoto(u.toString())) return null;
 
   if (NON_IMAGE_EXT.test(u.pathname)) return null;
   if (!IMAGE_EXT.test(u.pathname) && !NO_EXTENSION.test(u.pathname)) return null;
@@ -133,10 +349,16 @@ export function upgradeImageUrl(src: string, baseUrl: string): string | null {
  *   - a format: `coat.jpg`, `coat.webp`, and the `coat.jpg.webp` an image
  *     optimiser writes beside it.
  *
+ *   - a Cloudinary transformation (`…/upload/w_480,dpr_2.0/<id>.jpg`), or the
+ *     template blank in its place: the upload is one photo, whichever account
+ *     domain served it.
+ *
  * The key drops all of them. A frame number is never touched: `_0010` and
  * `_0017` stay two photos.
  */
 export function imageKey(url: string): string {
+  const cloudinary = cloudinaryPhoto(url);
+  if (cloudinary) return `cloudinary:${cloudinary.cloud}/${cloudinary.id}`;
   try {
     const u = new URL(url);
     let host = u.hostname.replace(/^www\./, "").toLowerCase();
@@ -150,7 +372,7 @@ export function imageKey(url: string): string {
       path = `/${shopify[1]}/${shopify[2]}`;
     }
 
-    path = path.replace(RENDITION_SUFFIX, "");
+    path = path.replace(SHOPIFY_WIDTH_BLANK, "").replace(RENDITION_SUFFIX, "");
     if (WP_UPLOADS.test(path)) path = path.replace(WP_SIZE, "");
     path = path
       .replace(/@[23]x(?=\.[a-z0-9]+$)/, "")
@@ -164,6 +386,21 @@ export function imageKey(url: string): string {
 }
 
 /**
+ * Where a photo is served from, for "same host as the main photo": the host,
+ * or on Cloudinary the account — `res.cloudinary.com` serves every Cloudinary
+ * customer, and one store serves its account from a domain of its own too.
+ */
+function photoHost(url: string): string {
+  const cloudinary = cloudinaryPhoto(url);
+  if (cloudinary) return `cloudinary:${cloudinary.cloud}`;
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Filename reduced to comparable characters: lowercase alphanumerics only.
  * A trailing 32-character hex run is a CDN de-duplication UUID (Shopify appends
  * one when two uploads share a name) and says nothing about the product, so it
@@ -172,7 +409,10 @@ export function imageKey(url: string): string {
  */
 function stem(url: string): string {
   try {
-    const file = new URL(url).pathname.split("/").pop() ?? "";
+    // On Cloudinary the file is the upload's public id: an SEO name after it is
+    // the product's slug on every photo of it — and on the next product's too.
+    const cloudinary = cloudinaryPhoto(url);
+    const file = cloudinary ? cloudinary.id.split("/").pop() ?? "" : new URL(url).pathname.split("/").pop() ?? "";
     return file
       .replace(IMAGE_EXT, "")
       .toLowerCase()
@@ -360,12 +600,7 @@ function collectCandidates(html: string): string[] {
   // srcset on <img> and <source>: take every candidate; the largest wins after
   // the rendition suffix and size params are stripped, so order is irrelevant.
   const srcsetRe = /\b(?:data-)?srcset\s*=\s*["']([^"']+)["']/gi;
-  while ((m = srcsetRe.exec(html))) {
-    for (const part of m[1].split(",")) {
-      const url = part.trim().split(/\s+/)[0];
-      if (url) out.push(url);
-    }
-  }
+  while ((m = srcsetRe.exec(html))) out.push(...srcsetUrls(m[1]));
 
   // <link rel="preload" as="image"> — browsers preload the gallery's hero shots.
   const preloadRe = /<link\b[^>]*\bas=["']image["'][^>]*>/gi;
@@ -373,12 +608,7 @@ function collectCandidates(html: string): string[] {
     const href = m[0].match(/\bhref\s*=\s*["']([^"']+)["']/i);
     if (href) out.push(href[1]);
     const imagesrcset = m[0].match(/\bimagesrcset\s*=\s*["']([^"']+)["']/i);
-    if (imagesrcset) {
-      for (const part of imagesrcset[1].split(",")) {
-        const url = part.trim().split(/\s+/)[0];
-        if (url) out.push(url);
-      }
-    }
+    if (imagesrcset) out.push(...srcsetUrls(imagesrcset[1]));
   }
 
   // Inline JSON blobs (Shopify/Next hydration payloads) reference the gallery
@@ -403,7 +633,10 @@ function collectCandidates(html: string): string[] {
  * `trusted` are the images structured data already gave us — they anchor the
  * search, and are also what a candidate must resemble to be accepted. Returns
  * only the NEW images, in document order; the caller keeps the trusted ones
- * first so the primary photo never changes.
+ * first so the primary photo never changes. A photo already held comes back
+ * only as a better copy of itself — the address the page rendered for one its
+ * markup named by template, or a bigger Cloudinary rendition — for
+ * `dedupePhotos` to put in its place.
  *
  * `extra` is for candidates the markup does not contain. The collect extension
  * reads the rendered page, so it sees what a virtualised carousel mounted, what
@@ -427,18 +660,20 @@ export function harvestGalleryImages(
   const trustedHosts = new Set<string>();
   const trustedStems: string[] = [];
   for (const u of trustedUrls) {
-    try {
-      trustedHosts.add(new URL(u).hostname.replace(/^www\./, ""));
-    } catch {
-      /* skip */
-    }
+    const host = photoHost(u);
+    if (host) trustedHosts.add(host);
     const s = stem(u);
     if (s) trustedStems.push(s);
   }
 
   const { phrases: slugPhrases, codes } = urlIdentity(baseUrl);
   const phrases = [...new Set([...namePhrases(productName), ...slugPhrases])];
-  const seen = new Set(trustedUrls.map(imageKey));
+  /** Photos held so far, with how good a copy of each (`renditionRank`). */
+  const held = new Map<string, number>();
+  for (const u of trustedUrls) {
+    const key = imageKey(u);
+    held.set(key, Math.max(held.get(key) ?? -Infinity, renditionRank(u)));
+  }
   const out: string[] = [];
 
   const candidates = [...collectCandidates(html), ...extra]
@@ -447,14 +682,21 @@ export function harvestGalleryImages(
 
   for (const url of candidates) {
     const key = imageKey(url);
-    if (seen.has(key)) continue;
+    const rank = renditionRank(url);
+    const had = held.get(key);
+    if (had !== undefined) {
+      // The same upload is the same photo, so no test below applies to it.
+      if (rank > had) {
+        held.set(key, rank);
+        out.push(url);
+      }
+      continue;
+    }
 
-    let host: string;
+    const host = photoHost(url);
     let path: string;
     try {
-      const u = new URL(url);
-      host = u.hostname.replace(/^www\./, "");
-      path = u.pathname;
+      path = new URL(url).pathname;
     } catch {
       continue;
     }
@@ -479,7 +721,7 @@ export function harvestGalleryImages(
     } else {
       // A different host is someone else's imagery — review photos, ad pixels,
       // partner badges. The product's gallery is served where its main photo is.
-      if (!trustedHosts.has(host)) continue;
+      if (!host || !trustedHosts.has(host)) continue;
       const sibling =
         named ||
         trustedStems.some(
@@ -493,7 +735,7 @@ export function harvestGalleryImages(
       if (!sibling) continue;
     }
 
-    seen.add(key);
+    held.set(key, rank);
     out.push(url);
   }
 

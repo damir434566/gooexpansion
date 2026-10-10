@@ -28,7 +28,7 @@ import {
   subcategoryToValue,
   type CategoryGroup,
 } from "@/lib/categories";
-import { upgradeImageUrl, imageKey } from "./gallery";
+import { dedupePhotos, upgradeImageUrl, imageKey } from "./gallery";
 import { looksLikeProductPath, isNonProductPath } from "./extract";
 
 function hostOf(url: string): string {
@@ -196,14 +196,17 @@ export function normalizeExtract(
   // so string dedupe stored one photo three times and mirrored it three times.
   // And a page that requests `?width=300` markup would otherwise have its
   // gallery mirrored at 300px, which is useless for a catalog.
-  const byPhoto = new Map<string, string>();
-  for (const u of raw.images ?? []) {
-    const abs = absoluteUrl(u, sourceUrl);
-    if (!abs) continue;
-    const full = upgradeImageUrl(abs, sourceUrl) ?? abs;
-    const key = imageKey(full);
-    if (!byPhoto.has(key)) byPhoto.set(key, full);
-  }
+  //
+  // Of one photo's addresses the best copy is kept, where the first appeared:
+  // SSENSE names its main photo by template (`…/__IMAGE_PARAMS__/…_1.jpg`),
+  // which no CDN serves, and the address its page rendered for that photo
+  // takes the template's place (`dedupePhotos`).
+  const byPhoto = dedupePhotos(
+    (raw.images ?? []).flatMap((u) => {
+      const abs = absoluteUrl(u, sourceUrl);
+      return abs ? [upgradeImageUrl(abs, sourceUrl) ?? abs] : [];
+    }),
+  );
   const images = [...byPhoto.values()].slice(0, MAX_PRODUCT_IMAGES);
 
   const rawAbs = raw.image && absoluteUrl(raw.image, sourceUrl);
@@ -211,8 +214,10 @@ export function normalizeExtract(
   // Take the gallery's spelling of the primary photo when they are the same
   // picture. They routinely differ as strings while naming one file, and the
   // mirror deduplicates on the string — so without this the hero shot is
-  // downloaded and stored twice.
-  const imageUrl = (rawPrimary && byPhoto.get(imageKey(rawPrimary))) || rawPrimary || images[0] || "";
+  // downloaded and stored twice. Asked of the gallery and the primary
+  // together, so a primary left out of the gallery is still filled from it.
+  const imageUrl =
+    (rawPrimary && dedupePhotos([...byPhoto.values(), rawPrimary]).get(imageKey(rawPrimary))) || images[0] || "";
   if (!imageUrl) issues.push("no image");
 
   // Colour, in order of how directly the page said it: its own colour field

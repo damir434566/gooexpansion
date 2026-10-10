@@ -191,6 +191,14 @@ export default function CollectPage() {
    * suffix *means* is still decided server-side.
    */
   const titlesRef = useRef<string[]>([]);
+  /**
+   * Imports under way, by page address. A page asked for again while its import
+   * is running gets that import's answer instead of a second one: two bridges
+   * in one tab (Goo Collect up to 1.0.18 could inject a second into a tab still
+   * loading) passed every request twice, and the two imports of each page raced
+   * to one address — a card and a "duplicate key" row for every piece.
+   */
+  const ingestsRef = useRef(new Map<string, Promise<{ ok: boolean; data: unknown }>>());
 
   const reply = useCallback((id: number | undefined, ok: boolean, data: unknown) => {
     if (typeof id !== "number") return;
@@ -298,28 +306,39 @@ export default function CollectPage() {
           // Refusing here is what makes Stop immediate: a worker already
           // mid-page cannot land one more product after the button.
           if (stoppedRef.current) return reply(msg.id, false, "Stopped by the admin");
+          const url = typeof payload.url === "string" ? payload.url : "";
+          const running = url ? ingestsRef.current.get(url) : undefined;
+          if (running) {
+            const outcome = await running;
+            return reply(msg.id, outcome.ok, outcome.data);
+          }
           setConnected(true);
           setPhase("collecting");
-          try {
-            const pageTitle = typeof payload.pageTitle === "string" ? payload.pageTitle : "";
-            if (pageTitle && !titlesRef.current.includes(pageTitle)) {
-              titlesRef.current = [...titlesRef.current, pageTitle].slice(-12);
+          const job = (async () => {
+            try {
+              const pageTitle = typeof payload.pageTitle === "string" ? payload.pageTitle : "";
+              if (pageTitle && !titlesRef.current.includes(pageTitle)) {
+                titlesRef.current = [...titlesRef.current, pageTitle].slice(-12);
+              }
+              const data = await callApi({
+                action: "ingest",
+                ...payload,
+                titles: titlesRef.current,
+                linksOnly: modeFromExtension(payload) ?? linksOnlyRef.current,
+              });
+              const result = data.result as CrawlItemResult | undefined;
+              if (result) setResults((prev) => [...prev, result]);
+              return { ok: true, data: data as unknown };
+            } catch (err) {
+              const message = err instanceof Error ? err.message : "Ingest failed";
+              setResults((prev) => [...prev, { url, status: "failed", reason: message }]);
+              return { ok: false, data: message as unknown };
             }
-            const data = await callApi({
-              action: "ingest",
-              ...payload,
-              titles: titlesRef.current,
-              linksOnly: modeFromExtension(payload) ?? linksOnlyRef.current,
-            });
-            const result = data.result as CrawlItemResult | undefined;
-            if (result) setResults((prev) => [...prev, result]);
-            reply(msg.id, true, data);
-          } catch (err) {
-            const message = err instanceof Error ? err.message : "Ingest failed";
-            const url = typeof payload.url === "string" ? payload.url : "";
-            setResults((prev) => [...prev, { url, status: "failed", reason: message }]);
-            reply(msg.id, false, message);
-          }
+          })();
+          if (url) ingestsRef.current.set(url, job);
+          const outcome = await job;
+          if (url) ingestsRef.current.delete(url);
+          reply(msg.id, outcome.ok, outcome.data);
           return;
         }
 

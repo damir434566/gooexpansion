@@ -142,7 +142,12 @@ export interface MirrorResult {
  * - Downloads each distinct URL at most once (primary shares the map).
  * - Runs a few in parallel to keep imports snappy without hammering the CDN.
  * - Never drops a photo: if a download/upload fails, the original URL is kept,
- *   so a rejected mirror degrades to a hotlink instead of a blank card.
+ *   so a rejected mirror degrades to a hotlink instead of a blank card —
+ *   unless the CDN answered that there is no such picture (400, 404, 410) and
+ *   another photo came through: that address is a broken image on any card.
+ * - A main photo that did not come through gives its place to the first that
+ *   did. It is the one every card, list and search result shows, and a
+ *   retailer CDN that refused our server does not serve our shoppers either.
  */
 export async function mirrorProductImages(input: {
   imageUrl: string;
@@ -173,6 +178,10 @@ export async function mirrorProductImages(input: {
   const targets = ordered.slice(0, max);
 
   const mapping = new Map<string, string>();
+  /** Copied into our storage, or there already. */
+  const stored = new Set<string>();
+  /** Addresses the CDN said hold no picture. */
+  const dead = new Set<string>();
   let mirrored = 0;
   let failed = 0;
 
@@ -184,22 +193,32 @@ export async function mirrorProductImages(input: {
       const url = targets[cursor++];
       if (isAlreadyMirrored(url)) {
         mapping.set(url, url);
+        stored.add(url);
         continue;
       }
       try {
         mapping.set(url, await mirrorImageUrl(url));
+        stored.add(url);
         mirrored++;
-      } catch {
+      } catch (err) {
         mapping.set(url, url); // keep original — never lose the photo
         failed++;
+        if (err instanceof Error && /^HTTP (?:400|404|410)\b/.test(err.message)) dead.add(url);
       }
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
 
   const remap = (u: string) => mapping.get(u) ?? u;
-  const newGallery = gallery.map(remap);
-  const newPrimary = imageUrl ? remap(imageUrl) : newGallery[0] ?? "";
+  // Only once a photo is safely ours does anything make way for it.
+  const firstStored = [imageUrl, ...gallery].find((u) => stored.has(u));
+  const kept = firstStored ? gallery.filter((u) => !dead.has(u)) : gallery;
+  let newGallery = kept.map(remap);
+  let newPrimary = imageUrl ? remap(imageUrl) : newGallery[0] ?? "";
+  if (firstStored && !stored.has(imageUrl || gallery[0])) {
+    newPrimary = remap(firstStored);
+    newGallery = [newPrimary, ...newGallery.filter((u) => u !== newPrimary)];
+  }
 
   return {
     imageUrl: newPrimary,
