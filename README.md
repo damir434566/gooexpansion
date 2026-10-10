@@ -451,8 +451,9 @@
 > `verification/test-ssense-import.js` 15/15 (на `master` — 5/15, в том числе та
 > же ошибка «duplicate key»), приёмка `snapshot.js` 21/21 (1.0.18 — 20/21), старые
 > наборы зелёные. Сквозной прогон T: во вкладку приёмника ставится второй мост
-> тем же вызовом, что делает воркер, и запускается сбор: каждая вещь должна
-> дойти до приёмника один раз, приветствие и план — тоже по одному разу.
+> тем же вызовом, что делает воркер, и запускается сбор. На 1.0.18 каждая из
+> четырёх вещей дошла до приёмника дважды, приветствие и каждый план — тоже
+> (138/141); на 1.0.19 — по одному разу, сквозной 141/141.
 >
 > **Плашка «Columns … were not saved — the database is missing them».** Это не
 > ошибка кода. Товар сохранён, но без этих полей: в базе Supabase не прогнаны
@@ -750,7 +751,7 @@ node verification/test-ssense.js                             # 41/41  SSENSE: ш
 node verification/test-ssense-import.js                      # 15/15  главное фото при импорте, «duplicate key»
 node verification/store.js &                                 # фиктивный магазин
 node verification/studio.js &                                # заглушка Студии
-CHROME_PATH=/usr/bin/google-chrome node verification/run.js   # 136/136 сквозной прогон
+CHROME_PATH=/usr/bin/google-chrome node verification/run.js   # 141/141 сквозной прогон
 ```
 
 Скомпилированный код сайта подтягивает `openai`, `@supabase/supabase-js`,
