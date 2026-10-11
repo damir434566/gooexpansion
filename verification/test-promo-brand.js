@@ -57,13 +57,13 @@ const TB = "https://www.timberland.com/en-us/p/footwear-0100/";
 
 (async () => {
   // ── Sales copy is not a brand; brands are ─────────────────────────────────
-  for (const line of [EXCLUDED, WIDES, CART, FALL, "New", "Sale", "Sold out", "Free Shipping & Returns", "$180.00", "Знижка 20%"]) {
+  for (const line of [EXCLUDED, WIDES, CART, FALL, "Extended Sizes", "New", "Sale", "Sold out", "Free Shipping & Returns", "$180.00", "Знижка 20%"]) {
     check(`sales copy: "${line}"`, isSalesCopy(line), true);
   }
   for (const brand of [
     "Timberland", "Timberland®", "Off-White", "New Balance", "Free People", "ONLY", "Save The Duck",
     "Comme des Garçons Homme Plus", "A.P.C.", "1017 ALYX 9SM", "Polo Ralph Lauren", "Stone Island Shadow Project",
-    "The North Face", "Dr. Martens", "Levi's",
+    "The North Face", "Dr. Martens", "Levi's", "On",
   ]) {
     check(`a brand: "${brand}"`, isSalesCopy(brand), false);
   }
@@ -73,7 +73,7 @@ const TB = "https://www.timberland.com/en-us/p/footwear-0100/";
   check("the Brands list and the catalogue, without their sales copy", vocabulary, ["Timberland", "Nike"]);
 
   // ── The brand an import decides ───────────────────────────────────────────
-  const known = ["Timberland", "Nike", "Jordan", "The North Face", CART, WIDES];
+  const known = ["Timberland", "Nike", "Jordan", "The North Face", "On", CART, WIDES, "Extended Sizes"];
   const decide = (stated, name, host = "www.timberland.com", extra = {}) =>
     decideBrand({ stated, name, host, known, weak: true, ...extra });
   check("Timberland®'s name beats the sales line, even one an earlier run put on the Brands list",
@@ -98,10 +98,23 @@ const TB = "https://www.timberland.com/en-us/p/footwear-0100/";
     decide("Jordan", "Flight Essentials Hoodie", "www.nike.com").brand, "Jordan");
   check("a known maker printed on another maker's site, its model in the name: that maker",
     decide("Converse", "Run Star Hike Platform", "www.nike.com", { known: [...known, "Converse"] }).brand, "Converse");
-  check("a known maker printed there, nothing in the name: still that maker",
-    decide("Converse", "Weapon CX", "www.nike.com", { known: [...known, "Converse"] }).brand, "Converse");
+  // On a maker's own site its own word beats a printed one nothing confirms,
+  // known or not: what a run before this one put on the Brands list is "known".
+  check("a known maker printed there, nothing in the name or its model: the site",
+    decide("Converse", "Weapon CX", "www.nike.com", { known: [...known, "Converse"] }).brand, "Nike");
+  check("\"Extended Sizes\" printed, and on the Brands list from an earlier run: Timberland",
+    decide("Extended Sizes", "Women's Stone Street Platform 6-Inch Waterproof Boot").brand, "Timberland");
+  check("a line on the Brands list that the sales test misses still loses to the site",
+    decide("Recycled Materials", "Women's Stone Street Platform 6-Inch Waterproof Boot", "www.timberland.com", { known: [...known, "Recycled Materials"] }).brand, "Timberland");
   check("an unknown word printed on a maker's own site, nothing in the name: the site",
     decide("Gore-Tex", "Men's Waterproof Field Boot").brand, "Timberland");
+  // ── A short brand is a word as often as a maker ───────────────────────────
+  check("\"Pull-On\" is not On: the store's own brand", decide("", "Women's Rowan Way Pull-On Boot").brand, "Timberland");
+  check("\"Slip On\" is not On either", decide("", "Men's Canvas Slip On Shoe", "shop.example").brand, "");
+  check("On's own shoe, its brand first", decide("", "On Cloud 5", "shop.example").brand, "On");
+  check("On's shoe after who it is for", decide("", "Women's On Cloudmonster", "shop.example").brand, "On");
+  check("a brand inside a hyphenated word is not the brand", brandModule.brandInName("Nike-Inspired Runner", ["Nike"]), "");
+  check("a hyphenated brand is still itself", brandModule.brandInName("Off-White Arrow Tee", ["Off-White"]), "Off-White");
   check("a name naming another maker on the brand's site: the name",
     decide("", "Converse Chuck 70 Hi", "www.nike.com", { known: [...known, "Converse"] }).brand, "Converse");
 
@@ -121,6 +134,21 @@ const TB = "https://www.timberland.com/en-us/p/footwear-0100/";
     isSamePieceByName({ brand: "Timberland", name: "Men's Euro Hiker", colors: ["Black"], category: "shoes" }, euro(EXCLUDED, ["Brown"])), true);
   check("two real makers with one name are still two pieces",
     isSamePieceByName({ brand: "Timberland", name: "Men's Euro Hiker", colors: ["Black"], category: "shoes" }, euro("Dr. Martens", ["Brown"])), false);
+
+  // Two pages of one store with no brand read: the store vouches for the maker.
+  const allington = (brand, color, url) => ({ id: color, brand, name: "Women's Allington Mid Boot", colors: [color], category: "shoes", sourceUrl: url });
+  const wheat = allington("", "Wheat", `${TB}allington-wheat`);
+  check("one store, no brand on either, one name: one piece",
+    isSamePieceByName(wheat, allington("", "Black", `${TB}allington-black`)), true);
+  check("one store, its own brand on one, none on the other: one piece",
+    isSamePieceByName(allington("Timberland", "Black", `${TB}allington-black`), wheat), true);
+  check("two stores, no brand on either, a name too plain to vouch for itself: two pieces",
+    isSamePieceByName(wheat, allington("", "Black", "https://shop.example/allington-black")), false);
+  check("one marketplace, a brand on one and none on the other: the stricter test still",
+    isSamePieceByName(
+      { brand: "Nike", name: "Classic Logo Hoodie", colors: ["Black"], category: "tops", sourceUrl: "https://www.farfetch.com/a" },
+      { id: "b", brand: "", name: "Classic Logo Hoodie", colors: ["Grey"], category: "tops", sourceUrl: "https://www.farfetch.com/b" },
+    ), false);
 
   // ── Through the importer: three colourways of one boot ────────────────────
   const piece = (color, slug, brand, extra = {}) => ({
@@ -182,6 +210,42 @@ const TB = "https://www.timberland.com/en-us/p/footwear-0100/";
   await importParsedProduct(boot("Black", EXCLUDED), `${TB}mens-waterproof-field-boot-black`, {});
   await importParsedProduct(boot("Wheat", WIDES), `${TB}mens-waterproof-field-boot-wheat`, {});
   check("Men's Waterproof Field Boot: Timberland on both, one group", groupOf(), { cards: 2, oneGroup: true, primaries: 1, brands: ["Timberland"] });
+
+  // The second run: extension 1.0.21 dropped the sales line, so most pages came
+  // with no brand; "Extended Sizes" still came, and was on the Brands list.
+  db.reset([], { live: true, brands: ["Timberland", "On", "Extended Sizes", WIDES] });
+  const second = (name, brand, color, slug) => ({ ...piece(color, slug, brand), name, brandFromText: !!brand });
+  for (const [name, brand, color, slug] of [
+    ["Women's Allington Mid Boot", "", "Wheat", "allington-wheat"],
+    ["Women's Allington Mid Boot", "", "Black", "allington-black"],
+    ["Women's Rowan Way Pull-On Boot", "", "Wheat", "rowan-wheat"],
+    ["Women's Rowan Way Pull-On Boot", "", "Taupe", "rowan-taupe"],
+    ["Women's Stone Street Platform 6-Inch Waterproof Boot", "Extended Sizes", "Wheat", "stone-street-wheat"],
+  ]) {
+    await importParsedProduct(second(name, brand, color, slug), `${TB}${slug}`, {});
+  }
+  {
+    const rows = db.rows();
+    const pair = (name) => rows.filter((r) => r.name === name);
+    const grouped = (name) => {
+      const cards = pair(name);
+      return cards.length === 2 && !!cards[0].variant_group_id && cards[0].variant_group_id === cards[1].variant_group_id;
+    };
+    check("second run: every card Timberland — none blank, no \"On\", no \"Extended Sizes\"",
+      [...new Set(rows.map((r) => r.brand))], ["Timberland"]);
+    check("second run: Allington in Wheat and Black, one group", grouped("Women's Allington Mid Boot"), true);
+    check("second run: Rowan Way in Wheat and Taupe, one group", grouped("Women's Rowan Way Pull-On Boot"), true);
+  }
+
+  // Cards the second run left blank, and the next colour collected beside them.
+  db.reset(
+    [
+      { id: "w", source_url: `${TB}allington-wheat`, name: "Women's Allington Mid Boot", brand: "", colors: ["Wheat"], category: "shoes", retailers: [] },
+    ],
+    { live: true, brands: ["Timberland"] },
+  );
+  await importParsedProduct(second("Women's Allington Mid Boot", "", "Black", "allington-black"), `${TB}allington-black`, {});
+  check("a new colour joins the blank card the last run left", groupOf().oneGroup, true);
 
   console.log("");
   for (const f of failures) console.log(`  ✗ ${f}`);

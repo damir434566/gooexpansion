@@ -511,7 +511,7 @@
 > зелёные.
 >
 > **Timberland: акция вместо бренда, и цвета одной вещи не в одной группе —
-> расширение 1.0.21 и сервер** (патч `promo-brand-for-goo-fashion.patch` против
+> расширение 1.0.22 и сервер** (патч `promo-brand-for-goo-fashion.patch` против
 > `master` @ `69623aa`, применяется чисто: `brand-from-name.ts`, `extract.ts`,
 > `normalize.ts`, `types.ts`, `import-product.ts`, `variant-group.ts`,
 > `same-item.ts`; `extension/` в него не входит, ставится отсюда).
@@ -550,14 +550,44 @@
 > - карточка, у которой брендом записана акция, при сравнении считается
 >   карточкой без бренда — новая расцветка встаёт в группу и к ней.
 >
-> **Как поправить уже собранное.** Обнови сайт патчем и расширение до 1.0.21, затем
+> **Второй прогон (расширение 1.0.21, сайт без патча).** Строки акций ушли, но
+> у большей части карточек бренд стал пустым, у части осталось «Extended
+> Sizes», а «Women's Rowan Way Pull-On Boot» записался брендом **On**. Пары
+> одной вещи («Allington Mid Boot» в Wheat и Black, «White Ledge Tall») не
+> склеились, хотя Duplicates их находил. Воспроизведено на `master`:
+> - **пустой бренд** — это сайт без патча: расширение больше не шлёт строку
+>   акции, а брать бренд из магазина умеет только патч. Расширение тут ни при
+>   чём;
+> - **склейка** — две карточки **без бренда** сайт по названию не сравнивает
+>   вовсе (правило против «Classic Tee» двух разных брендов). Duplicates
+>   склеивает их уже после того, как бренд проставлен;
+> - **«Extended Sizes»** — фильтр не знал слов о размерах, а прошлый прогон уже
+>   внёс строку в список Brands, и для сайта это был «известный бренд»;
+> - **«On»** — бренд On Running из списка Brands нашёлся внутри «Pull-On».
+>
+> Патч дополнен:
+> - на собственном сайте бренда напечатанный рядом с названием «бренд», который
+>   ничем не подтверждён (ни названием, ни моделью), уступает магазину — даже
+>   если он есть в списке Brands. Так любая будущая строка вроде «Extended
+>   Sizes» на timberland.com станет Timberland, а не новым «брендом»;
+> - слова о размерах («extended», «sizes», «sizing») — не бренд, и в расширении
+>   1.0.22 тоже;
+> - бренд не ищется внутри слова через дефис («Pull-On», «Slip-On»), а бренд из
+>   трёх букв и короче («On», «Gap», «Lee») считается, только если название с
+>   него начинается: «On Cloud 5», «Women's On Cloudmonster» — On;
+> - две страницы **одного магазина** с одним названием — одна вещь в разных
+>   цветах, даже если бренд не прочитан ни на одной (или на одной, когда магазин
+>   — сайт этого бренда). Карточки, оставшиеся пустыми с прошлого прогона,
+>   тоже принимают новую расцветку.
+>
+> **Как поправить уже собранное.** Обнови сайт патчем и расширение до 1.0.22, затем
 > собери ту же категорию Timberland ещё раз: при обновлении карточки бренд
 > пересчитывается, и она встаёт в свою группу. Строки акций из списка Brands
 > убрать руками (Supabase → SQL Editor). Сначала посмотреть, что будет удалено:
 >
 > ```sql
 > select name from brands
->  where name ~ '[%!?$€£]' or name ~* '(available|excluded|promotional|discount|offers?|shipping|in cart)'
+>  where name ~ '[%!?$€£]' or name ~* '(available|excluded|promotional|discount|offers?|shipping|in cart|sizes)'
 >     or array_length(regexp_split_to_array(trim(name), '\s+'), 1) > 5;
 > ```
 >
@@ -567,17 +597,19 @@
 > ```sql
 > update products set brand = 'Timberland'
 >  where source_url ilike '%timberland.%'
->    and (brand ~ '[%!?$€£]' or brand ~* '(available|excluded|promotional|discount|offers?|shipping|in cart)');
+>    and (brand is null or brand = '' or brand = 'On' or brand ~ '[%!?$€£]'
+>         or brand ~* '(available|excluded|promotional|discount|offers?|shipping|in cart|sizes)');
 > ```
 >
 > Группы для них соберёт экран Duplicates, когда бренд станет Timberland.
 >
-> Тесты: `verification/test-promo-brand.js` 54/54 (на `master` — 23/54: строки
+> Тесты: `verification/test-promo-brand.js` 72/72 (на `master` — 28/72: строки
 > со скриншотов — бренд, «Timberland®» в названии проигрывает акции из списка
-> Brands, три Euro Hiker — две карточки в группе и одна отдельно), `test-brand.js`
+> Brands, три Euro Hiker — две карточки в группе и одна отдельно; второй прогон —
+> пустые бренды, «On», «Extended Sizes» и несклеенные пары), `test-brand.js`
 > 44/44 (на `master` — 19/44), приёмка `snapshot.js` 24/24 с двумя страницами
-> «как у Timberland» (1.0.20 — 22/24: «Wides Available» и «Excluded from…»
-> уходят брендом), старые наборы зелёные. `fake-supabase.js` умеет `live`:
+> «как у Timberland» (1.0.20 — 22/24, 1.0.21 — 23/24: «Extended Sizes» уходит
+> брендом), старые наборы зелёные. `fake-supabase.js` умеет `live`:
 > записи применяются, и следующий импорт видит, что сохранил предыдущий.
 >
 > **Плашка «Columns … were not saved — the database is missing them».** Это не
