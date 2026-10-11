@@ -1095,6 +1095,50 @@
   }
 
   /**
+   * Words a store's sales copy is made of and a maker's name never is, whole
+   * words only ("Off-White" has no "offer", "New Balance" is not "new"); whole
+   * texts that are a badge, not a maker; and the most words a brand has
+   * ("Comme des Garçons Homme Plus" is five). The same lists as the server's
+   * `isSalesCopy` (brand-from-name.ts), which also refuses what older versions
+   * of this extension send.
+   */
+  const SALES_WORDS = new Set([
+    "available", "availability", "unavailable", "excluded", "exclude", "excludes", "exclusion", "exclusions",
+    "discount", "discounts", "discounted", "promotion", "promotions", "promotional", "promo", "promos",
+    "offer", "offers", "coupon", "coupons", "promocode", "shipping", "delivery", "returns", "cart", "checkout",
+    "clearance", "markdown", "markdowns", "bestseller", "bestsellers", "wides", "widths", "preorder", "restocked",
+    "доставка", "знижка", "знижки", "скидка", "скидки", "акція", "акции", "акция", "промокод", "наявність",
+    "наличие", "розпродаж", "распродажа", "кошик", "корзина",
+  ]);
+  const BADGES = new Set([
+    "new", "new in", "new arrival", "new arrivals", "sale", "on sale", "sold out", "best seller", "limited edition",
+    "online only", "only online", "exclusive", "online exclusive", "coming soon", "pre order", "back in stock",
+    "low stock", "last chance", "just in", "trending", "members only", "новинка", "новинки",
+  ]);
+  const MAX_BRAND_WORDS = 5;
+
+  /** Is this text the store's sales copy — "Extra 30% Off In Cart!" — rather than a maker? */
+  function isSalesCopy(value) {
+    const text = String(value || "")
+      .normalize("NFD")
+      .replace(/\p{M}+/gu, "")
+      .replace(/[®™©℠]/g, " ")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) return false;
+    if (/[%!?$€£¥₴₽]/.test(text)) return true;
+    const words = text.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    if (words.length > MAX_BRAND_WORDS || text.length > 60) return true;
+    if (BADGES.has(words.join(" "))) return true;
+    return words.some((w) => SALES_WORDS.has(w));
+  }
+
+  /** A class that styles with the brand's colour or font rather than naming the brand: `text-brand-1`, `hover:bg-brand`. */
+  const STYLE_CLASS =
+    /^(?:[\w-]+:)*(?:text|bg|border|fill|stroke|colou?r|from|via|to|ring|outline|decoration|shadow|accent|caret|divide|placeholder|font)-(?:brand|designer)(?:[-_]|$)/i;
+
+  /**
    * The brand, where the page prints it rather than declares it.
    *
    * Structured data usually carries the brand, which is why it was only
@@ -1124,8 +1168,16 @@
       // A brand is a name, not a sentence, and not the word "Brand" alone.
       if (!text || text.length < 2 || text.length > 60) return "";
       if (/^(?:brand|designer|бренд|дизайнер)$/i.test(text)) return "";
+      // Nor the store's sales line under the title (Timberland: "Wides
+      // Available", "Excluded from all promotional discounts and offers").
+      if (isSalesCopy(text)) return "";
       return text;
     };
+    // An element is about the brand when one of its classes says so; one that
+    // only colours its text in the brand's colour — `text-brand-primary`,
+    // `bg-brand` — is not. Up to 1.0.20 either was a brand.
+    const namesBrand = (el) =>
+      [...el.classList].some((c) => /brand|designer/i.test(c) && !STYLE_CLASS.test(c));
 
     for (const el of document.querySelectorAll('[itemprop="brand"]')) {
       const text = usable(el);
@@ -1136,6 +1188,7 @@
     for (const el of document.querySelectorAll(
       '[class*="brand" i],[class*="designer" i],[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]',
     )) {
+      if (!el.matches('[data-testid*="brand" i],a[href*="/designer"],a[href*="/brand"]') && !namesBrand(el)) continue;
       const text = usable(el);
       if (text) candidates.push({ el, text });
     }

@@ -22,21 +22,30 @@ const NOT_A_BRAND = new Set([
   "інше", "другое",
 ]);
 
-/** Case, accents and spacing folded away, for comparing two spellings of one brand. */
+/** Trademark signs: "Timberland®" is Timberland, "Levi's®" is Levi's. */
+const TRADEMARKS = /[®™©℠]/g;
+
+/** Case, accents, trademark signs and spacing folded away, for comparing two spellings of one brand. */
 export function foldBrand(value: string): string {
   return (value ?? "")
     .normalize("NFD")
     .replace(/\p{M}+/gu, "")
+    .replace(TRADEMARKS, " ")
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** A brand as it is stored: no trademark sign, single spaces. "Timberland®" is "Timberland". */
+export function cleanBrand(value: string): string {
+  return (value ?? "").replace(TRADEMARKS, " ").replace(/\s+/g, " ").trim();
 }
 
 /**
  * A brand as two stores both spell it: folded, "&" read as "and", and a
  * leading "The" dropped — "The North Face" and "North Face" are one maker.
  */
-function brandWords(value: string): string {
+export function brandWords(value: string): string {
   return foldBrand(value)
     .replace(/&/g, " and ")
     // "Levi's" is "Levis", "Off-White" is "Off White".
@@ -97,8 +106,8 @@ export function brandsAgree(a: string, b: string): boolean {
  * before the brand was read carry "Stussy Basic Logo Hoodie" with no brand.
  */
 export function brandsFit(a: { brand?: string | null; name: string }, b: { brand?: string | null; name: string }): boolean {
-  const x = (a.brand ?? "").trim();
-  const y = (b.brand ?? "").trim();
+  const x = realBrand(a.brand);
+  const y = realBrand(b.brand);
   if (x && y) return brandsAgree(x, y);
   if (x) return positionIn(b.name, x) >= 0;
   if (y) return positionIn(a.name, y) >= 0;
@@ -135,6 +144,74 @@ export function makerNames(value: string): string[] {
   return maker === undefined ? [value] : [value, ...MAKERS[maker]];
 }
 
+/**
+ * Words a store's sales copy is made of and a maker's name never is. Whole
+ * words only: "Off-White" has no "offer" in it, "New Balance" is not "new".
+ */
+const SALES_WORDS = new Set([
+  "available", "availability", "unavailable", "excluded", "exclude", "excludes", "exclusion", "exclusions",
+  "discount", "discounts", "discounted", "promotion", "promotions", "promotional", "promo", "promos",
+  "offer", "offers", "coupon", "coupons", "promocode", "shipping", "delivery", "returns", "cart", "checkout",
+  "clearance", "markdown", "markdowns", "bestseller", "bestsellers", "wides", "widths", "preorder", "restocked",
+  "доставка", "знижка", "знижки", "скидка", "скидки", "акція", "акции", "акция", "промокод", "наявність",
+  "наличие", "розпродаж", "распродажа", "кошик", "корзина",
+]);
+
+/** A whole text that is a badge on the product, not its maker: "New", "Sale", "Sold out". */
+const BADGES = new Set([
+  "new", "new in", "new arrival", "new arrivals", "sale", "on sale", "sold out", "best seller", "limited edition",
+  "online only", "only online", "exclusive", "online exclusive", "coming soon", "pre order", "back in stock",
+  "low stock", "last chance", "just in", "trending", "members only", "новинка", "новинки",
+]);
+
+/** More words than this is a sentence: "Comme des Garçons Homme Plus" is five. */
+const MAX_BRAND_WORDS = 5;
+
+/**
+ * Is this the store's sales copy rather than a maker — the line a store prints
+ * under a product's title?
+ *
+ * Timberland prints "Excluded from all promotional discounts and offers",
+ * "Wides Available" or "More Info About Extra 30% Off In Cart!" right under the
+ * title, and the extension, which reads the brand-looking element nearest the
+ * title, sent those as the brand. They were saved as brands, joined the Brands
+ * list as brands, and a card carrying one was a different maker to its own
+ * colourways, so it was never grouped with them.
+ */
+export function isSalesCopy(value: string): boolean {
+  const text = foldBrand(value);
+  if (!text) return false;
+  // A percentage, an exclamation, a price: "30% Off", "In Cart!", "$180".
+  if (/[%!?$€£¥₴₽]/.test(text)) return true;
+  const words = text.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (words.length > MAX_BRAND_WORDS || text.length > 60) return true;
+  if (BADGES.has(words.join(" "))) return true;
+  return words.some((w) => SALES_WORDS.has(w));
+}
+
+/**
+ * True for a value a `brand` field can carry that names no brand: "Unknown",
+ * "Other", "Без бренда" — and a store's sales copy (`isSalesCopy`).
+ */
+export function isNotABrand(value: string): boolean {
+  return NOT_A_BRAND.has(foldBrand(value)) || isSalesCopy(value);
+}
+
+/**
+ * The brand a row really carries: its own, cleaned, or "" when what it carries
+ * names no brand. A card saved with sales copy for a brand is, for every
+ * comparison, a card saved without one.
+ */
+export function realBrand(value: string | null | undefined): string {
+  const brand = cleanBrand(value ?? "");
+  return isNotABrand(brand) ? "" : brand;
+}
+
+/** Is this brand spelled, as whole words, inside `text`? */
+export function brandSpelledIn(text: string, brand: string): boolean {
+  return positionIn(text, brand) >= 0;
+}
+
 /** Letters and digits only, for comparing a brand to the labels of a host. */
 function compact(value: string): string {
   return foldBrand(value).replace(/[^\p{L}\p{N}]+/gu, "");
@@ -159,11 +236,12 @@ export function brandVocabulary(...lists: string[][]): string[] {
   const byFold = new Map<string, string>();
   for (const list of lists) {
     for (const raw of list) {
-      const name = String(raw ?? "").replace(/\s+/g, " ").trim();
+      const name = cleanBrand(String(raw ?? ""));
       const fold = foldBrand(name);
       // Two characters is a real brand ("A.P.C." compacts to three, "Uniqlo"
-      // is long); one is a letter that matches half the catalogue.
-      if (compact(name).length < 2 || NOT_A_BRAND.has(fold)) continue;
+      // is long); one is a letter that matches half the catalogue. Sales copy
+      // saved as a brand by an earlier run is not one to recognise.
+      if (compact(name).length < 2 || isNotABrand(name)) continue;
       if (!byFold.has(fold)) byFold.set(fold, name);
     }
   }
@@ -239,12 +317,47 @@ export function brandFromModel(name: string, known: string[] = []): string {
   return "";
 }
 
+/**
+ * Stores that sell many makers' pieces. Their own name is never the brand of a
+ * piece, even when an earlier run saved it as one.
+ */
+const MARKETPLACES = new Set([
+  "goat", "stockx", "grailed", "flightclub", "stadiumgoods", "farfetch", "ssense", "mrporter", "netaporter",
+  "endclothing", "matchesfashion", "mytheresa", "nordstrom", "selfridges", "zalando", "asos", "yoox",
+  "luisaviaroma", "harrods", "lyst", "zappos", "amazon", "ebay", "etsy", "vinted", "depop", "aboutyou",
+  "answear", "lamoda", "intertop", "rozetka",
+]);
+
+/** Second-level labels a country registry sells under: the shop is the label before them. */
+const REGISTRY_LABELS = new Set(["com", "co", "org", "net", "gov", "edu", "ac", "biz", "in", "kiev", "kyiv"]);
+
+/** The label of a host that names the shop: "timberland" in "www.timberland.co.uk". */
+function shopLabel(host: string): string {
+  const labels = (host ?? "").toLowerCase().replace(/^www\./, "").split(".").filter(Boolean);
+  if (labels.length < 2) return compact(labels[0] ?? "");
+  let i = labels.length - 2;
+  if (i > 0 && REGISTRY_LABELS.has(labels[i])) i--;
+  return compact(labels[i]);
+}
+
+/**
+ * The known brand this shop is the own site of, or "": timberland.com is
+ * Timberland's, thenorthface.com The North Face's. A marketplace is no maker's.
+ */
+export function ownShopBrand(host: string, known: string[]): string {
+  const label = shopLabel(host);
+  if (label.length < 3 || MARKETPLACES.has(label)) return "";
+  return known.find((b) => compact(b) === label && !isNotABrand(b)) ?? "";
+}
+
 export interface BrandDecision {
   brand: string;
   /** Set when the name decided it, for the import to say so. */
   fromName?: boolean;
   /** Set when it was a model in the name rather than the brand's own word. */
   viaModel?: boolean;
+  /** Set when the shop decided it: the page named no maker, on the maker's own site. */
+  fromShop?: boolean;
 }
 
 /**
@@ -256,11 +369,21 @@ export interface BrandDecision {
  * nothing, or said the store's own name ("Intertop" on intertop.ua is the shop,
  * not the maker), or said something we have never seen as a brand.
  *
+ * Sales copy is not a brand (`isNotABrand`), and neither is a marketplace's
+ * own name: "Wides Available" stated as the brand, or "GOAT" on goat.com, is a
+ * page that stated none.
+ *
  * `weak` is a brand the page only printed near the product, which the
  * extension read rather than the page declared. The name beats it whenever the
- * two differ. Up to here a printed brand the catalogue already knew was kept,
- * and on GOAT the one printed first was the menu's "Air Jordan": after one
- * import it was known, and from then on it held for every piece of the run.
+ * two differ, and on a brand's own site the site does too. Up to here a printed
+ * brand the catalogue already knew was kept, and on GOAT the one printed first
+ * was the menu's "Air Jordan": after one import it was known, and from then on
+ * it held for every piece of the run.
+ *
+ * Nothing named a maker, on a known brand's own site (`ownShopBrand`): the site
+ * is the maker. Timberland's "Men's Waterproof Field Boot" names no brand, and
+ * on timberland.com it needs none. `ownShop: false` is an admin's rule saying
+ * this store is not the brand's own, whatever its address.
  *
  * A stated brand the name confirms is kept, and so is one the page declares in
  * structured data and the catalogue already knows: that is still the store's
@@ -272,13 +395,20 @@ export function decideBrand(input: {
   host: string;
   known: string[];
   weak?: boolean;
+  ownShop?: boolean;
 }): BrandDecision {
-  const stated = (input.stated ?? "").replace(/\s+/g, " ").trim();
+  const said = cleanBrand(input.stated ?? "");
+  // Sales copy, and a marketplace's own name, name no maker: "GOAT" on goat.com.
+  const marketplace = MARKETPLACES.has(shopLabel(input.host)) && compact(said) === shopLabel(input.host);
+  const stated = isNotABrand(said) || marketplace ? "" : said;
   const statedFold = foldBrand(stated);
   // The catalogue's spelling of the stated brand, so "NIKE" files under "Nike"
   // rather than starting a second entry in the brand filter.
   const canonical =
     (statedFold && input.known.find((b) => foldBrand(b) === statedFold)) || stated;
+  const statedIsKnown = !!statedFold && input.known.some((b) => foldBrand(b) === statedFold);
+  const shop = input.ownShop === false ? "" : ownShopBrand(input.host, input.known);
+  const fromShop = (): BrandDecision => ({ brand: shop, fromShop: true });
 
   const inName = brandInName(input.name, input.known);
   const named = inName || brandFromModel(input.name, input.known);
@@ -286,10 +416,17 @@ export function decideBrand(input: {
   const fromName = (): BrandDecision => ({ brand: named, fromName: true, ...(viaModel ? { viaModel } : {}) });
 
   if (!named || foldBrand(named) === statedFold) {
-    return { brand: NOT_A_BRAND.has(statedFold) ? "" : canonical };
+    if (!stated) return shop ? fromShop() : { brand: "" };
+    // Printed on the maker's own site, a word we have never seen as a brand and
+    // nothing else names: the site's word. A known maker printed there stands —
+    // a Jordan or a Converse on nike.com.
+    if (!named && input.weak && shop && !statedIsKnown && !brandsAgree(stated, shop) && positionIn(input.name, stated) < 0) {
+      return fromShop();
+    }
+    return { brand: canonical };
   }
 
-  if (!stated || NOT_A_BRAND.has(statedFold)) return fromName();
+  if (!stated) return fromName();
 
   // The name repeats the stated brand: it is confirmed, whatever else it names.
   if (positionIn(input.name, stated) >= 0) return { brand: canonical };
@@ -305,16 +442,5 @@ export function decideBrand(input: {
   const labels = (input.host ?? "").toLowerCase().split(".").map(compact).filter(Boolean);
   if (labels.includes(compact(stated))) return fromName();
 
-  const statedIsKnown = input.known.some((b) => foldBrand(b) === statedFold);
   return statedIsKnown ? { brand: canonical } : fromName();
-}
-
-/**
- * Is this the store's own name rather than a maker's? Used before a brand is
- * added to the Brands list, so a shop that fills the brand with itself does
- * not become a brand in the filter.
- */
-export function isShopName(brand: string, host: string): boolean {
-  const labels = (host ?? "").toLowerCase().split(".").map(compact).filter(Boolean);
-  return labels.includes(compact(brand));
 }

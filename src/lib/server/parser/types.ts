@@ -228,6 +228,8 @@ export interface RawExtract {
   variantUrls?: string[];
   /** The breadcrumb trail, outermost first, from the markup or the rendered page. */
   breadcrumbs?: string[];
+  /** What kind of thing the page's spec table says it is ("Type: Sneakers"). */
+  kind?: string;
   /** The item's own number (EAN/UPC), verified — the only code safe across stores. */
   gtin?: string;
   /** The maker's part number, unique within a brand. */

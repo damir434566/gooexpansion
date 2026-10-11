@@ -9,6 +9,9 @@
  * Two opt-ins for the SSENSE tests: `storage`, a bucket that takes uploads, and
  * `lateRows`, rows a parallel import commits between this import's lookup and
  * its insert — invisible to the lookup, there for the insert to collide with.
+ *
+ * And `live`, for a run of several imports: writes to `products` are applied
+ * as well as recorded, so the next import reads what the last one saved.
  */
 let rows = [];
 let writes = [];
@@ -16,7 +19,32 @@ let brands = [];
 let lateRows = [];
 let storage = false;
 let uploads = [];
+let live = false;
+let nextId = 0;
 const STORAGE_ORIGIN = "https://own.supabase.co";
+
+/** Does a row pass a query's filters? eq, ilike, in, and the jsonb `cs` on retailers. */
+function matches(r, filters) {
+  return filters.every(([kind, col, val]) => {
+    if (kind === "eq") return r[col] === val;
+    if (kind === "ilike") {
+      // PostgREST ilike: % is any run, \% and \_ are literal.
+      const pattern = String(val)
+        .split(/(\\[%_]|%)/)
+        .map((part) => (part === "%" ? ".*" : part.replace(/^\\/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+        .join("");
+      return new RegExp(`^${pattern}$`, "is").test(String(r[col] ?? ""));
+    }
+    if (kind === "in") return val.includes(r[col]);
+    if (kind === "cs") {
+      // jsonb containment of an array of objects: each wanted object is
+      // a subset of some element of the row's array.
+      const have = Array.isArray(r[col]) ? r[col] : [];
+      return JSON.parse(val).every((want) => have.some((h) => h && Object.entries(want).every(([k, v]) => h[k] === v)));
+    }
+    return true;
+  });
+}
 
 function builder(table) {
   const q = { table, filters: [], op: "select", row: null, single: false, limit: 0 };
@@ -36,31 +64,20 @@ function builder(table) {
     }
     if (q.op === "insert" || q.op === "update" || q.op === "upsert") {
       writes.push({ table, op: q.op, row: q.row, filters: q.filters });
+      if (live && table === "products" && q.op === "insert") {
+        const id = `card-${++nextId}`;
+        rows.push({ ...q.row, id });
+        return { data: q.single ? { id } : [], error: null };
+      }
+      if (live && table === "products" && q.op === "update") {
+        for (const r of rows) if (matches(r, q.filters)) Object.assign(r, q.row);
+      }
+      if (live && table === "brands" && q.op === "upsert" && !brands.includes(q.row?.name)) brands.push(q.row.name);
       return { data: q.single ? { id: q.op === "insert" ? "new-id" : q.filters.find((f) => f[1] === "id")?.[2] } : [], error: null };
     }
     if (table === "brands") return { data: brands.map((name) => ({ name })), error: null };
     if (table !== "products") return { data: q.single ? null : [], error: null };
-    let out = rows.filter((r) =>
-      q.filters.every(([kind, col, val]) => {
-        if (kind === "eq") return r[col] === val;
-        if (kind === "ilike") {
-          // PostgREST ilike: % is any run, \% and \_ are literal.
-          const pattern = String(val)
-            .split(/(\\[%_]|%)/)
-            .map((part) => (part === "%" ? ".*" : part.replace(/^\\/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
-            .join("");
-          return new RegExp(`^${pattern}$`, "is").test(String(r[col] ?? ""));
-        }
-        if (kind === "in") return val.includes(r[col]);
-        if (kind === "cs") {
-          // jsonb containment of an array of objects: each wanted object is
-          // a subset of some element of the row's array.
-          const have = Array.isArray(r[col]) ? r[col] : [];
-          return JSON.parse(val).every((want) => have.some((h) => h && Object.entries(want).every(([k, v]) => h[k] === v)));
-        }
-        return true;
-      }),
-    );
+    let out = rows.filter((r) => matches(r, q.filters));
     if (q.limit) out = out.slice(0, q.limit);
     return { data: q.single ? out[0] ?? null : out, error: null };
   };
@@ -117,7 +134,11 @@ module.exports = {
     lateRows = (opts.lateRows ?? []).map((r) => ({ ...r }));
     storage = !!opts.storage;
     uploads = [];
+    live = !!opts.live;
+    nextId = 0;
   },
+  /** The products table as it stands — after the writes, in a `live` run. */
+  rows: () => rows.map((r) => ({ ...r })),
   /** Paths put in the bucket since the last reset. */
   uploads: () => [...uploads],
   /** Brands the importer put on the Brands list. */

@@ -18,7 +18,7 @@ import {
   looksLikeColourLabel,
 } from "@/lib/server/product-fields";
 import type { RawExtract, ParserSiteConfig, ParsedProduct } from "./types";
-import { garmentLabel, matchGarment } from "@/lib/taxonomy/garments";
+import { garmentLabel, garmentLabelIn, matchGarment } from "@/lib/taxonomy/garments";
 import { inferStyleKeywords } from "@/lib/taxonomy/styles";
 import { genderFromPage } from "@/lib/taxonomy/gender";
 import {
@@ -137,6 +137,10 @@ export function normalizeExtract(
   const labelFor = (text: string) =>
     matchGarment(text) ? garmentLabel(text, labelValues) : matchSubcategoryLabel(text, tree);
   const subLabelFromName = labelFor(name);
+  // What the spec table calls it ("Тип: Кросівки") — the store's word for the
+  // kind, where a name is a model ("Etnies Josl1n") and the trail says "Shoes".
+  const kind = (raw.kind ?? "").trim();
+  const subLabelFromKind = kind ? labelFor(kind) : undefined;
   const subLabelFromTrail = trail ? labelFor(trail) : undefined;
   const labelCategory = (label: string | undefined) => {
     const value = label ? labelValues[label] : undefined;
@@ -162,15 +166,29 @@ export function normalizeExtract(
     // keyword pass over the same words would stop at the first thing that looks
     // like outerwear.
     labelCategory(subLabelFromName) ??
+    labelCategory(subLabelFromKind) ??
     labelCategory(subLabelFromTrail) ??
+    (kind ? matchCategory(kind) : null) ??
     matchCategory(trail) ??
     matchCategory(safePath(sourceUrl)) ??
     "accessories";
 
   // `resolveSubcategory` drops a label the tree does not claim for this
   // category, so a disagreement — an override that says footwear over a name
-  // that says bomber jacket — resolves rather than persists.
-  const subcategory = resolveSubcategory(category, subLabelFromName ?? subLabelFromTrail, tree);
+  // that says bomber jacket — resolves rather than persists: the next source
+  // that names a label of this category is asked instead.
+  //
+  // Then, when none of them says which kind — a shoe named for its model and
+  // filed under "Shoes" came in as footwear of no kind, though its page said
+  // "skate shoe" twice — the address and the description, for a label of this
+  // category only: a description also names what to wear the piece with.
+  const ownLabel = [subLabelFromName, subLabelFromKind, subLabelFromTrail].find(
+    (label) => !!label && labelValues[label] === category,
+  );
+  const subcategory =
+    resolveSubcategory(category, ownLabel, tree) ??
+    garmentLabelIn(safePath(sourceUrl), category, labelValues) ??
+    garmentLabelIn(raw.description ?? "", category, labelValues);
 
   // Style, from everything the page said about the piece. The description
   // carries most of it ("a pared-back essential", "utility pockets"), the

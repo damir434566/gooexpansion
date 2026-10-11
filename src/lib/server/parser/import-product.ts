@@ -20,7 +20,7 @@ import {
 } from "@/lib/server/product-fields";
 import { toUsd } from "@/lib/server/fx";
 import { normalizeStyleKeywords } from "@/lib/style-keywords";
-import { isColorSiblingByName, sameModelFamily, type VariantCandidate } from "./variant-group";
+import { isSamePieceByName, sameModelFamily, type VariantCandidate } from "./variant-group";
 import { joinColourGroup } from "@/lib/server/colour-group";
 import {
   gtinSpellings,
@@ -33,11 +33,11 @@ import {
   type IncomingItem,
   type NamedItem,
 } from "./same-item";
-import { brandSearchWord, brandVocabulary, decideBrand, foldBrand, isShopName } from "./brand-from-name";
+import { brandSearchWord, brandVocabulary, brandWords, decideBrand, foldBrand, isNotABrand } from "./brand-from-name";
 import { articleCodePatterns, articleCodes, modelWord, pieceName } from "./piece-name";
 import { listingKey, sameListing, urlSpellings } from "./listing-url";
 import { buildCatalogueIndex, type CatalogueIndex, type CataloguePiece } from "./catalogue-match";
-import { loadRetailerRules, resolveRetailer, storeDefaultGender } from "@/lib/server/retailer-domains";
+import { loadRetailerRules, resolveRetailer, storeDefaultGender, type ResolvedRetailer } from "@/lib/server/retailer-domains";
 import { loadCatalogueProfile, proposeGender, proposeStyles } from "@/lib/server/catalogue-profile";
 import { mirrorProductImages } from "@/lib/server/storage/product-images";
 import { sampleGarmentColours, storeBackgroundColor } from "@/lib/server/bg-color";
@@ -100,13 +100,23 @@ async function colorGroupIdsFor(names: string[]): Promise<number[] | undefined> 
 // seconds, and the list changes when an admin adds a brand, not per product.
 
 const BRAND_TTL_MS = 5 * 60_000;
-/** `curated` is the Brands list alone; `brands` adds what the catalogue carries. */
-let brandCache: { at: number; brands: string[]; curated: string[] } | null = null;
+let brandCache: {
+  at: number;
+  brands: string[];
+  /** The Brands list by `brandKey`; null when it could not be read (no table). */
+  listed: Set<string> | null;
+} | null = null;
+
+/** One key for every spelling of a brand: "Levi's" and "LEVIS", "Off-White" and "Off White". */
+function brandKey(value: string): string {
+  return brandWords(value).replace(/ /g, "");
+}
 
 async function loadKnownBrands(): Promise<string[]> {
   if (brandCache && Date.now() - brandCache.at < BRAND_TTL_MS) return brandCache.brands;
   const curated: string[] = [];
   const catalogue: string[] = [];
+  let listed: Set<string> | null = null;
   try {
     const [table, rows] = await Promise.all([
       supabase!.from("brands").select("name"),
@@ -116,29 +126,34 @@ async function loadKnownBrands(): Promise<string[]> {
     // the other still gives a usable list.
     for (const r of (table.data ?? []) as { name: string | null }[]) if (r.name) curated.push(r.name);
     for (const r of (rows.data ?? []) as { brand: string | null }[]) if (r.brand) catalogue.push(r.brand);
+    if (!table.error) listed = new Set(curated.map(brandKey).filter(Boolean));
   } catch {
     /* no connection — no list, and the page's own brand stands as it was */
   }
   const brands = brandVocabulary(curated, catalogue);
-  brandCache = { at: Date.now(), brands, curated };
+  brandCache = { at: Date.now(), brands, listed };
   return brands;
 }
 
 /**
- * Put a brand on the Brands list if it is not there yet, so a maker first met
- * in a collect run shows in the brand filter and the Brand Manager without an
- * admin typing it in. Not the store's own name: a shop that fills the brand
- * with itself does not become a brand. Returns whether it was added; a list
- * that cannot be written (no table, no rights) leaves the product as it is.
+ * Put the brand a product was just saved under on the admin's Brands list,
+ * when the list has it under no spelling. Answers whether it was added.
+ *
+ * A collect run brought in pieces of brands the list had never heard of, and
+ * the brand stayed off the Brands page and out of the editor's brand picker
+ * until someone typed it in by hand. Now the product brings its brand with it.
+ * Not added: a value that names no brand ("Unknown"), and the store's own name
+ * in the brand's place — a store an admin's rule says is not the brand's own
+ * shop. A list that cannot be read is left alone, never written blind.
  */
-async function ensureBrandListed(brand: string, host: string): Promise<boolean> {
+async function listBrand(brand: string, store: ResolvedRetailer | null): Promise<boolean> {
   const name = brand.replace(/\s+/g, " ").trim();
-  if (!name || name.length > 60 || !/\p{L}/u.test(name) || isShopName(name, host)) return false;
-  // Within the vocabulary's rules: no one-letter "brands", no "Unknown".
-  if (!brandVocabulary([name]).length) return false;
+  const key = brandKey(name);
+  if (!key || isNotABrand(name)) return false;
+  if (store?.matchedDomain && !store.isOfficial && brandKey(store.name) === key) return false;
   await loadKnownBrands();
-  const curated = brandCache?.curated ?? [];
-  if (curated.some((b) => foldBrand(b) === foldBrand(name))) return false;
+  const cache = brandCache;
+  if (!cache?.listed || cache.listed.has(key)) return false;
   try {
     const { error } = await supabase!
       .from("brands")
@@ -147,8 +162,9 @@ async function ensureBrandListed(brand: string, host: string): Promise<boolean> 
   } catch {
     return false;
   }
-  curated.push(name);
-  if (brandCache && !brandCache.brands.some((b) => foldBrand(b) === foldBrand(name))) brandCache.brands.push(name);
+  cache.listed.add(key);
+  // Read in the next page's name straight away, not after the cache expires.
+  if (!cache.brands.some((b) => foldBrand(b) === foldBrand(name))) cache.brands.push(name);
   return true;
 }
 
@@ -352,6 +368,8 @@ async function linkColorVariants(input: {
     // By name, on every import: the colour row only ever names this store's
     // colourways, and the same piece collected from another site — under its
     // own spelling of the brand, at its own price — is found by name alone.
+    // In any colour: a card of this model the merge did not take is grouped
+    // with it, not left standing beside it (`isSamePieceByName`).
     const ours = {
       brand: input.brand,
       name: input.name,
@@ -367,7 +385,7 @@ async function linkColorVariants(input: {
       for (const row of (data ?? []) as unknown as VariantRow[]) {
         if (row.id === input.productId || siblings.has(row.id)) continue;
         const candidate = toCandidate(row);
-        if (isColorSiblingByName(ours, candidate)) siblings.set(row.id, candidate);
+        if (isSamePieceByName(ours, candidate)) siblings.set(row.id, candidate);
       }
     }
 
@@ -973,6 +991,14 @@ export async function importParsedProduct(
   } catch {
     /* no address — nothing to tell the shop's name from a brand */
   }
+  // The store's name and its "official store" flag come from the domain rules
+  // when the admin has written one, and from the guesses made off the link only
+  // when they haven't. This is the path the bookmarklet uses, so it is where a
+  // mislabelled shop would otherwise enter the catalogue one product at a time.
+  const retailerRules = sourceUrl ? await loadRetailerRules() : new Map();
+  // An admin's rule that this store is not a brand's own shop: its address
+  // then never names the brand.
+  const shopRule = sourceUrl ? resolveRetailer(sourceUrl, "", retailerRules) : null;
   const brandDecision = decideBrand({
     stated: statedBrand,
     name,
@@ -980,26 +1006,18 @@ export async function importParsedProduct(
     known: await loadKnownBrands(),
     // Printed near the product rather than declared: the name overrules it.
     weak: p.brandFromText === true,
+    ...(shopRule?.matchedDomain && !shopRule.isOfficial ? { ownShop: false } : {}),
   });
   const brand = brandDecision.brand.slice(0, 80);
-  // New makers join the Brands list on their own. Not on a links-only run,
-  // which creates nothing.
-  const brandListed = brand && !opts.linksOnly ? await ensureBrandListed(brand, host) : false;
-  const brandNote =
-    [
-      brandDecision.fromName
-        ? `brand ${brand} from ${brandDecision.viaModel ? "the model in " : ""}the name${statedBrand ? ` (page said ${statedBrand})` : ""}`
-        : "",
-      brandListed ? `${brand} added to the Brands list` : "",
-    ]
-      .filter(Boolean)
-      .join("; ") || undefined;
+  const pageSaid = statedBrand && statedBrand !== brand ? ` (page said ${statedBrand})` : "";
+  let brandNote = brandDecision.fromName
+    ? `brand ${brand} from ${brandDecision.viaModel ? "the model in " : ""}the name${pageSaid}`
+    : brandDecision.fromShop
+    ? `brand ${brand} from the store, its own site${pageSaid}`
+    : statedBrand && !brand
+    ? `no brand: the page's "${statedBrand}" is not one`
+    : undefined;
 
-  // The store's name and its "official store" flag come from the domain rules
-  // when the admin has written one, and from the guesses made off the link only
-  // when they haven't. This is the path the bookmarklet uses, so it is where a
-  // mislabelled shop would otherwise enter the catalogue one product at a time.
-  const retailerRules = sourceUrl ? await loadRetailerRules() : new Map();
   const resolved = sourceUrl ? resolveRetailer(sourceUrl, brand, retailerRules) : null;
 
   const retailers: Product["retailers"] = opts.retailers?.length
@@ -1375,6 +1393,11 @@ export async function importParsedProduct(
   // the column null and the batch job in the admin picks the row up.
   if (productId && imageUrl) {
     await storeBackgroundColor(productId, imageUrl);
+  }
+
+  // The brand this card was saved under, on the Brands list if it is not yet.
+  if (productId && brand && (await listBrand(brand, resolved))) {
+    brandNote = brandNote ? `${brandNote} · added to Brands` : `brand ${brand} added to Brands`;
   }
 
   // Group this colourway with the ones already in the table.

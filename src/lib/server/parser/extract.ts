@@ -12,6 +12,7 @@
 import type { ParserSiteConfig, RawExtract, ParserRuleField, PageEvidence } from "./types";
 import { harvestGalleryImages, isPlaceholderPhoto } from "./gallery";
 import { chooseColour } from "./colour-choice";
+import { isNotABrand } from "./brand-from-name";
 import {
   canonicalColor,
   extractCurrencyFromDisplay,
@@ -23,6 +24,7 @@ import {
   COLOR_KEYS,
   BRAND_KEYS,
   CODE_KEYS,
+  KIND_KEYS,
   normalizeGtin,
   normalizeCode,
 } from "@/lib/server/product-fields";
@@ -1063,7 +1065,10 @@ export function extractProduct(
     micro.brand,
     specValue(evidence?.specs, BRAND_KEYS),
   );
-  const brand = pick(declaredBrand, evidence?.brandText);
+  // What the page printed near the title, unless it is the store's sales copy:
+  // on Timberland that line is "Wides Available", and it came in as the brand.
+  const printedBrand = evidence?.brandText && !isNotABrand(evidence.brandText) ? evidence.brandText : undefined;
+  const brand = pick(declaredBrand, printedBrand);
   // Only what the page printed near the product, as the extension read it,
   // rather than anything it declares. The importer lets the product's name
   // overrule it (`decideBrand`): read off the wrong element (GOAT's menu, up to
@@ -1108,6 +1113,9 @@ export function extractProduct(
       const fromMarkup = breadcrumbsFromJsonLd(html);
       return fromMarkup.length ? fromMarkup : (evidence?.breadcrumbs ?? []).slice(0, 12);
     })(),
+    // What the spec table calls the piece ("Тип: Кросівки"), for a name and a
+    // trail that say it is a shoe but not which kind.
+    kind: specValue(evidence?.specs, KIND_KEYS) || undefined,
     // The rendered price is the last resort for both fields, and for opposite
     // reasons. For the amount it is a rescue: a page whose markup states no
     // price at all would otherwise be skipped entirely. For the currency it is

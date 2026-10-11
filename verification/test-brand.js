@@ -140,7 +140,7 @@ const goat = (stated, name, weak = true) => decideBrand({ stated, name, host: "w
     db.reset([]);
     const r = await importParsedProduct(piece("Gel-Kayano 14 'Cream Black'", ""), "https://www.goat.com/sneakers/gel-kayano-14", {});
     check("a maker the Brands list lacks is added to it", db.brandsAdded(), ["ASICS"]);
-    check("and the row says so", /ASICS added to the Brands list/.test(r.brandNote || ""), true);
+    check("and the row says so", /ASICS\b.*added to (the )?Brands/.test(r.brandNote || ""), true);
   }
   {
     db.reset([]);
