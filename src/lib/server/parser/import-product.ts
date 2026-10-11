@@ -244,6 +244,7 @@ interface VariantRow {
   id: string;
   brand: string | null;
   name: string | null;
+  source_url: string | null;
   colors: string[] | null;
   category: string | null;
   variant_group_id: string | null;
@@ -255,6 +256,7 @@ function toCandidate(row: VariantRow): VariantCandidate {
     id: row.id,
     brand: row.brand,
     name: row.name ?? "",
+    sourceUrl: row.source_url,
     colors: row.colors ?? [],
     category: row.category,
     variantGroupId: row.variant_group_id,
@@ -262,7 +264,7 @@ function toCandidate(row: VariantRow): VariantCandidate {
   };
 }
 
-const VARIANT_COLUMNS = "id, brand, name, colors, category, variant_group_id, is_group_primary";
+const VARIANT_COLUMNS = "id, brand, name, source_url, colors, category, variant_group_id, is_group_primary";
 
 /**
  * Rows of one brand read for a name comparison. Generous: the comparison runs
@@ -375,6 +377,7 @@ async function linkColorVariants(input: {
       name: input.name,
       colors: input.colors,
       category: input.category,
+      sourceUrl: input.sourceUrl,
     };
     for (const lookup of nameLookups(input.brand, input.name, input.colors)) {
       let query = supabase!.from("products").select(VARIANT_COLUMNS);

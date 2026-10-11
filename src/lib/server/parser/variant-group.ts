@@ -42,7 +42,8 @@
  * than another.
  */
 import { colourRelation, sameModelFamily, samePiece, variantsDiffer } from "./piece-name";
-import { brandsFit, realBrand } from "./brand-from-name";
+import { brandsFit, isOwnShopOf, realBrand, shopLabel } from "./brand-from-name";
+import { sameStore, storeHost } from "./listing-url";
 
 export { sameModelFamily };
 
@@ -51,6 +52,8 @@ export interface VariantCandidate {
   name: string;
   /** The card's brand as saved; a card without one is judged by its name. */
   brand?: string | null;
+  /** The card's own page, when known: two pages of one store vouch for each other's maker. */
+  sourceUrl?: string | null;
   colors: string[];
   category?: string | null;
   variantGroupId?: string | null;
@@ -70,9 +73,24 @@ export interface VariantCandidate {
  * card on the storefront, whatever its swatches say.
  */
 export function isSamePieceByName(
-  ours: { brand: string; name: string; colors: string[]; category?: string | null },
+  ours: { brand: string; name: string; colors: string[]; category?: string | null; sourceUrl?: string | null },
   candidate: VariantCandidate,
 ): boolean {
+  // Two pages of one store with no brand read on either, or on one of them
+  // when the store is the other's own site: the store is the maker on both,
+  // and one store does not give two pieces one name. Timberland's "Women's
+  // Allington Mid Boot" in Wheat and in Black came in with no brand at all and
+  // stood as two cards: the stricter test a missing brand calls for wants two
+  // words of a model's own, and "Allington" is one.
+  const ourBrand = realBrand(ours.brand);
+  const theirBrand = realBrand(candidate.brand);
+  if ((!ourBrand || !theirBrand) && sameStore(ours.sourceUrl, candidate.sourceUrl)) {
+    const host = storeHost(ours.sourceUrl);
+    const branded = ourBrand || theirBrand;
+    if (!branded || isOwnShopOf(host, branded)) {
+      return samePiece([branded, shopLabel(host)].filter(Boolean), ours, candidate);
+    }
+  }
   // One maker under either spelling, or one side with no brand whose name
   // spells the other's (`brandsFit`). Where neither vouches — one side names
   // no brand at all — only a name that is a model on its own will do, as in
@@ -80,10 +98,9 @@ export function isSamePieceByName(
   // ("Wides Available") names none: it stood apart from its own colourways as
   // another maker's piece.
   const fit = brandsFit(ours, candidate);
-  const oneUnbranded = !realBrand(ours.brand) !== !realBrand(candidate.brand);
+  const oneUnbranded = !ourBrand !== !theirBrand;
   if (!fit && !oneUnbranded) return false;
-  const brands = [realBrand(ours.brand), realBrand(candidate.brand)].filter(Boolean);
-  return samePiece(brands, ours, candidate, { strict: !fit });
+  return samePiece([ourBrand, theirBrand].filter(Boolean), ours, candidate, { strict: !fit });
 }
 
 /**

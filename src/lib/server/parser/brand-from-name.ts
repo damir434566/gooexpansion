@@ -153,6 +153,8 @@ const SALES_WORDS = new Set([
   "discount", "discounts", "discounted", "promotion", "promotions", "promotional", "promo", "promos",
   "offer", "offers", "coupon", "coupons", "promocode", "shipping", "delivery", "returns", "cart", "checkout",
   "clearance", "markdown", "markdowns", "bestseller", "bestsellers", "wides", "widths", "preorder", "restocked",
+  // "Extended Sizes", "Wide Sizing": a line about the sizes a piece comes in.
+  "extended", "sizes", "sizing",
   "доставка", "знижка", "знижки", "скидка", "скидки", "акція", "акции", "акция", "промокод", "наявність",
   "наличие", "розпродаж", "распродажа", "кошик", "корзина",
 ]);
@@ -222,8 +224,13 @@ function positionIn(text: string, brand: string): number {
   const pattern = escapeRegExp(foldBrand(brand)).replace(/ /g, "\\s+");
   // Not `\b`: it only knows ASCII letters, so "Кросівки Nike" and "Stüssy"
   // would get their boundaries wrong. A brand must not continue into a letter
-  // or digit on either side — "Cos" is not in "Cosy", "Arket" not in "Market".
-  const re = new RegExp(`(?<![\\p{L}\\p{N}])${pattern}(?![\\p{L}\\p{N}])`, "u");
+  // or digit on either side — "Cos" is not in "Cosy", "Arket" not in "Market" —
+  // nor be one half of a hyphenated word: the "On" of "Pull-On Boot" is not
+  // the running brand, and it was filed under it.
+  const re = new RegExp(
+    `(?<![\\p{L}\\p{N}])(?<![\\p{L}\\p{N}][-‐–])${pattern}(?![\\p{L}\\p{N}])(?![-‐–][\\p{L}\\p{N}])`,
+    "u",
+  );
   const m = re.exec(foldBrand(text));
   return m ? m.index : -1;
 }
@@ -248,19 +255,33 @@ export function brandVocabulary(...lists: string[][]): string[] {
   return [...byFold.values()];
 }
 
+/** Who a piece is for, the words a name opens with before its maker: "Women's On Cloud 5". */
+const LEADING_WORDS = /^(?:(?:men|women|kids?|boys?|girls?|unisex|toddlers?|baby|youth)(?:['’]s|s['’]|s)?\s+)*/u;
+
+/**
+ * Brands this short are everyday words as often as makers — "On", "Gap",
+ * "Ash", "Lee" — and count only where a maker's name stands: first.
+ */
+const SHORT_BRAND = 3;
+
 /**
  * The known brand a product name names, or "" when it names none.
  *
  * The earliest brand in the name wins — a brand leads its product's title far
  * more often than it trails it, and "Nike x Sacai" is Nike's shoe. At the same
- * position the longest wins, so "Acne Studios" beats "Acne".
+ * position the longest wins, so "Acne Studios" beats "Acne". A brand of three
+ * letters or fewer counts only at the front, after who the piece is for:
+ * "On Cloud 5" and "Women's On Cloud 5" are On's, "Ash Grey Hoodie" and
+ * "Bruce Lee Tee" name no maker.
  */
 export function brandInName(name: string, brands: string[]): string {
+  const front = (LEADING_WORDS.exec(foldBrand(name))?.[0] ?? "").length;
   let best = "";
   let bestAt = Infinity;
   for (const brand of brands) {
     const at = positionIn(name, brand);
     if (at < 0) continue;
+    if (compact(brand).length <= SHORT_BRAND && at !== front) continue;
     if (at < bestAt || (at === bestAt && brand.length > best.length)) {
       best = brand;
       bestAt = at;
@@ -332,7 +353,7 @@ const MARKETPLACES = new Set([
 const REGISTRY_LABELS = new Set(["com", "co", "org", "net", "gov", "edu", "ac", "biz", "in", "kiev", "kyiv"]);
 
 /** The label of a host that names the shop: "timberland" in "www.timberland.co.uk". */
-function shopLabel(host: string): string {
+export function shopLabel(host: string): string {
   const labels = (host ?? "").toLowerCase().replace(/^www\./, "").split(".").filter(Boolean);
   if (labels.length < 2) return compact(labels[0] ?? "");
   let i = labels.length - 2;
@@ -340,14 +361,18 @@ function shopLabel(host: string): string {
   return compact(labels[i]);
 }
 
+/** Is this host the brand's own site: timberland.com for Timberland? A marketplace is no maker's. */
+export function isOwnShopOf(host: string, brand: string): boolean {
+  const label = shopLabel(host);
+  return label.length >= 3 && !MARKETPLACES.has(label) && compact(brand) === label;
+}
+
 /**
  * The known brand this shop is the own site of, or "": timberland.com is
  * Timberland's, thenorthface.com The North Face's. A marketplace is no maker's.
  */
 export function ownShopBrand(host: string, known: string[]): string {
-  const label = shopLabel(host);
-  if (label.length < 3 || MARKETPLACES.has(label)) return "";
-  return known.find((b) => compact(b) === label && !isNotABrand(b)) ?? "";
+  return known.find((b) => isOwnShopOf(host, b) && !isNotABrand(b)) ?? "";
 }
 
 export interface BrandDecision {
@@ -417,10 +442,12 @@ export function decideBrand(input: {
 
   if (!named || foldBrand(named) === statedFold) {
     if (!stated) return shop ? fromShop() : { brand: "" };
-    // Printed on the maker's own site, a word we have never seen as a brand and
-    // nothing else names: the site's word. A known maker printed there stands —
-    // a Jordan or a Converse on nike.com.
-    if (!named && input.weak && shop && !statedIsKnown && !brandsAgree(stated, shop) && positionIn(input.name, stated) < 0) {
+    // Printed on the maker's own site and confirmed by nothing — not the name,
+    // not a model in it: the site's word. Known or not: the line a run before
+    // this one put on the Brands list ("Extended Sizes") is "known" too. The
+    // maker's other names stand (Jordan on nike.com), as does a maker the name
+    // or its model names.
+    if (!named && input.weak && shop && !brandsAgree(stated, shop) && positionIn(input.name, stated) < 0) {
       return fromShop();
     }
     return { brand: canonical };

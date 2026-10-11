@@ -1107,6 +1107,7 @@
     "discount", "discounts", "discounted", "promotion", "promotions", "promotional", "promo", "promos",
     "offer", "offers", "coupon", "coupons", "promocode", "shipping", "delivery", "returns", "cart", "checkout",
     "clearance", "markdown", "markdowns", "bestseller", "bestsellers", "wides", "widths", "preorder", "restocked",
+    "extended", "sizes", "sizing",
     "доставка", "знижка", "знижки", "скидка", "скидки", "акція", "акции", "акция", "промокод", "наявність",
     "наличие", "розпродаж", "распродажа", "кошик", "корзина",
   ]);

@@ -1,5 +1,5 @@
 diff --git a/src/lib/server/parser/brand-from-name.ts b/src/lib/server/parser/brand-from-name.ts
-index e6f0597..4eb3fb4 100644
+index e6f0597..81d1172 100644
 --- a/src/lib/server/parser/brand-from-name.ts
 +++ b/src/lib/server/parser/brand-from-name.ts
 @@ -22,16 +22,25 @@ const NOT_A_BRAND = new Set([
@@ -40,7 +40,7 @@ index e6f0597..4eb3fb4 100644
    if (x && y) return brandsAgree(x, y);
    if (x) return positionIn(b.name, x) >= 0;
    if (y) return positionIn(a.name, y) >= 0;
-@@ -135,9 +144,67 @@ export function makerNames(value: string): string[] {
+@@ -135,9 +144,69 @@ export function makerNames(value: string): string[] {
    return maker === undefined ? [value] : [value, ...MAKERS[maker]];
  }
  
@@ -54,6 +54,8 @@ index e6f0597..4eb3fb4 100644
 +  "discount", "discounts", "discounted", "promotion", "promotions", "promotional", "promo", "promos",
 +  "offer", "offers", "coupon", "coupons", "promocode", "shipping", "delivery", "returns", "cart", "checkout",
 +  "clearance", "markdown", "markdowns", "bestseller", "bestsellers", "wides", "widths", "preorder", "restocked",
++  // "Extended Sizes", "Wide Sizing": a line about the sizes a piece comes in.
++  "extended", "sizes", "sizing",
 +  "доставка", "знижка", "знижки", "скидка", "скидки", "акція", "акции", "акция", "промокод", "наявність",
 +  "наличие", "розпродаж", "распродажа", "кошик", "корзина",
 +]);
@@ -110,7 +112,23 @@ index e6f0597..4eb3fb4 100644
  }
  
  /** Is this brand spelled, as whole words, inside `text`? */
-@@ -169,11 +236,12 @@ export function brandVocabulary(...lists: string[][]): string[] {
+@@ -155,8 +224,13 @@ function positionIn(text: string, brand: string): number {
+   const pattern = escapeRegExp(foldBrand(brand)).replace(/ /g, "\\s+");
+   // Not `\b`: it only knows ASCII letters, so "Кросівки Nike" and "Stüssy"
+   // would get their boundaries wrong. A brand must not continue into a letter
+-  // or digit on either side — "Cos" is not in "Cosy", "Arket" not in "Market".
+-  const re = new RegExp(`(?<![\\p{L}\\p{N}])${pattern}(?![\\p{L}\\p{N}])`, "u");
++  // or digit on either side — "Cos" is not in "Cosy", "Arket" not in "Market" —
++  // nor be one half of a hyphenated word: the "On" of "Pull-On Boot" is not
++  // the running brand, and it was filed under it.
++  const re = new RegExp(
++    `(?<![\\p{L}\\p{N}])(?<![\\p{L}\\p{N}][-‐–])${pattern}(?![\\p{L}\\p{N}])(?![-‐–][\\p{L}\\p{N}])`,
++    "u",
++  );
+   const m = re.exec(foldBrand(text));
+   return m ? m.index : -1;
+ }
+@@ -169,30 +243,45 @@ export function brandVocabulary(...lists: string[][]): string[] {
    const byFold = new Map<string, string>();
    for (const list of lists) {
      for (const raw of list) {
@@ -126,7 +144,41 @@ index e6f0597..4eb3fb4 100644
        if (!byFold.has(fold)) byFold.set(fold, name);
      }
    }
-@@ -201,49 +269,178 @@ export function brandInName(name: string, brands: string[]): string {
+   return [...byFold.values()];
+ }
+ 
++/** Who a piece is for, the words a name opens with before its maker: "Women's On Cloud 5". */
++const LEADING_WORDS = /^(?:(?:men|women|kids?|boys?|girls?|unisex|toddlers?|baby|youth)(?:['’]s|s['’]|s)?\s+)*/u;
++
++/**
++ * Brands this short are everyday words as often as makers — "On", "Gap",
++ * "Ash", "Lee" — and count only where a maker's name stands: first.
++ */
++const SHORT_BRAND = 3;
++
+ /**
+  * The known brand a product name names, or "" when it names none.
+  *
+  * The earliest brand in the name wins — a brand leads its product's title far
+  * more often than it trails it, and "Nike x Sacai" is Nike's shoe. At the same
+- * position the longest wins, so "Acne Studios" beats "Acne".
++ * position the longest wins, so "Acne Studios" beats "Acne". A brand of three
++ * letters or fewer counts only at the front, after who the piece is for:
++ * "On Cloud 5" and "Women's On Cloud 5" are On's, "Ash Grey Hoodie" and
++ * "Bruce Lee Tee" name no maker.
+  */
+ export function brandInName(name: string, brands: string[]): string {
++  const front = (LEADING_WORDS.exec(foldBrand(name))?.[0] ?? "").length;
+   let best = "";
+   let bestAt = Infinity;
+   for (const brand of brands) {
+     const at = positionIn(name, brand);
+     if (at < 0) continue;
++    if (compact(brand).length <= SHORT_BRAND && at !== front) continue;
+     if (at < bestAt || (at === bestAt && brand.length > best.length)) {
+       best = brand;
+       bestAt = at;
+@@ -201,49 +290,184 @@ export function brandInName(name: string, brands: string[]): string {
    return best;
  }
  
@@ -193,7 +245,7 @@ index e6f0597..4eb3fb4 100644
 +const REGISTRY_LABELS = new Set(["com", "co", "org", "net", "gov", "edu", "ac", "biz", "in", "kiev", "kyiv"]);
 +
 +/** The label of a host that names the shop: "timberland" in "www.timberland.co.uk". */
-+function shopLabel(host: string): string {
++export function shopLabel(host: string): string {
 +  const labels = (host ?? "").toLowerCase().replace(/^www\./, "").split(".").filter(Boolean);
 +  if (labels.length < 2) return compact(labels[0] ?? "");
 +  let i = labels.length - 2;
@@ -201,14 +253,18 @@ index e6f0597..4eb3fb4 100644
 +  return compact(labels[i]);
 +}
 +
++/** Is this host the brand's own site: timberland.com for Timberland? A marketplace is no maker's. */
++export function isOwnShopOf(host: string, brand: string): boolean {
++  const label = shopLabel(host);
++  return label.length >= 3 && !MARKETPLACES.has(label) && compact(brand) === label;
++}
++
 +/**
 + * The known brand this shop is the own site of, or "": timberland.com is
 + * Timberland's, thenorthface.com The North Face's. A marketplace is no maker's.
 + */
 +export function ownShopBrand(host: string, known: string[]): string {
-+  const label = shopLabel(host);
-+  if (label.length < 3 || MARKETPLACES.has(label)) return "";
-+  return known.find((b) => compact(b) === label && !isNotABrand(b)) ?? "";
++  return known.find((b) => isOwnShopOf(host, b) && !isNotABrand(b)) ?? "";
 +}
 +
  export interface BrandDecision {
@@ -287,10 +343,12 @@ index e6f0597..4eb3fb4 100644
 -    return { brand: NOT_A_BRAND.has(statedFold) ? "" : canonical };
 +  if (!named || foldBrand(named) === statedFold) {
 +    if (!stated) return shop ? fromShop() : { brand: "" };
-+    // Printed on the maker's own site, a word we have never seen as a brand and
-+    // nothing else names: the site's word. A known maker printed there stands —
-+    // a Jordan or a Converse on nike.com.
-+    if (!named && input.weak && shop && !statedIsKnown && !brandsAgree(stated, shop) && positionIn(input.name, stated) < 0) {
++    // Printed on the maker's own site and confirmed by nothing — not the name,
++    // not a model in it: the site's word. Known or not: the line a run before
++    // this one put on the Brands list ("Extended Sizes") is "known" too. The
++    // maker's other names stand (Jordan on nike.com), as does a maker the name
++    // or its model names.
++    if (!named && input.weak && shop && !brandsAgree(stated, shop) && positionIn(input.name, stated) < 0) {
 +      return fromShop();
 +    }
 +    return { brand: canonical };
@@ -364,10 +422,43 @@ index a06a012..4935b1c 100644
      // BreadcrumbList wins: it is data rather than a reading of the layout.
      breadcrumbs: (() => {
 diff --git a/src/lib/server/parser/import-product.ts b/src/lib/server/parser/import-product.ts
-index d9d084e..8ae11b1 100644
+index d9d084e..72b46a0 100644
 --- a/src/lib/server/parser/import-product.ts
 +++ b/src/lib/server/parser/import-product.ts
-@@ -991,22 +991,33 @@ export async function importParsedProduct(
+@@ -244,6 +244,7 @@ interface VariantRow {
+   id: string;
+   brand: string | null;
+   name: string | null;
++  source_url: string | null;
+   colors: string[] | null;
+   category: string | null;
+   variant_group_id: string | null;
+@@ -255,6 +256,7 @@ function toCandidate(row: VariantRow): VariantCandidate {
+     id: row.id,
+     brand: row.brand,
+     name: row.name ?? "",
++    sourceUrl: row.source_url,
+     colors: row.colors ?? [],
+     category: row.category,
+     variantGroupId: row.variant_group_id,
+@@ -262,7 +264,7 @@ function toCandidate(row: VariantRow): VariantCandidate {
+   };
+ }
+ 
+-const VARIANT_COLUMNS = "id, brand, name, colors, category, variant_group_id, is_group_primary";
++const VARIANT_COLUMNS = "id, brand, name, source_url, colors, category, variant_group_id, is_group_primary";
+ 
+ /**
+  * Rows of one brand read for a name comparison. Generous: the comparison runs
+@@ -375,6 +377,7 @@ async function linkColorVariants(input: {
+       name: input.name,
+       colors: input.colors,
+       category: input.category,
++      sourceUrl: input.sourceUrl,
+     };
+     for (const lookup of nameLookups(input.brand, input.name, input.colors)) {
+       let query = supabase!.from("products").select(VARIANT_COLUMNS);
+@@ -991,22 +994,33 @@ export async function importParsedProduct(
    } catch {
      /* no address — nothing to tell the shop's name from a brand */
    }
@@ -480,19 +571,51 @@ index 0f3841f..f39bbed 100644
    /**
     * The tree's label for what this piece is — "Bomber Jackets", "Sneakers".
 diff --git a/src/lib/server/parser/variant-group.ts b/src/lib/server/parser/variant-group.ts
-index c0cde12..b76ec07 100644
+index c0cde12..740ee93 100644
 --- a/src/lib/server/parser/variant-group.ts
 +++ b/src/lib/server/parser/variant-group.ts
-@@ -42,7 +42,7 @@
+@@ -42,7 +42,8 @@
   * than another.
   */
  import { colourRelation, sameModelFamily, samePiece, variantsDiffer } from "./piece-name";
 -import { brandsFit } from "./brand-from-name";
-+import { brandsFit, realBrand } from "./brand-from-name";
++import { brandsFit, isOwnShopOf, realBrand, shopLabel } from "./brand-from-name";
++import { sameStore, storeHost } from "./listing-url";
  
  export { sameModelFamily };
  
-@@ -76,11 +76,13 @@ export function isSamePieceByName(
+@@ -51,6 +52,8 @@ export interface VariantCandidate {
+   name: string;
+   /** The card's brand as saved; a card without one is judged by its name. */
+   brand?: string | null;
++  /** The card's own page, when known: two pages of one store vouch for each other's maker. */
++  sourceUrl?: string | null;
+   colors: string[];
+   category?: string | null;
+   variantGroupId?: string | null;
+@@ -70,18 +73,34 @@ export interface VariantCandidate {
+  * card on the storefront, whatever its swatches say.
+  */
+ export function isSamePieceByName(
+-  ours: { brand: string; name: string; colors: string[]; category?: string | null },
++  ours: { brand: string; name: string; colors: string[]; category?: string | null; sourceUrl?: string | null },
+   candidate: VariantCandidate,
+ ): boolean {
++  // Two pages of one store with no brand read on either, or on one of them
++  // when the store is the other's own site: the store is the maker on both,
++  // and one store does not give two pieces one name. Timberland's "Women's
++  // Allington Mid Boot" in Wheat and in Black came in with no brand at all and
++  // stood as two cards: the stricter test a missing brand calls for wants two
++  // words of a model's own, and "Allington" is one.
++  const ourBrand = realBrand(ours.brand);
++  const theirBrand = realBrand(candidate.brand);
++  if ((!ourBrand || !theirBrand) && sameStore(ours.sourceUrl, candidate.sourceUrl)) {
++    const host = storeHost(ours.sourceUrl);
++    const branded = ourBrand || theirBrand;
++    if (!branded || isOwnShopOf(host, branded)) {
++      return samePiece([branded, shopLabel(host)].filter(Boolean), ours, candidate);
++    }
++  }
    // One maker under either spelling, or one side with no brand whose name
    // spells the other's (`brandsFit`). Where neither vouches — one side names
    // no brand at all — only a name that is a model on its own will do, as in
@@ -502,10 +625,11 @@ index c0cde12..b76ec07 100644
 +  // another maker's piece.
    const fit = brandsFit(ours, candidate);
 -  const oneUnbranded = !ours.brand?.trim() !== !candidate.brand?.trim();
-+  const oneUnbranded = !realBrand(ours.brand) !== !realBrand(candidate.brand);
++  const oneUnbranded = !ourBrand !== !theirBrand;
    if (!fit && !oneUnbranded) return false;
 -  const brands = [ours.brand ?? "", candidate.brand ?? ""].filter((b) => b.trim());
-+  const brands = [realBrand(ours.brand), realBrand(candidate.brand)].filter(Boolean);
-   return samePiece(brands, ours, candidate, { strict: !fit });
+-  return samePiece(brands, ours, candidate, { strict: !fit });
++  return samePiece([ourBrand, theirBrand].filter(Boolean), ours, candidate, { strict: !fit });
  }
  
+ /**
