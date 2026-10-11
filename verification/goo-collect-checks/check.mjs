@@ -45,6 +45,8 @@ const routes = {
   "/sneakers/new-balance-550-white-green": ["text/html; charset=utf-8", page("goat-brand.html")],
   "/en-gb/men/product/balenciaga/black-venom-boots/18128871": ["text/html; charset=utf-8", page("ssense.html")],
   "/sneakers/air-jordan-1-retro-high-og-dz5485-612": ["text/html; charset=utf-8", page("goat-photos.html")],
+  "/en-us/p/footwear-0100/mens-waterproof-field-boot": ["text/html; charset=utf-8", page("timberland-promo.html")],
+  "/en-us/p/footwear-0100/mens-euro-hiker": ["text/html; charset=utf-8", page("timberland-brand.html")],
 };
 const server = createServer((req, res) => {
   const hit = routes[req.url.split("?")[0]];
@@ -231,6 +233,19 @@ cases.push({
     ];
   },
 });
+
+cases.push(
+  {
+    name: "Timberland: строка акции под названием — не бренд (было «Wides Available», «Excluded from…»)",
+    path: "/en-us/p/footwear-0100/mens-waterproof-field-boot",
+    check: (r) => [["brandText", r.brandText, ""]],
+  },
+  {
+    name: "Timberland: бренд из своего поля, а не из ближайшей к названию строки акции",
+    path: "/en-us/p/footwear-0100/mens-euro-hiker",
+    check: (r) => [["brandText", r.brandText, "Timberland"]],
+  },
+);
 
 const browser = await chromium.launch(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {});
 let failed = 0;
