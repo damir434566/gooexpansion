@@ -33,6 +33,16 @@
 
 import { sitemapPieces, takePieces, queuedBytes, PLAN_SITEMAP_BUDGET, PLAN_SITEMAP_DOCS } from "./sitemap-pieces.js";
 import { listingStep, robotsRules, robotsAllows, planHtml } from "./listing.js";
+import {
+  menuStep,
+  categoryCandidates,
+  sitemapChildren,
+  isSitemapIndex,
+  localePrefix,
+  SeenStore,
+  PLAN_LINKS,
+  SWEEP_ENTRIES,
+} from "./site.js";
 
 // ── Politeness constants ─────────────────────────────────────────────────────
 
@@ -106,6 +116,12 @@ const state = {
   foundAtLeast: false,
   /** While the page is walked: pages opened and links seen so far. */
   listing: null,
+  /**
+   * A whole-store run's place in the store: which stage (the menu, the
+   * categories, the sitemaps), which category of how many, how many
+   * sitemaps read. Null for every other kind of run.
+   */
+  site: null,
   planned: 0,
   done: 0,
   counts: { new: 0, updated: 0, skipped: 0, failed: 0 },
@@ -118,6 +134,29 @@ const state = {
 function publicState() {
   const { failures, ...rest } = state;
   return { ...rest, failureCount: failures.length };
+}
+
+// ── Staying awake ────────────────────────────────────────────────────────────
+
+/**
+ * Chrome ends an extension's worker that has called no extension API for 30
+ * seconds, and a run's state goes with it. A run calls one every few seconds
+ * as it opens pages, but not while the site takes its time over an import or
+ * a plan, and a whole-store run goes on for days. So while any run is going,
+ * the worker asks Chrome something trivial every twenty seconds.
+ */
+let awake = null;
+
+function stayAwake() {
+  if (awake) return;
+  awake = setInterval(() => {
+    chrome.runtime.getPlatformInfo().catch(() => {});
+  }, 20_000);
+}
+
+function letSleep() {
+  clearInterval(awake);
+  awake = null;
 }
 
 // ── Abortable waiting ────────────────────────────────────────────────────────
@@ -299,11 +338,27 @@ function pushProgress() {
     delayMs: state.delayMs,
     store: state.store,
     phase: state.phase,
-    found: state.found,
+    // A whole-store run's count would be one batch of one category, said as
+    // "found on the page"; where the run is goes in the message instead.
+    found: state.site ? 0 : state.found,
     foundAtLeast: state.foundAtLeast,
     listing: state.listing,
-    message: state.message,
+    message: state.message || siteLine(),
+    site: state.site,
   });
+}
+
+/** Where a whole-store run is, in one line, for the collect tab. */
+function siteLine() {
+  const s = state.site;
+  if (!s) return "";
+  const sofar = `${state.done} piece${state.done === 1 ? "" : "s"} so far`;
+  if (s.stage === "menu") return "Whole store: reading the store's menu…";
+  if (s.stage === "categories") return `Whole store: category ${s.index + 1} of ${s.categories}, ${s.label}. ${sofar}.`;
+  if (s.stage === "sitemaps") {
+    return `Whole store: the sitemaps, for the pieces no category showed (${s.sitemapsRead} read). ${sofar}.`;
+  }
+  return `Whole store: ${sofar}.`;
 }
 
 // ── Reading what does not need a tab ─────────────────────────────────────────
@@ -598,6 +653,8 @@ const LISTING_LD = 500_000;
 const HIDDEN_MS = 5 * 60_000;
 /** Failed pages one run remembers, for Retry. */
 const MAX_FAILURES = 500;
+/** And one whole-store run, which opens a thousand times as many. */
+const SITE_FAILURES = 5_000;
 /**
  * Pieces a page must show at first sight to be a listing even though its
  * markup calls it one product. A product page shows a few related pieces at
@@ -612,6 +669,7 @@ const NOTHING_FOUND =
 
 /** Where every kind of run starts from. */
 function begin(storeUrl, linksOnly, phase) {
+  stayAwake();
   Object.assign(state, {
     running: true,
     stopped: false,
@@ -624,10 +682,15 @@ function begin(storeUrl, linksOnly, phase) {
     found: 0,
     foundAtLeast: false,
     listing: null,
+    site: null,
     counts: { new: 0, updated: 0, skipped: 0, failed: 0 },
     failures: [],
     delayMs: MIN_DELAY_MS,
   });
+}
+
+function failureCap() {
+  return state.site ? SITE_FAILURES : MAX_FAILURES;
 }
 
 /** What a run came to, kept after the worker is gone so the popup can say it. */
@@ -642,8 +705,9 @@ function summary() {
     planned: state.planned,
     done: state.done,
     counts: { ...state.counts },
-    failures: state.failures.slice(0, MAX_FAILURES),
+    failures: state.failures.slice(0, failureCap()),
     linksOnly: state.linksOnly,
+    site: state.site,
   };
 }
 
@@ -668,7 +732,7 @@ async function lastRun() {
 function record(url, status, reason) {
   const key = status === "imported" ? "new" : status;
   if (key in state.counts) state.counts[key]++;
-  if (status === "failed" && state.failures.length < MAX_FAILURES) {
+  if (status === "failed" && state.failures.length < failureCap()) {
     state.failures.push({ url, reason: String(reason || "failed").slice(0, 300) });
   }
 }
@@ -686,6 +750,13 @@ function failedUnseen(url, reason) {
 }
 
 function halt(message) {
+  letSleep();
+  if (currentSite) {
+    message = `${message} ${RESUME_HINT}`;
+    Object.assign(currentSite, { done: state.done, counts: { ...state.counts }, status: "halted" });
+    void saveSiteRun(currentSite);
+    currentSite = null;
+  }
   state.running = false;
   state.phase = "halted";
   state.message = message;
@@ -694,6 +765,7 @@ function halt(message) {
 }
 
 function finish() {
+  letSleep();
   state.running = false;
   state.phase = state.stopped ? "stopped" : "done";
   void tellPage("done", {});
@@ -747,6 +819,10 @@ async function ingest(url, snap, ctx) {
  * page order, so the site matching a piece against the catalogue has seen the
  * piece before it, but the store is not kept waiting for them: the next page
  * is opened while the last one is being imported.
+ *
+ * A whole-store run hands `ctx.mark`, which writes each address down as soon
+ * as its fate is known (read, refused, failed), so no category, sitemap or
+ * Resume after it opens that page again.
  */
 async function collect(urls, ctx) {
   /** The import still running on the site, if any. */
@@ -761,7 +837,7 @@ async function collect(urls, ctx) {
   try {
     for (const url of urls) {
       if (state.stopped || ctx.collected >= ctx.limit) break;
-      ctx.seen.push(url);
+      if (ctx.seen) ctx.seen.push(url);
 
       await politePause();
       if (state.stopped) break;
@@ -769,6 +845,8 @@ async function collect(urls, ctx) {
       const snap = await snapshotPage(url);
       // Stopped while the page was open: not a failure, and nothing to retry.
       if (state.stopped) break;
+
+      if (ctx.mark) await ctx.mark(url);
 
       if (snap.refused) {
         ctx.refusals++;
@@ -977,14 +1055,54 @@ function navigate(tabId, url) {
  * Walk the listing in the admin's tab: every screen, every "Show more", every
  * page, noting each link on the way (listing.js). Returns the links in the
  * order they were seen and the structured data of each page walked.
+ *
+ * A whole-store run passes `site`, and the walk changes in three ways. It
+ * does not keep everything for the end: every `site.batch` new links it hands
+ * what it has to `site.onBatch`, which collects those pieces before the walk
+ * scrolls on, so a category of fifty thousand is never one list. Its bounds
+ * are the run's (`site.maxPages`, `site.maxMs` of walking, the collecting not
+ * counted). And a tab that is not in front still turns numbered pages, which
+ * need no scrolling; it waits `site.hiddenMs` only where the page has to be
+ * scrolled to show more.
  */
-async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) {
+async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly, site = null) {
   const links = [];
   const known = new Set();
   const heads = [];
   let ldSize = 0;
   const visited = new Set([startUrl.split("#")[0]]);
-  const started = Date.now();
+  let started = Date.now();
+  const maxMs = site ? site.maxMs : LISTING_MS;
+  const maxPages = site ? site.maxPages : LISTING_PAGES;
+  const maxLinks = site ? Infinity : LISTING_LINKS;
+  const hiddenMs = site ? site.hiddenMs : HIDDEN_MS;
+  /** Links and page heads already handed to `site.onBatch`. */
+  let handed = 0;
+  let headsHanded = 0;
+  let halted = false;
+  /** The page the tab is on: where a Resume starts again once its links are collected. */
+  let onPageNow = startUrl;
+  /** Hand the links not handed yet to the run; false when the run is over. */
+  const flush = async () => {
+    if (!site || handed >= links.length) return !state.stopped;
+    const chunk = links.slice(handed);
+    const newHeads = heads.slice(headsHanded);
+    handed = links.length;
+    headsHanded = heads.length;
+    const t0 = Date.now();
+    const ok = await site.onBatch(chunk, newHeads, [...visited].map(pagePath));
+    // Collecting is not walking: the clock and the wait for the tab start
+    // again where they were.
+    started += Date.now() - t0;
+    hiddenSince = 0;
+    if (ok === false) halted = true;
+    // Every link up to this page is collected: a Resume can start here. Not
+    // at a page the walk turned to before its links were collected, or the
+    // pieces of the pages before it would be skipped.
+    else if (!state.stopped && site.onPage) site.onPage(onPageNow);
+    state.phase = "listing";
+    return ok !== false && !state.stopped;
+  };
   let pages = 1;
   let first = true;
   let initial = -1;
@@ -993,6 +1111,9 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
   let lastError = "";
   let note = "";
   let partial = false;
+  /** The walk ended because the tab stayed out of sight; and whether it was ever in sight. */
+  let unseen = false;
+  let seenTab = false;
 
   // A run that asked for a number of pieces takes them from the page as the
   // admin sees it: it looks before it scrolls, and scrolls only while the page
@@ -1023,8 +1144,8 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
   pushProgress();
 
   while (!state.stopped) {
-    if (Date.now() - started > LISTING_MS) {
-      note = "The page was still loading more after ten minutes; collecting what it had shown by then.";
+    if (Date.now() - started > maxMs) {
+      note = `The page was still loading more after ${Math.round(maxMs / 60_000)} minutes; collecting what it had shown by then.`;
       break;
     }
 
@@ -1035,7 +1156,7 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
         func: listingStep,
         // The run's first look starts the page's memory afresh, and in a
         // counting run does not scroll.
-        args: [{ first, reset: initial < 0, scroll: !(counting && initial < 0) }],
+        args: [{ first, reset: initial < 0, scroll: !(counting && initial < 0), hiddenNext: !!site }],
       });
       res = out?.result ?? null;
     } catch (err) {
@@ -1064,9 +1185,10 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
       continue;
     }
     misses = 0;
+    if (res.visible) seenTab = true;
 
     for (const url of res.links) {
-      if (known.has(url) || links.length >= LISTING_LINKS) continue;
+      if (known.has(url) || links.length >= maxLinks) continue;
       known.add(url);
       links.push(url);
     }
@@ -1102,7 +1224,7 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
           (u) => pagePath(u) !== here,
         );
         if (looked.ok && others.length < GRID_MIN) {
-          return { links, heads, pages, partial, note, product: true, walked: [here] };
+          return { links, heads, pages, partial, note, product: true, seenTab, walked: [here] };
         }
       }
     }
@@ -1114,12 +1236,19 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
       break;
     }
 
-    if (!res.visible) {
+    // A whole-store run collects as it goes.
+    if (site && links.length - handed >= site.batch && !(await flush())) break;
+
+    // A numbered page needs no scrolling: a whole-store run turns it in a
+    // tab nobody is looking at.
+    const turnHidden = !res.visible && !!site && !!res.next && !visited.has(res.next);
+    if (!res.visible && !turnHidden) {
       hiddenSince = hiddenSince || Date.now();
       state.message = KEEP_IN_FRONT;
       pushProgress();
-      if (Date.now() - hiddenSince > HIDDEN_MS) {
+      if (Date.now() - hiddenSince > hiddenMs) {
         note = "The store tab stayed in the background; collecting what it had shown by then.";
+        unseen = true;
         break;
       }
       await sleep(1000);
@@ -1129,11 +1258,11 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
     if (state.message === KEEP_IN_FRONT) state.message = "";
     pushProgress();
 
-    if (links.length >= LISTING_LINKS) break;
-    if (!res.exhausted) continue;
+    if (links.length >= maxLinks) break;
+    if (!res.exhausted && !turnHidden) continue;
 
     const next = res.next;
-    if (!next || visited.has(next) || pages >= LISTING_PAGES) break;
+    if (!next || visited.has(next) || pages >= maxPages) break;
     if (!robotsAllows(rules, next)) {
       note = `robots.txt does not allow page ${pages + 1} of this listing; collecting the ${pages === 1 ? "first page" : `first ${pages} pages`}.`;
       break;
@@ -1152,12 +1281,15 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly) 
     pages++;
     first = true;
     state.listing = { pages, links: links.length };
+    onPageNow = next;
     pushProgress();
   }
 
-  // Back where the admin started, rather than on the listing's last page.
-  if (pages > 1) chrome.tabs.update(tabId, { url: startUrl }).catch(() => {});
-  return { links, heads, pages, partial, note, product: false, walked: [...visited].map(pagePath) };
+  if (site && !halted && !state.stopped) await flush();
+  // Back where the admin started, rather than on the listing's last page. A
+  // whole-store run goes on to its next category instead.
+  if (pages > 1 && !site) chrome.tabs.update(tabId, { url: startUrl }).catch(() => {});
+  return { links, heads, pages, partial, note, product: false, halted, unseen, seenTab, walked: [...visited].map(pagePath) };
 }
 
 /**
@@ -1269,30 +1401,502 @@ async function runRetry(last) {
   if (state.stopped) return finish();
 
   // Planned again rather than trusted: robots.txt may have changed, and the
-  // pace comes from it.
-  const planned = await askPage("plan", {
-    url: state.store,
-    html: planHtml([], wanted),
-    robotsTxt,
-    sitemaps: [],
-    seen: [],
-    limit: MAX_LIMIT,
-    linksOnly: state.linksOnly,
-  });
-  if (!planned.ok) {
-    halt(planned.error ?? "The collect tab could not plan the run.");
-    return;
-  }
-  const plan = planned.data ?? {};
+  // pace comes from it. A whole-store run can leave more failed pages than
+  // one plan call answers for, so they are planned a chunk at a time.
   const set = new Set(wanted);
-  const urls = (Array.isArray(plan.urls) ? plan.urls : []).filter((u) => set.has(u));
+  const urls = [];
+  let plan = {};
+  for (let i = 0; i < wanted.length; i += PLAN_LINKS) {
+    const planned = await askPage("plan", {
+      url: state.store,
+      html: planHtml([], wanted.slice(i, i + PLAN_LINKS)),
+      robotsTxt,
+      sitemaps: [],
+      seen: [],
+      limit: MAX_LIMIT,
+      linksOnly: state.linksOnly,
+    });
+    if (!planned.ok) {
+      halt(planned.error ?? "The collect tab could not plan the run.");
+      return;
+    }
+    plan = planned.data ?? {};
+    for (const u of Array.isArray(plan.urls) ? plan.urls : []) if (set.has(u) && !urls.includes(u)) urls.push(u);
+  }
   state.found = urls.length;
   state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
   state.planned = urls.length;
   state.phase = "collecting";
   pushProgress();
 
-  if (!(await collect(urls, newContext(MAX_LIMIT, state.linksOnly)))) return;
+  if (!(await collect(urls, newContext(Infinity, state.linksOnly)))) return;
+  finish();
+}
+
+// ── The whole store ──────────────────────────────────────────────────────────
+
+/** New links a whole-store walk gathers before it collects their pieces. */
+const SITE_BATCH = 120;
+/** Pages of one category a whole-store run turns, at most. */
+const SITE_PAGES = 5_000;
+/** Time spent walking one category, the collecting in between not counted. */
+const SITE_WALK_MS = 60 * 60_000;
+/**
+ * How long a category that only loads more as it is scrolled waits for its
+ * tab to come back to the front. Short, because a run of a thousand
+ * categories cannot wait five minutes at each, and what such a category did
+ * not show is still in the store's sitemaps, read last. Once one category has
+ * waited that long in vain, the next ones only look (`SITE_UNSEEN_MS`) until
+ * the tab is seen again: the admin is not watching, and a night of minutes
+ * would add up to hours.
+ */
+const SITE_HIDDEN_MS = 60_000;
+const SITE_UNSEEN_MS = 5_000;
+/** Sitemap documents one run reads, at most. */
+const SITE_DOCS = 5_000;
+/**
+ * Rows the collect tab lists before a whole-store run gives it a fresh page.
+ * The tab keeps every row it is sent, and six hundred thousand of them would
+ * stop it; it is greeted again, which clears it, at every category and every
+ * thousand pieces.
+ */
+const SCREEN_ROWS = 1_000;
+/** Where a whole-store run writes down how far it has got. */
+const SITE_KEY = "siteRun";
+
+const RESUME_HINT = "Resume carries on from here: open the store, click Goo Collect, press Resume.";
+
+/** Every piece the whole-store run has opened. */
+const seenPieces = new SeenStore();
+
+/** The whole-store run going now, so a halt anywhere writes it down. */
+let currentSite = null;
+
+async function loadSiteRun() {
+  try {
+    const stored = await chrome.storage.local.get(SITE_KEY);
+    const run = stored[SITE_KEY];
+    return run && typeof run === "object" && Array.isArray(run.categories) ? run : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveSiteRun(run) {
+  try {
+    await chrome.storage.local.set({ [SITE_KEY]: run });
+  } catch {
+    /* the run goes on; only a later Resume would start further back */
+  }
+}
+
+/** Write down where the run is, and what it has come to so far. */
+async function keepSite(run, status = "running") {
+  run.done = state.done;
+  run.counts = { ...state.counts };
+  run.status = status;
+  await saveSiteRun(run);
+  await saveLastRun();
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** The language most of the pieces walked so far live under, or null. */
+function commonLocale(locales) {
+  let best = null;
+  let most = 0;
+  for (const [prefix, n] of Object.entries(locales || {})) {
+    if (n > most) {
+      best = prefix;
+      most = n;
+    }
+  }
+  return best;
+}
+
+function localeOf(url) {
+  try {
+    return localePrefix(new URL(url).pathname);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The tab a whole-store run walks: the admin's own, when it is on the store,
+ * or a new one in front when they resume from somewhere else.
+ */
+async function storeTab(tabId, host, url) {
+  const tab = Number.isInteger(tabId) ? await chrome.tabs.get(tabId).catch(() => null) : null;
+  if (tab && tab.url && hostOf(tab.url) === host) return { id: tab.id, opened: false };
+  try {
+    const made = await chrome.tabs.create({ url, active: true });
+    await waitForLoad(made.id);
+    return { id: made.id, opened: true };
+  } catch {
+    return { id: null, opened: false };
+  }
+}
+
+/**
+ * Collect the whole store: its menu's categories one by one in the admin's
+ * tab, each piece once, then its sitemaps for the pieces no category showed.
+ *
+ * Everything the run needs to carry on is written down as it goes (`SITE_KEY`
+ * and the SeenStore). `resume` picks up the last run where it stopped, halted
+ * or was cut off: the category and page it was on, the sitemap and the piece
+ * of it.
+ */
+async function runSite({ tabId, storeUrl, linksOnly = false, resume = false }) {
+  let run = null;
+  if (resume) {
+    run = await loadSiteRun();
+    if (!run || run.stage === "done") {
+      halt("There is no whole-store run to resume.");
+      return;
+    }
+    storeUrl = run.store;
+    linksOnly = run.linksOnly === true;
+  }
+
+  let origin;
+  let host;
+  try {
+    const u = new URL(storeUrl);
+    origin = u.origin;
+    host = hostOf(storeUrl);
+  } catch {
+    halt("That does not look like a store address.");
+    return;
+  }
+  const startUrl = storeUrl.split("#")[0];
+
+  const previous = run ? await lastRun() : null;
+  begin(startUrl, linksOnly, "listing");
+  state.site = {
+    stage: run ? run.stage : "menu",
+    categories: run ? run.categories.length : 0,
+    index: run ? run.index : 0,
+    label: "",
+    url: "",
+    sitemapsRead: run && run.sweep ? run.sweep.read.length : 0,
+    sitemapsQueued: run && run.sweep ? run.sweep.queue.length : 0,
+    startedAt: run ? run.startedAt : Date.now(),
+    resumedAt: Date.now(),
+    doneAtResume: run ? run.done || 0 : 0,
+  };
+  if (run) {
+    state.done = run.done || 0;
+    state.counts = { ...state.counts, ...(run.counts || {}) };
+    if (previous && hostOf(previous.store) === host && Array.isArray(previous.failures)) {
+      state.failures = previous.failures.slice(0, SITE_FAILURES);
+    }
+  }
+
+  const hello = await askPage("hello", {});
+  if (!hello.ok) {
+    halt(hello.error ?? NO_TAB);
+    return;
+  }
+
+  const robotsTxt = (await fetchText(`${origin}/robots.txt`)) ?? "";
+  const rules = robotsRules(robotsTxt);
+  state.delayMs = Math.max(rules.crawlDelayMs ?? 0, MIN_DELAY_MS);
+  if (state.stopped) return finish();
+
+  const target0 = run ? run.pageUrl || run.categories[run.index]?.url || startUrl : startUrl;
+  const tab = await storeTab(tabId, host, target0);
+  if (tab.id == null) {
+    halt("Could not open a tab on the store.");
+    return;
+  }
+  tabId = tab.id;
+
+  const ctx = newContext(Infinity, linksOnly);
+  ctx.seen = null;
+  ctx.mark = (url) => seenPieces.add(url).catch(() => {});
+
+  // ── The menu ────────────────────────────────────────────────────────────
+  if (!run) {
+    await seenPieces.clear().catch(() => {});
+    state.message = "";
+    pushProgress();
+    let menu = null;
+    try {
+      const [out] = await chrome.scripting.executeScript({ target: { tabId }, func: menuStep });
+      menu = out?.result ?? null;
+    } catch {
+      menu = null;
+    }
+    // The page the admin started on comes first: it is a category too, or
+    // the home page with its own pieces. The menu's categories go only where
+    // robots.txt lets the run go.
+    const categories = [
+      { url: startUrl, label: "This page", where: "start" },
+      ...categoryCandidates(menu && menu.links, startUrl).filter((c) => robotsAllows(rules, c.url)),
+    ];
+    run = {
+      store: startUrl,
+      linksOnly,
+      startedAt: state.site.startedAt,
+      stage: "categories",
+      categories,
+      index: 0,
+      pageUrl: "",
+      sweep: null,
+      locales: {},
+      done: 0,
+      counts: { ...state.counts },
+      status: "running",
+    };
+  }
+  currentSite = run;
+  await keepSite(run);
+
+  /** A category is never a piece: a store that numbers its categories like pieces would have them collected. */
+  const categoryPaths = new Set(run.categories.map((c) => pagePath(c.url)));
+
+  /** The planner's answer for one call, or null when the run has had to halt. */
+  const plan = async (payload) => {
+    state.phase = "planning";
+    const planned = await askPage("plan", {
+      robotsTxt,
+      sitemaps: [],
+      seen: [],
+      limit: MAX_LIMIT,
+      linksOnly,
+      html: "",
+      ...payload,
+    });
+    if (!planned.ok) {
+      halt(planned.error ?? "The collect tab could not plan the run.");
+      return null;
+    }
+    const data = planned.data ?? {};
+    state.delayMs = Math.max(Number(data.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
+    return data;
+  };
+
+  let screenFrom = state.done;
+  /** Clear the collect tab's rows: at every category, and every SCREEN_ROWS pieces. */
+  const freshScreen = async (force) => {
+    if (!force && state.done - screenFrom < SCREEN_ROWS) return true;
+    screenFrom = state.done;
+    state.planned = 0;
+    state.found = 0;
+    const greeted = await askPage("hello", {});
+    if (!greeted.ok) {
+      halt(greeted.error ?? NO_TAB);
+      return false;
+    }
+    return true;
+  };
+
+  /** Open the pieces among `urls` not opened before. False when the run is over. */
+  const collectNew = async (urls) => {
+    const fresh = await seenPieces.fresh(urls).catch(() => urls);
+    if (!fresh.length) return !state.stopped;
+    if (!(await freshScreen(false))) return false;
+    state.planned += fresh.length;
+    state.phase = "collecting";
+    pushProgress();
+    const ok = await collect(fresh, ctx);
+    if (!ok) return false;
+    await keepSite(run);
+    return !state.stopped;
+  };
+
+  /** What a category's walk hands over: planned a chunk at a time, then collected. */
+  const walkBatch = (cat) => async (chunk, heads, walked) => {
+    const listing = new Set(walked);
+    for (let i = 0; i < chunk.length; i += PLAN_LINKS) {
+      const data = await plan({ url: cat.url, html: planHtml(i === 0 ? heads : [], chunk.slice(i, i + PLAN_LINKS)) });
+      if (!data) return false;
+      const urls = (Array.isArray(data.urls) ? data.urls : []).filter(
+        (u) => !listing.has(pagePath(u)) && !categoryPaths.has(pagePath(u)),
+      );
+      for (const u of urls) {
+        const prefix = localeOf(u);
+        run.locales[prefix] = (run.locales[prefix] || 0) + 1;
+      }
+      if (!(await collectNew(urls))) return false;
+    }
+    return true;
+  };
+
+  // ── The categories ──────────────────────────────────────────────────────
+  /** Where the tab already is: the admin's page on a new run, the tab just opened on a resume. */
+  let at = !resume ? startUrl : tab.opened ? target0 : "";
+  /** The last walk gave up on a tab nobody was looking at. */
+  let unseen = false;
+  for (; run.stage === "categories" && run.index < run.categories.length && !state.stopped; run.index++, run.pageUrl = "") {
+    const cat = run.categories[run.index];
+    const target = run.pageUrl || cat.url;
+    const there = at === target;
+    at = "";
+    Object.assign(state.site, {
+      stage: "categories",
+      categories: run.categories.length,
+      index: run.index,
+      label: cat.label,
+      url: cat.url,
+    });
+    state.phase = "listing";
+    state.listing = { pages: 1, links: 0 };
+    state.message = "";
+    await keepSite(run);
+
+    // A link in the menu that a walk before it has already collected as a piece.
+    if (cat.where !== "start" && !(await seenPieces.fresh([pagePath(cat.url)]).catch(() => [cat.url])).length) continue;
+
+    if (!(await freshScreen(true))) return;
+    pushProgress();
+
+    if (!(await chrome.tabs.get(tabId).catch(() => null))) {
+      halt("The store tab was closed.");
+      return;
+    }
+    if (!there) {
+      await politePause();
+      if (state.stopped) break;
+      const loaded = await navigate(tabId, target);
+      const status = mainFrameStatus.get(tabId) ?? 0;
+      if (REFUSAL_STATUSES.has(status)) {
+        ctx.refusals++;
+        if (ctx.refusals >= REFUSAL_LIMIT) {
+          halt(`The store refused two pages in a row (HTTP ${status}). The run stopped so your address does not end up blocked. Try again later.`);
+          return;
+        }
+        state.message = `The store refused ${cat.label} (HTTP ${status}); going on to the next category.`;
+        continue;
+      }
+      if (!loaded) {
+        state.message = `${cat.label} did not load; going on to the next category.`;
+        continue;
+      }
+      ctx.refusals = 0;
+      await sleep(SETTLE_MS);
+    }
+    if (state.stopped) break;
+
+    const walk = await walkListing(tabId, target, MAX_LIMIT, rules, robotsTxt, linksOnly, {
+      batch: SITE_BATCH,
+      maxPages: SITE_PAGES,
+      maxMs: SITE_WALK_MS,
+      hiddenMs: unseen ? SITE_UNSEEN_MS : SITE_HIDDEN_MS,
+      onPage: (url) => {
+        run.pageUrl = url;
+        void saveSiteRun(run);
+      },
+      onBatch: walkBatch(cat),
+    });
+    if (state.stopped) break;
+    if (walk.halted || !state.running) return;
+    // Out of sight until a walk finds the tab in front again.
+    unseen = !!walk.unseen || (unseen && !walk.seenTab);
+    if (walk.error) {
+      state.message = `${cat.label}: ${walk.error} Going on to the next category.`;
+    } else if (walk.product) {
+      // A menu link to one piece: the walk recognised a product page.
+      if (!(await collectNew([pagePath(target)]))) {
+        if (state.stopped) break;
+        return;
+      }
+    }
+  }
+  if (state.stopped) return endSite(run, tabId);
+  if (run.stage === "categories") {
+    run.stage = "sitemaps";
+    run.pageUrl = "";
+    run.sweep = null;
+    await keepSite(run);
+  }
+
+  // ── The sitemaps ────────────────────────────────────────────────────────
+  // Last, for what no category led to: a piece only search finds, a category
+  // the menu does not list. Only in the language the pieces were walked in,
+  // or the run would collect the store again in every language it has.
+  Object.assign(state.site, { stage: "sitemaps", label: "", url: "" });
+  state.listing = null;
+  state.message = "";
+  if (!(await freshScreen(true))) return;
+  if (!run.sweep) {
+    const first = await plan({ url: `${origin}/`, limit: 1 });
+    if (!first) return;
+    const named = (first.robots && Array.isArray(first.robots.sitemaps) ? first.robots.sitemaps : []).filter(
+      (u) => hostOf(u) === host,
+    );
+    run.sweep = {
+      queue: named.length ? named : Array.isArray(first.fetchNext) ? first.fetchNext : [],
+      read: [],
+      current: "",
+      piece: 0,
+    };
+    await keepSite(run);
+  }
+  const sweep = run.sweep;
+  const locale = commonLocale(run.locales) ?? localePrefix(new URL(startUrl).pathname);
+  while (!state.stopped && (sweep.current || sweep.queue.length) && sweep.read.length < SITE_DOCS) {
+    if (!sweep.current) {
+      sweep.current = sweep.queue.shift();
+      sweep.piece = 0;
+    }
+    const docUrl = sweep.current;
+    Object.assign(state.site, { sitemapsRead: sweep.read.length, sitemapsQueued: sweep.queue.length + 1 });
+    state.phase = "planning";
+    pushProgress();
+    await keepSite(run);
+    await sleep(SITEMAP_GAP_MS);
+    if (state.stopped) break;
+
+    const xml = await fetchText(docUrl);
+    if (xml && isSitemapIndex(xml)) {
+      for (const child of sitemapChildren(xml, host)) {
+        if (child !== docUrl && !sweep.read.includes(child) && !sweep.queue.includes(child)) sweep.queue.push(child);
+      }
+    } else if (xml) {
+      const cut = sitemapPieces(docUrl, xml, PLAN_SITEMAP_BUDGET, SWEEP_ENTRIES);
+      while (sweep.piece < cut.length && !state.stopped) {
+        const piece = cut[sweep.piece];
+        const data = await plan({ url: `${origin}/`, sitemaps: [{ url: piece.url, xml: piece.xml }] });
+        if (!data) return;
+        const urls = (Array.isArray(data.urls) ? data.urls : []).filter(
+          (u) => localeOf(u) === locale && !categoryPaths.has(pagePath(u)),
+        );
+        if (!(await collectNew(urls))) {
+          if (state.stopped) break;
+          return;
+        }
+        sweep.piece++;
+        await keepSite(run);
+      }
+      if (state.stopped) break;
+    }
+    sweep.read.push(docUrl);
+    sweep.current = "";
+    sweep.piece = 0;
+  }
+  Object.assign(state.site, { sitemapsRead: sweep.read.length, sitemapsQueued: sweep.queue.length });
+  if (!state.stopped) run.stage = "done";
+  return endSite(run, tabId);
+}
+
+/** A whole-store run that stopped or reached the end: written down, and the tab back where it began. */
+async function endSite(run, tabId) {
+  const done = run.stage === "done";
+  if (done) {
+    state.site.stage = "done";
+    state.message = "";
+    chrome.tabs.update(tabId, { url: run.store }).catch(() => {});
+  }
+  await keepSite(run, done ? "done" : "stopped");
+  currentSite = null;
   finish();
 }
 
@@ -1358,6 +1962,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         ? runPage({ tabId, storeUrl, limit, linksOnly })
         : run({ storeUrl, limit, linksOnly });
       job.catch((err) => {
+        halt(err?.message ?? "The run failed unexpectedly.");
+      });
+      sendResponse({ ok: true });
+      return undefined;
+    }
+
+    case "site": {
+      // "Collect the whole store", or Resume, from the popup.
+      if (state.running) {
+        sendResponse({ ok: false, error: "A run is already going." });
+        return undefined;
+      }
+      const p = msg.payload || {};
+      runSite({
+        tabId: Number.isInteger(p.tabId) ? p.tabId : null,
+        storeUrl: typeof p.storeUrl === "string" ? p.storeUrl : "",
+        linksOnly: p.linksOnly === true,
+        resume: p.resume === true,
+      }).catch((err) => {
         halt(err?.message ?? "The run failed unexpectedly.");
       });
       sendResponse({ ok: true });

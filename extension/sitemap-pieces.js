@@ -50,11 +50,17 @@ function utf8Bytes(s) {
 /**
  * One fetched sitemap as pieces of at most `budget` bytes, in document order.
  *
+ * `maxEntries` caps the addresses in a piece as well. The planner returns at
+ * most 2,000 products from one call, so a piece of twenty thousand gives a run
+ * its first 2,000 and no more; "Collect the whole store" needs every one, and
+ * cuts its pieces by count too (`SWEEP_ENTRIES` in site.js). Other runs cut by
+ * bytes alone, as before.
+ *
  * A document with no `<loc>` at all, such as an HTML page served at a guessed
  * sitemap address, still becomes one empty piece. The planner then records it
  * as read, as it did when the whole text was sent.
  */
-export function sitemapPieces(url, xml, budget = PLAN_SITEMAP_BUDGET) {
+export function sitemapPieces(url, xml, budget = PLAN_SITEMAP_BUDGET, maxEntries = Infinity) {
   const index = /<sitemapindex[\s>]/i.test(xml);
   const tag = index ? "sitemapindex" : "urlset";
   const open = `<${tag}>\n`;
@@ -89,7 +95,7 @@ export function sitemapPieces(url, xml, budget = PLAN_SITEMAP_BUDGET) {
       ? `<sitemap><loc>${loc}</loc></sitemap>`
       : `<url><loc>${loc}</loc>${title ? `<image:title>${title}</image:title>` : ""}</url>`;
     const cost = utf8Bytes(entry) + 1;
-    if (entries.length && size + cost > budget) flush();
+    if (entries.length && (size + cost > budget || entries.length >= maxEntries)) flush();
     entries.push(entry);
     size += cost;
   }

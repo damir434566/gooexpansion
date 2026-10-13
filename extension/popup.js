@@ -13,6 +13,11 @@
  *
  * Everything after that belongs to the worker, which survives this popup being
  * closed — as it will be, since a run takes minutes.
+ *
+ * "Collect the whole store" starts the same way and runs for days. Where it
+ * got to is kept in `chrome.storage` (`siteRun`), so when the admin comes back
+ * to the store after a Stop, a halt or a restart of Chrome, the popup offers
+ * Resume.
  */
 
 const DEFAULT_STUDIO = "https://www.goo-fashion.com";
@@ -39,13 +44,30 @@ const el = {
   pace: document.getElementById("pace"),
   retry: document.getElementById("retry"),
   note: document.getElementById("note"),
+  whole: document.getElementById("whole"),
+  site: document.getElementById("site"),
+  resume: document.getElementById("resume"),
+  siteHint: document.getElementById("siteHint"),
 };
+
+const SITE_HINT = el.siteHint.textContent.replace(/\s+/g, " ").trim();
 
 let activeUrl = "";
 /** The tab the popup was opened over: the page the run walks. */
 let activeTabId = null;
 /** What the last run came to, for when the worker has gone to sleep since. */
 let lastRun = null;
+/** The last whole-store run, as far as it got: what Resume picks up. */
+let savedSite = null;
+
+async function readSavedSite() {
+  try {
+    const { siteRun } = await chrome.storage.local.get("siteRun");
+    savedSite = siteRun && typeof siteRun === "object" && Array.isArray(siteRun.categories) ? siteRun : null;
+  } catch {
+    savedSite = null;
+  }
+}
 
 /**
  * "Links only" is a fact about a store, not about a run: a store whose cards
@@ -109,6 +131,7 @@ async function init() {
   } catch {
     lastRun = null;
   }
+  await readSavedSite();
 
   if (/^https?:/i.test(activeUrl)) {
     el.store.textContent = activeUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70);
@@ -211,6 +234,82 @@ async function start() {
   render(await send("state"));
 }
 
+/**
+ * "Collect the whole store", or Resume. The same asking as `start`: the
+ * store's permission under the click, the collect tab, then the worker takes
+ * it from there. A resume goes back to the store the run was collecting, and
+ * the worker opens it in a tab of its own if this one is elsewhere.
+ */
+async function startSite(resume) {
+  note("");
+  el.site.disabled = true;
+  el.resume.disabled = true;
+  const done = () => {
+    el.site.disabled = !/^https?:/i.test(activeUrl);
+    el.resume.disabled = false;
+  };
+
+  const storeUrl = resume && savedSite ? savedSite.store : activeUrl;
+  let origin;
+  try {
+    origin = new URL(storeUrl).origin;
+  } catch {
+    note("This tab is not a store page.");
+    done();
+    return;
+  }
+  if (!resume && unfinished() && !window.confirm(
+    "Start the whole store over? The run so far is forgotten, and every piece is opened again (pieces already in the catalogue are updated, not doubled). Resume carries on instead.",
+  )) {
+    done();
+    return;
+  }
+
+  const studioOrigin = (el.studio.value || DEFAULT_STUDIO).replace(/\/+$/, "");
+  const linksOnly = el.linksOnly.checked;
+  await chrome.storage.sync.set({ studioOrigin });
+  if (!resume) await rememberLinksOnly(hostOf(storeUrl), linksOnly);
+
+  let granted = false;
+  try {
+    granted = await chrome.permissions.request({ origins: [`${origin}/*`] });
+  } catch (err) {
+    note(err?.message ?? "Could not ask for permission.");
+    done();
+    return;
+  }
+  if (!granted) {
+    note("Without permission for this store the extension cannot read its pages.");
+    done();
+    return;
+  }
+
+  const link = await ensureCollectTab(studioOrigin);
+  if (!link.ok) {
+    note(
+      link.error && /sign/i.test(link.error)
+        ? link.error
+        : `Could not reach ${studioOrigin}${COLLECT_PATH}. Open it, make sure you are signed in as an admin, reload it, then try again.`,
+    );
+    done();
+    return;
+  }
+
+  const res = await send("site", { storeUrl, linksOnly, tabId: activeTabId, resume });
+  if (res && res.ok === false) {
+    note(res.error ?? "Could not start.");
+    done();
+    return;
+  }
+  done();
+  render(await send("state"));
+}
+
+/** A whole-store run of this store that stopped before the end. */
+function unfinished() {
+  return !!savedSite && savedSite.stage !== "done" && hostOf(savedSite.store) === hostOf(activeUrl);
+}
+
 // ── Display ──────────────────────────────────────────────────────────────────
 
 /** "214", or "at least 214" when a run that asked for a few stopped looking early. */
@@ -226,6 +325,64 @@ function showCounts(counts) {
   el.failed.textContent = c.failed ? `${c.failed} failed` : "";
 }
 
+/** "3,412" */
+function num(n) {
+  return Number(n || 0).toLocaleString("en-US");
+}
+
+/** Where a whole-store run is, in a line. */
+function siteWhere(site) {
+  if (site.stage === "menu") return "Whole store: reading the store's menu…";
+  if (site.stage === "categories") return `Category ${site.index + 1} of ${site.categories}: ${site.label}`;
+  if (site.stage === "sitemaps") {
+    return `Sitemaps, for pieces no category showed: ${num(site.sitemapsRead)} read${
+      site.sitemapsQueued ? `, ${num(site.sitemapsQueued)} to go` : ""
+    }`;
+  }
+  return `Whole store: all ${num(site.categories)} categories and ${num(site.sitemapsRead)} sitemaps`;
+}
+
+/** How far along a whole-store run is, roughly: categories first, then sitemaps. */
+function sitePercent(site) {
+  if (site.stage === "categories" && site.categories) return Math.round((site.index / site.categories) * 90);
+  if (site.stage === "sitemaps") {
+    const all = (site.sitemapsRead || 0) + (site.sitemapsQueued || 0);
+    return 90 + (all ? Math.round((site.sitemapsRead / all) * 10) : 0);
+  }
+  return site.stage === "done" ? 100 : 2;
+}
+
+/** "about 900 pieces an hour", once there is enough of the run to say. */
+function siteRate(shown) {
+  const s = shown.site;
+  const hours = (Date.now() - (s.resumedAt || Date.now())) / 3_600_000;
+  const n = (shown.done || 0) - (s.doneAtResume || 0);
+  if (hours < 0.03 || n < 5) return "";
+  return `about ${num(Math.round(n / hours))} pieces an hour`;
+}
+
+/** The Resume button and the hint under the whole-store row. */
+function showResume(running) {
+  el.whole.hidden = running;
+  el.site.disabled = running || !/^https?:/i.test(activeUrl);
+  const can = !running && unfinished();
+  el.resume.hidden = !can;
+  el.site.textContent = can ? "Start over" : "Collect the whole store";
+  if (can) {
+    const s = savedSite;
+    const where =
+      s.stage === "sitemaps"
+        ? "at the sitemaps"
+        : `at category ${Math.min(s.index + 1, s.categories.length)} of ${s.categories.length}`;
+    el.resume.textContent = "Resume";
+    el.siteHint.textContent = `The last whole-store run ${s.status === "halted" ? "halted" : "stopped"} ${where}, ${num(
+      s.done,
+    )} pieces in. Resume carries on from there; nothing it opened is opened again.`;
+  } else {
+    el.siteHint.textContent = SITE_HINT;
+  }
+}
+
 function render(state) {
   if (!state) return;
 
@@ -233,6 +390,7 @@ function render(state) {
   el.start.hidden = running;
   el.stop.hidden = !running;
   el.start.disabled = running || !/^https?:/i.test(activeUrl);
+  showResume(running);
 
   // A worker that has slept since its last run remembers nothing; what that
   // run came to was kept for exactly this.
@@ -243,6 +401,11 @@ function render(state) {
   if (!shown) return;
 
   const listing = running && shown.phase === "listing";
+  if (shown.site) {
+    renderSite(shown, running, listing);
+    finishRender(shown, running);
+    return;
+  }
   const pct = shown.planned ? Math.min(100, Math.round((shown.done / shown.planned) * 100)) : 0;
   el.fill.style.width = `${listing || shown.phase === "planning" ? 4 : pct}%`;
 
@@ -271,7 +434,30 @@ function render(state) {
   } else {
     el.pace.textContent = shown.message && shown.phase !== "halted" ? shown.message : "";
   }
+  finishRender(shown, running);
+}
 
+/** A whole-store run: where it is in the store, and what it has come to. */
+function renderSite(shown, running, listing) {
+  el.fill.style.width = `${sitePercent(shown.site)}%`;
+  el.found.hidden = false;
+  el.found.textContent = siteWhere(shown.site);
+  el.done.textContent = num(shown.done);
+  el.planned.textContent = shown.done === 1 ? "piece" : "pieces";
+  showCounts(shown.counts);
+  if (running) {
+    const pace = listing
+      ? `Walking the category${shown.listing && shown.listing.pages > 1 ? `, page ${shown.listing.pages}` : ""}. Keep the store tab in front.`
+      : `One page every ${((shown.delayMs || 1500) / 1000).toFixed(1)}s or slower`;
+    const rate = siteRate(shown);
+    el.pace.textContent = shown.message || (rate ? `${pace} · ${rate}` : pace);
+  } else {
+    el.pace.textContent = shown.message && shown.phase !== "halted" ? shown.message : "";
+  }
+}
+
+/** Retry and the note, for every kind of run. */
+function finishRender(shown, running) {
   const failed = shown.counts?.failed || 0;
   el.retry.hidden = running || !failed;
   el.retry.textContent = `Retry ${failed} failed`;
@@ -302,6 +488,20 @@ el.stop.addEventListener("click", async () => {
 
 el.all.addEventListener("change", showLimit);
 
+el.site.addEventListener("click", () => {
+  startSite(false).catch((err) => {
+    note(err?.message ?? "Could not start.");
+    el.site.disabled = false;
+  });
+});
+
+el.resume.addEventListener("click", () => {
+  startSite(true).catch((err) => {
+    note(err?.message ?? "Could not resume.");
+    el.resume.disabled = false;
+  });
+});
+
 el.retry.addEventListener("click", async () => {
   note("");
   el.retry.disabled = true;
@@ -312,7 +512,10 @@ el.retry.addEventListener("click", async () => {
 });
 
 // The popup is a window onto the worker, so it polls while it is open.
-const poll = setInterval(async () => render(await send("state")), 700);
+const poll = setInterval(async () => {
+  await readSavedSite();
+  render(await send("state"));
+}, 700);
 window.addEventListener("unload", () => clearInterval(poll));
 
 init().catch((err) => note(err?.message ?? "Could not read this tab."));

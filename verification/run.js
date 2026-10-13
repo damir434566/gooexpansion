@@ -1224,6 +1224,183 @@ async function main() {
   }
   collect.close(); popup.close();
 
+  // ── Run W: the whole store ────────────────────────────────────────────────
+  //
+  // "Collect the whole store" from the home page: the store's menu gives the
+  // categories (not its bag, account, help, blog, About, nor the same store in
+  // French), each is walked in the admin's tab, each piece is opened once
+  // however many categories show it, and the sitemaps bring the two pieces no
+  // category shows. Stopped partway and resumed, it opens nothing twice.
+  console.log("\n— run W: the whole store, category by category, then its sitemaps —");
+  await storeControl({ mode: "site", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  const HOME = `${STORE}/`;
+  const homeTarget = await newTab(HOME);
+  await sleep(1500);
+  /** The popup over the store tab, its buttons pressed as clicks press them. */
+  const popupOver = async (url) => {
+    const p = await openPopup(extId);
+    const tab = await p.evaluate(
+      `chrome.tabs.query({}).then((ts) => ts.filter((t) => t.url === ${JSON.stringify(url)}).map((t) => ({ id: t.id, url: t.url }))[0])`,
+    );
+    await p.evaluate(
+      `(async () => { const t = ${JSON.stringify(tab)}; chrome.tabs.query = async () => [t];` +
+        ` chrome.permissions.request = (q) => chrome.permissions.contains(q); window.confirm = () => true; await init(); })()`,
+    );
+    return p;
+  };
+  const buttons = (p) =>
+    p.evaluate(`({
+      site: document.getElementById("whole").hidden ? "" : document.getElementById("site").textContent,
+      resume: document.getElementById("resume").hidden ? "" : document.getElementById("resume").textContent,
+      hint: document.getElementById("siteHint").textContent,
+      found: document.getElementById("found").textContent,
+      counts: document.querySelector(".counts").textContent,
+    })`);
+  popup = await popupOver(HOME);
+  {
+    const b = await buttons(popup);
+    check("the popup offers the whole store, and nothing to resume yet", b.site === "Collect the whole store" && b.resume === "", JSON.stringify(b));
+  }
+  await popup.evaluate(`document.getElementById("site").click()`, { userGesture: true });
+  await sleep(300);
+  await activate(homeTarget.id);
+  {
+    let mid = null;
+    for (let i = 0; i < 240; i++) {
+      await sleep(500);
+      const { api } = await studioEvents();
+      if (api.filter((a) => a.action === "ingest").length >= 6) break;
+    }
+    mid = await stateOf(popup);
+    check(
+      "it walks the store's categories, in the admin's own tab",
+      !!mid && mid.running && !!mid.site && mid.site.stage === "categories" && mid.site.categories === 5,
+      JSON.stringify(mid && { phase: mid.phase, site: mid.site }),
+    );
+    // The end of a day: Stop.
+    await popup.evaluate(`document.getElementById("stop").click()`);
+    const st = await untilEnded(popup, 60);
+    check("Stop stops it", !!st && st.phase === "stopped", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    const saved = await popup.evaluate("chrome.storage.local.get('siteRun').then((s) => s.siteRun)");
+    check(
+      "the categories it read off the menu: the start page, Coats, Knitwear, Sale and the menu's own piece — no bag, account, help, blog, About, French store, nor a sorted or tagged copy",
+      !!saved && JSON.stringify(saved.categories.map((c) => c.url.replace(STORE, ""))) === JSON.stringify(["/", "/c/coats", "/c/knitwear", "/c/sale", "/product/feature-coat"]),
+      JSON.stringify(saved && saved.categories),
+    );
+    check("named the way the menu names them", !!saved && JSON.stringify(saved.categories.map((c) => c.label)) === JSON.stringify(["This page", "Coats", "Knitwear", "Sale", "The coat of the season"]), JSON.stringify(saved && saved.categories.map((c) => c.label)));
+    check("and where it stopped is written down", !!saved && saved.status === "stopped" && saved.stage === "categories" && saved.done >= 6, JSON.stringify(saved && { status: saved.status, stage: saved.stage, index: saved.index, pageUrl: saved.pageUrl, done: saved.done }));
+    popup.close();
+  }
+  {
+    // The next day: the admin opens the popup over the store, wherever its tab is.
+    const now = await targetUrl(homeTarget.id);
+    popup = await popupOver(now);
+    const b = await buttons(popup);
+    check("the popup offers Resume, saying where the run stopped", b.resume === "Resume" && /stopped at category \d of 5/.test(b.hint) && b.site === "Start over", JSON.stringify(b));
+    await popup.evaluate(`document.getElementById("resume").click()`, { userGesture: true });
+    await sleep(300);
+    await activate(homeTarget.id);
+    const st = await untilEnded(popup, 420);
+    const { api, events: ev } = await studioEvents();
+    const logW = (await storeLog()).log;
+    check("run W finished", !!st && st.phase === "done" && st.site && st.site.stage === "done", JSON.stringify(st && { phase: st.phase, message: st.message, site: st.site }));
+    const ingested = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, ""));
+    const twice = ingested.filter((u, i) => ingested.indexOf(u) !== i);
+    const pieces = [
+      ...Array.from({ length: 10 }, (_, i) => `/product/coat-${i + 1}`),
+      ...Array.from({ length: 8 }, (_, i) => `/product/knit-${i + 1}`),
+      "/product/hat-1",
+      "/product/hat-2",
+      "/product/feature-coat",
+    ];
+    check("every piece in the store was collected: 21", pieces.every((p) => ingested.includes(p)) && ingested.length === 21, JSON.stringify(ingested));
+    check("and none of them twice, Stop and Resume in between", twice.length === 0, JSON.stringify(twice));
+    check("the two hats only the sitemap knows came from the sitemap", ingested.slice(-2).sort().join() === "/product/hat-1,/product/hat-2", JSON.stringify(ingested.slice(-3)));
+    check("the knitwear behind \"Show more\" was loaded", logW.some((l) => l.path === "/api/knits"));
+    check("the coats on page two were reached", logW.some((l) => l.path === "/c/coats" && l.search === "?page=2"));
+    check("the store in French was never opened, nor its French pieces from the sitemap", !logW.some((l) => l.path.startsWith("/fr/")), JSON.stringify(logW.filter((l) => l.path.startsWith("/fr/")).slice(0, 3)));
+    check(
+      "nor the bag, the account, help, the blog or About",
+      !logW.some((l) => ["/cart", "/account/login", "/help", "/blog/news", "/about"].includes(l.path)),
+      JSON.stringify(logW.filter((l) => ["/cart", "/account/login", "/help", "/blog/news", "/about"].includes(l.path))),
+    );
+    check("robots.txt still rules: the forbidden coat was never opened", !logW.some((l) => l.path.startsWith("/product/secret-")));
+    check("the product sitemap was read", logW.some((l) => l.path === "/sitemap-products.xml"));
+    check("the blog's and the collections' sitemaps were not", !logW.some((l) => l.path === "/sitemap-blog.xml" || l.path === "/sitemap_collections_1.xml"));
+    check("Sale, whose pieces the other categories had shown, was walked and gave nothing new", logW.some((l) => l.path === "/c/sale") && !ingested.slice(18).some((u) => ["/product/coat-2", "/product/coat-9", "/product/knit-3", "/product/knit-8"].includes(u)));
+    check("the collect screen was given a fresh page for every category", ev.filter((e) => e.kind === "hello").length >= 6, String(ev.filter((e) => e.kind === "hello").length));
+    check("and told where the run is", ev.some((e) => e.kind === "progress" && /^Whole store: category \d of 5/.test(e.detail.message || "")), JSON.stringify(ev.filter((e) => e.kind === "progress").slice(-1)));
+    check("no plan call was bigger than Vercel takes", !api.some((a) => a.action === "refused"));
+    check("the store tab is back on the page the run started from", (await targetUrl(homeTarget.id)) === HOME, await targetUrl(homeTarget.id));
+    const saved = await popup.evaluate("chrome.storage.local.get('siteRun').then((s) => s.siteRun)");
+    check("the run is written down as done", !!saved && saved.status === "done" && saved.stage === "done" && saved.done === 21, JSON.stringify(saved && { status: saved.status, stage: saved.stage, done: saved.done }));
+    popup.close();
+    popup = await popupOver(HOME);
+    await sleep(800);
+    const end = await buttons(popup);
+    check("the popup says it: the whole store, 21 new, and nothing left to resume", /Whole store: all 5 categories/.test(end.found) && /21 new/.test(end.counts) && end.resume === "" && end.site === "Collect the whole store", JSON.stringify(end));
+    popup.close();
+  }
+  collect.close();
+  await fetch(`http://127.0.0.1:${PORT}/json/close/${homeTarget.id}`);
+
+  // ── Run W2: the whole store, with nobody looking ─────────────────────────
+  //
+  // The admin starts it and goes back to work in another tab. Numbered pages
+  // are turned all the same; what only shows as the page is scrolled ("Show
+  // more" on Knitwear) waits a minute at the first category that needs it,
+  // then only a few seconds at the next ones, and comes from the sitemaps.
+  console.log("\n— run W2: the whole store, the store tab in the background —");
+  await storeControl({ mode: "site", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  const home2 = await newTab(HOME);
+  await sleep(1500);
+  popup = await popupOver(HOME);
+  {
+    const b = await buttons(popup);
+    check("after a finished run, a new one starts from the beginning", b.site === "Collect the whole store" && b.resume === "", JSON.stringify(b));
+  }
+  await popup.evaluate(`document.getElementById("site").click()`, { userGesture: true });
+  await sleep(500);
+  await activate(collect.targetId || (await targets()).find((t) => t.url.startsWith(COLLECT)).id);
+  {
+    const started = Date.now();
+    const st = await untilEnded(popup, 420);
+    const took = Date.now() - started;
+    const { api } = await studioEvents();
+    const logW2 = (await storeLog()).log;
+    const ingested = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, ""));
+    // knit-8 is on Sale as well, which needs no scrolling.
+    const knitsBehindMore = ["/product/knit-5", "/product/knit-6", "/product/knit-7"];
+    check("run W2 finished", !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message, site: st.site }));
+    check("every piece was collected all the same: 21, none twice", ingested.length === 21 && new Set(ingested).size === 21, JSON.stringify(ingested));
+    check("numbered pages were turned in the hidden tab: Coats page two", logW2.some((l) => l.path === "/c/coats" && l.search === "?page=2"));
+    check("\"Show more\" was not pressed in a tab nobody could see", !logW2.some((l) => l.path === "/api/knits"));
+    check(
+      "the knitwear behind it came from the sitemaps, after the categories",
+      knitsBehindMore.every((u) => ingested.indexOf(u) >= ingested.length - 5),
+      JSON.stringify(ingested.slice(-7)),
+    );
+    // The wait shows as the gap between opening a category and the next request.
+    const after = (pathname) => {
+      const i = logW2.findIndex((l) => l.path === pathname && !l.search);
+      const next = logW2.slice(i + 1).find((l) => !/^\/(?:img|cdn)\/|^\/(?:style\.css|frame)$/.test(l.path));
+      return i >= 0 && next ? next.at - logW2[i].at : -1;
+    };
+    const waits = { home: after("/robots.txt"), knitwear: after("/c/knitwear"), sale: after("/c/sale") };
+    check(
+      "it waited a minute for the tab at the first category, then only seconds at the next ones",
+      waits.home >= 55_000 && waits.knitwear >= 0 && waits.knitwear < 15_000 && waits.sale >= 0 && waits.sale < 15_000,
+      `${JSON.stringify(waits)}, the whole run ${Math.round(took / 1000)} s`,
+    );
+  }
+  popup.close();
+  collect.close();
+  await fetch(`http://127.0.0.1:${PORT}/json/close/${home2.id}`);
+
   console.log("\n— run G: the extension reloaded under an open collect tab —");
   await storeControl({ mode: "normal", reset: true });
   await studioReset();
