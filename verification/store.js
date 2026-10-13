@@ -29,6 +29,15 @@
  *            sitemaps that list every address in ten languages, about 90 MB
  *            between them. The category page links two products; the other
  *            two are only in the first sitemap.
+ *   site   — a whole store for "Collect the whole store". The home page has a
+ *            menu: Coats (ten, over two numbered pages, one more piece the
+ *            robots.txt forbids), Knitwear (eight, half of them behind "Show
+ *            more"), Sale (four pieces the other two already show), a piece of
+ *            its own, the same store in French, the bag, an account page; its
+ *            footer has Help, the blog and About. The home page shows three
+ *            pieces. The sitemap index names a product sitemap (every piece,
+ *            two hats no category shows, the French copies and the forbidden
+ *            piece), a blog sitemap and a collections sitemap.
  *
  * Records every request with a timestamp so the test can assert on pacing.
  */
@@ -55,7 +64,122 @@ function products() {
   if (mode === "many") return Array.from({ length: 21 }, (_, i) => `p${i + 1}`);
   if (mode === "page") return Array.from({ length: PAGE_TOTAL }, (_, i) => `jacket-${i + 1}`);
   if (mode === "slow") return ["s1", "s2", "s3", "s4", "s5", "s6", "s7"];
+  if (mode === "site") return SITE_PIECES;
   return ["alpha", "beta", "gamma", "delta", "secret-hidden"];
+}
+
+// ── The `site` store ─────────────────────────────────────────────────────────
+
+const SITE_COATS = Array.from({ length: 10 }, (_, i) => `coat-${i + 1}`);
+const SITE_KNITS = Array.from({ length: 8 }, (_, i) => `knit-${i + 1}`);
+/** Only the sitemap knows these two. */
+const SITE_HATS = ["hat-1", "hat-2"];
+/** A piece the menu links on its own. */
+const SITE_FEATURE = "feature-coat";
+const SITE_PIECES = [...SITE_COATS, ...SITE_KNITS, ...SITE_HATS, SITE_FEATURE];
+const SITE_SALE = ["coat-2", "coat-9", "knit-3", "knit-8"];
+const SITE_HOME = ["coat-1", "knit-1", SITE_FEATURE];
+
+const siteCard = (slug) =>
+  `<div class="card"><a href="/product/${slug}"><img alt="" src="/img/${slug}-1.jpg"></a> <a href="/product/${slug}">${slug}</a></div>`;
+
+/** Every page of the `site` store wears the same header and footer. */
+function siteFrame(title, body) {
+  return `<!doctype html><html><head><title>${title} | Fixture Store</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  header { height: 60px; }
+  .card { height: 300px; border-bottom: 1px solid #ddd; }
+  .card img { width: 120px; height: 160px; }
+  .mega { display: none; }
+</style></head><body>
+<header class="site-header">
+  <a href="/" class="logo">Fixture Store</a>
+  <nav aria-label="Main">
+    <a href="/c/coats">Coats</a>
+    <a href="/c/knitwear?utm_source=menu">Knitwear</a>
+    <a href="/c/sale">Sale</a>
+    <div class="mega"><a href="/c/coats?sort=new">New coats</a> <a href="/product/${SITE_FEATURE}">The coat of the season</a></div>
+  </nav>
+  <a href="/fr/">Français</a>
+  <a href="/cart">Bag (0)</a>
+  <a href="/account/login">Sign in</a>
+</header>
+<main>${body}</main>
+<footer><a href="/help">Help</a> <a href="/blog/news">Journal</a> <a href="/about">About</a></footer>
+</body></html>`;
+}
+
+function siteHome() {
+  return siteFrame("Home", `<h1>New in</h1><div id="grid">${SITE_HOME.map(siteCard).join("")}</div>`);
+}
+
+/** Coats: six and a forbidden one on page one, four on page two. */
+function siteCoats(page) {
+  const shown = page === 2 ? SITE_COATS.slice(6) : SITE_COATS.slice(0, 6);
+  const pager =
+    page === 2 ? `<a href="/c/coats">1</a> <span>2</span>` : `<span>1</span> <a href="/c/coats?page=2" rel="next">2</a>`;
+  return siteFrame(
+    "Coats",
+    `<h1>Coats</h1><div id="grid">${shown.map(siteCard).join("")}${
+      page === 2 ? "" : siteCard("secret-coat")
+    }</div><div class="pages">${pager}</div>`,
+  );
+}
+
+/** Knitwear: four in the markup, four behind "Show more". */
+function siteKnits() {
+  return siteFrame(
+    "Knitwear",
+    `<h1>Knitwear</h1><div id="grid">${SITE_KNITS.slice(0, 4).map(siteCard).join("")}</div>
+<div id="more-wrap"><button id="more">Show more</button></div>
+<script>
+  document.getElementById("more").onclick = async () => {
+    const slugs = await (await fetch("/api/knits")).json();
+    const grid = document.getElementById("grid");
+    for (const s of slugs) grid.insertAdjacentHTML("beforeend",
+      '<div class="card"><a href="/product/' + s + '"><img alt="" src="/img/' + s + '-1.jpg"></a> <a href="/product/' + s + '">' + s + '</a></div>');
+    document.getElementById("more-wrap").innerHTML = "";
+  };
+</script>`,
+  );
+}
+
+function siteSale() {
+  return siteFrame("Sale", `<h1>Sale</h1><div id="grid">${SITE_SALE.map(siteCard).join("")}</div>`);
+}
+
+function siteSitemapIndex() {
+  const children = ["sitemap-products.xml", "sitemap-blog.xml", "sitemap_collections_1.xml"]
+    .map((name) => `  <sitemap><loc>${ORIGIN}/${name}</loc></sitemap>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${children}\n</sitemapindex>\n`;
+}
+
+function siteProductSitemap() {
+  const paths = [
+    ...SITE_PIECES.map((s) => `/product/${s}`),
+    "/product/secret-coat",
+    ...SITE_PIECES.slice(0, 5).map((s) => `/fr/product/${s}`),
+  ];
+  const locs = paths.map((p) => `  <url><loc>${ORIGIN}${p}</loc></url>`).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${locs}\n</urlset>\n`;
+}
+
+/** The `site` store's own pages, or null when the path is not one. */
+function sitePage(p, url) {
+  if (p === "/") return ["text/html", siteHome()];
+  if (p === "/c/coats") return ["text/html", siteCoats(url.searchParams.get("page") === "2" ? 2 : 1)];
+  if (p === "/c/knitwear") return ["text/html", siteKnits()];
+  if (p === "/c/sale") return ["text/html", siteSale()];
+  if (p === "/api/knits") return ["application/json", JSON.stringify(SITE_KNITS.slice(4))];
+  if (p === "/sitemap.xml") return ["application/xml", siteSitemapIndex()];
+  if (p === "/sitemap-products.xml") return ["application/xml", siteProductSitemap()];
+  if (p === "/sitemap-blog.xml" || p === "/sitemap_collections_1.xml") {
+    return ["application/xml", `<?xml version="1.0"?><urlset><url><loc>${ORIGIN}/blog/news</loc></url></urlset>`];
+  }
+  if (p.startsWith("/fr/")) return ["text/html", siteFrame("Accueil", `<h1>Nouveautés</h1>${SITE_HOME.map((s) => `<a href="/fr/product/${s}">${s}</a>`).join("")}`)];
+  return null;
 }
 
 /** The gallery this product has, all of it. Six shots the markup never names. */
@@ -216,7 +340,7 @@ function robots() {
   const lines = ["User-agent: Googlebot", "Disallow:", "", "User-agent: *"];
   // A path the run must never open. If it does, the test fails loudly.
   lines.push("Disallow: /product/secret-");
-  if (!["many", "spa", "bigmap", "page", "slow"].includes(mode)) lines.push("Crawl-delay: 2");
+  if (!["many", "spa", "bigmap", "page", "slow", "site"].includes(mode)) lines.push("Crawl-delay: 2");
   lines.push("", `Sitemap: ${ORIGIN}/sitemap.xml`);
   return lines.join("\n") + "\n";
 }
@@ -503,6 +627,10 @@ const server = http.createServer((req, res) => {
       flakyServed.add(p);
       return send(500, "text/html", "<html><body>Something went wrong</body></html>");
     }
+  }
+  if (mode === "site") {
+    const page = sitePage(p, url);
+    if (page) return send(200, page[0], page[1]);
   }
   if (p === "/sitemap.xml") return send(200, "application/xml", sitemap());
   const child = mode === "bigmap" && /^\/sitemap-products-(\d+)\.xml$/.exec(p);

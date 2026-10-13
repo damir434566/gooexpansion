@@ -36,7 +36,9 @@
 export function listingStep(opts) {
   // `scroll: false` only looks: the links the page shows as it stands, nothing
   // loaded, nothing moved. A run that asked for a few pieces starts with that.
-  const o = Object.assign({ first: false, reset: false, scroll: true, stepMs: 350, settleMs: 2500, clickWaitMs: 4000 }, opts || {});
+  // `hiddenNext`: in a tab nobody can see, still say which page comes next.
+  // A whole-store run turns numbered pages without the tab in front.
+  const o = Object.assign({ first: false, reset: false, scroll: true, hiddenNext: false, stepMs: 350, settleMs: 2500, clickWaitMs: 4000 }, opts || {});
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const host = location.hostname.replace(/^www\./, "");
   // `reset` starts a run afresh. What a page remembers lives as long as the
@@ -165,9 +167,8 @@ export function listingStep(opts) {
       });
   }
 
-  // A page nobody can see loads nothing more: report what is there and let
-  // the worker wait. A look without scrolling ends here too.
-  if (!result.visible || !o.scroll) return result;
+  // A look without scrolling ends here.
+  if (!o.scroll) return result;
 
   const MORE =
     /^(?:load|show|view|see)\s+more\b|^more\s+(?:products|items|results|styles)\b|^(?:показать|загрузить)\s+(?:ещ[её]|больше)|^(?:показати|завантажити)\s+(?:ще|більше)|^mehr\s+(?:anzeigen|laden)|^voir\s+plus|^(?:cargar|mostrar|ver)\s+más|^(?:carica|mostra)\s+altri/i;
@@ -245,6 +246,14 @@ export function listingStep(opts) {
     }
     return "";
   };
+
+  // A page nobody can see loads nothing more: report what is there and let
+  // the worker wait. Its numbered pages are links all the same, and a link
+  // can be followed in a hidden tab: a whole-store run asks for the next one.
+  if (!result.visible) {
+    if (o.hiddenNext) result.next = nextPage();
+    return result;
+  }
 
   /** Waits for the page to grow: a taller page or links it had not shown. */
   const waitForMore = async (ms) => {

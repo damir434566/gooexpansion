@@ -264,8 +264,10 @@ const server = http.createServer(async (req, res) => {
             brandText: typeof body.brandText === "string" ? body.brandText : "",
           },
         });
-        const product = parsed.products[0];
-        if (!parsed.ok) return json(200, { ok: true, result: { url: body.url, status: "failed", reason: parsed.error } });
+        // `products[0]` up to goo-fashion #900-ish, `product` on today's master,
+        // which also no longer reports `ok`: a page it cannot read has no product.
+        const product = Array.isArray(parsed.products) ? parsed.products[0] : parsed.product;
+        if (parsed.ok === false) return json(200, { ok: true, result: { url: body.url, status: "failed", reason: parsed.error } });
         if (!product || !product.name) {
           return json(200, { ok: true, result: { url: body.url, status: "skipped", reason: "No product data" } });
         }
@@ -284,7 +286,7 @@ const server = http.createServer(async (req, res) => {
           usd: converted ? converted.usd : product.price,
           fxRate: converted ? converted.rate : null,
           issues: product.issues,
-          images: product.images.length,
+          images: (product.images || []).length,
           imageList: product.images,
           sizes: product.sizes,
           colors: product.colors,
