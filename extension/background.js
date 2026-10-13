@@ -1404,7 +1404,7 @@ async function runRetry(last) {
   // pace comes from it. A whole-store run can leave more failed pages than
   // one plan call answers for, so they are planned a chunk at a time.
   const set = new Set(wanted);
-  const urls = [];
+  const taken = new Set();
   let plan = {};
   for (let i = 0; i < wanted.length; i += PLAN_LINKS) {
     const planned = await askPage("plan", {
@@ -1421,8 +1421,9 @@ async function runRetry(last) {
       return;
     }
     plan = planned.data ?? {};
-    for (const u of Array.isArray(plan.urls) ? plan.urls : []) if (set.has(u) && !urls.includes(u)) urls.push(u);
+    for (const u of Array.isArray(plan.urls) ? plan.urls : []) if (set.has(u)) taken.add(u);
   }
+  const urls = [...taken];
   state.found = urls.length;
   state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
   state.planned = urls.length;

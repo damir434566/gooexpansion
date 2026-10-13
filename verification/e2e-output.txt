@@ -1,11 +1,9 @@
-
 — launching chromium with the unpacked extension —
   extension id pjbcdcadhhapgbljlmbiakkkniiialfa
   ok   installs with access to no store whatsoever (no <all_urls>) — only goo-fashion itself
   ok   the only pages it may touch at install are our own collect screen
   ok   asks only for the four narrow APIs
   store origin granted (stands in for the popup prompt)
-
 — the popup —
   ok   the popup starts up without an error
   ok   and its Stop button runs without an error
@@ -27,21 +25,17 @@
   ok   the real extractor found a product in every capture
   ok   it read the name, brand and price from the captured DOM
   ok   the lazy gallery was woken by the scroll (2 real images, no data-URI)
-
 — run B: the store answers 403 —
   ok   the run halted and said why
   ok   it named the refusal
   ok   it stopped after exactly two refusals, not more
-
 — run C: Stop mid-run —
   ok   nothing was imported after Stop
   ok   the store stopped being asked for pages
-
 — run D: 21 products, to catch the rest —
   ok   run D finished
   ok   with no Crawl-delay the 1.5s floor was applied
   ok   a ~10s rest landed after the 20th page
-
 — run E: a single-page storefront, and a store priced in hryvnia —
   ok   run E finished
   ok   both pages were collected
@@ -72,7 +66,6 @@
   ok   the item's own number came off the offer, check digit and all
   ok   and an article number off a plain Ukrainian line, where nothing is declared
   ok   the piece is tagged with a style, from words only the rendered page had
-
 — run H: the popup's Links only box —
   ok   ticked: Start in the popup runs without an error
   ok   ticked: the run finished
@@ -88,18 +81,15 @@
   ok   cleared: every page reached the site with linksOnly: false
   ok   and the store is forgotten as a links store
   ok   and the popup opens with it cleared again
-
 — run I: the store shows a bot check instead of its products —
   ok   the run stopped at the check
   ok   after two pages, not all of them
   ok   no check page was sent to the site as a product
-
 — run J: a sold-out piece sends the tab to a category —
   ok   run J finished
   ok   the page says where the tab ended up
   ok   and the category is not imported as the piece
   ok   the other pieces are
-
 — run K: the sitemaps are far bigger than one message can carry —
   ok   run K finished rather than halting
   ok   it collected the two products on the page and the two only the sitemap names
@@ -107,7 +97,6 @@
   ok   and no request to the site was over Vercel's 4.5 MB limit
   ok   the first sitemap had enough, so the other two were never downloaded
   ok   no address only a sitemap's padding names was opened
-
 — run L: the whole category, walked in the admin's own tab —
   ok   the walk starts in the admin's tab
   ok   with the store tab in the background it waits, and says why
@@ -129,21 +118,18 @@
   ok   the popup says it: found 36, 35 new, 1 failed, and offers a retry
   ok   Retry opens only the page that failed
   ok   and this time it comes in
-
 — run M: "or only the first" five —
   ok   run M finished
   ok   it collected the first five the page showed, no more
   ok   and stopped reading the page early: page two was never opened
   ok   the page already showed eight: it did not scroll at all, no more cards were loaded
   ok   the popup remembers the choice
-
 — run M2: "or only the first" twelve, the page showing eight —
   ok   run M2 finished
   ok   it collected the first twelve the page showed
   ok   it scrolled for the cards it needed
   ok   and no further: "Show more" was never pressed
   ok   nor page two opened
-
 — run N: a category that looks like a product, and a product —
   ok   a category numbered like a piece: the run finished
   ok   a category numbered like a piece: its pieces were collected, not the category
@@ -154,7 +140,6 @@
   ok   a product page: the run finished
   ok   a product page gives that product alone, not its "You may also like"
   ok   and says it found one piece
-
 — run S: failing and slow pages are skipped, not waited out —
   ok   run S went on to the end rather than stopping
   ok   the good page with a tracker that never finishes was read, not failed
@@ -165,17 +150,47 @@
   ok   the page that never answered was given up after 15 s, not 45
   ok   the dropped connection was skipped at once
   ok   a slow import on the site did not keep the next page from opening
-
 — run T: a second bridge injected into a collect tab that has one —
   ok   a second bridge went into the collect tab
   ok   run T finished
   ok   every piece reached the collect screen once
   ok   the run was greeted once, not once per bridge
   ok   and no plan round was asked for twice
-
+— run W: the whole store, category by category, then its sitemaps —
+  ok   the popup offers the whole store, and nothing to resume yet
+  ok   it walks the store's categories, in the admin's own tab
+  ok   Stop stops it
+  ok   the categories it read off the menu: the start page, Coats, Knitwear, Sale and the menu's own piece — no bag, account, help, blog, About, French store, nor a sorted or tagged copy
+  ok   named the way the menu names them
+  ok   and where it stopped is written down
+  ok   the popup offers Resume, saying where the run stopped
+  ok   run W finished
+  ok   every piece in the store was collected: 21
+  ok   and none of them twice, Stop and Resume in between
+  ok   the two hats only the sitemap knows came from the sitemap
+  ok   the knitwear behind "Show more" was loaded
+  ok   the coats on page two were reached
+  ok   the store in French was never opened, nor its French pieces from the sitemap
+  ok   nor the bag, the account, help, the blog or About
+  ok   robots.txt still rules: the forbidden coat was never opened
+  ok   the product sitemap was read
+  ok   the blog's and the collections' sitemaps were not
+  ok   Sale, whose pieces the other categories had shown, was walked and gave nothing new
+  ok   the collect screen was given a fresh page for every category
+  ok   and told where the run is
+  ok   no plan call was bigger than Vercel takes
+  ok   the store tab is back on the page the run started from
+  ok   the run is written down as done
+  ok   the popup says it: the whole store, 21 new, and nothing left to resume
+— run W2: the whole store, the store tab in the background —
+  ok   after a finished run, a new one starts from the beginning
+  ok   run W2 finished
+  ok   every piece was collected all the same: 21, none twice
+  ok   numbered pages were turned in the hidden tab: Coats page two
+  ok   "Show more" was not pressed in a tab nobody could see
+  ok   the knitwear behind it came from the sitemaps, after the categories
+  ok   it waited a minute for the tab at the first category, then only seconds at the next ones
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
-
-  141 passed, 0 failed
-
+  173 passed, 0 failed
