@@ -248,3 +248,41 @@ button:disabled {
   font-size: 10px;
   color: var(--foreground-subtle);
 }
+
+.rule {
+  display: block;
+  margin-top: 8px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--foreground-subtle);
+}
+
+.rule small {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.rule textarea {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--foreground);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  resize: vertical;
+}
+
+.rule textarea:focus {
+  border-color: var(--foreground);
+}

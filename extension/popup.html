@@ -49,6 +49,19 @@
         <button id="site" class="ghost">Collect the whole store</button>
         <button id="resume" class="primary" hidden>Resume</button>
       </div>
+      <label class="rule" for="rule">
+        <span>
+          What to collect
+          <small>For the whole store: AI keeps the menu's categories that fit. Empty: every category.</small>
+        </span>
+        <textarea
+          id="rule"
+          rows="2"
+          maxlength="500"
+          spellcheck="false"
+          placeholder="e.g. men's and women's clothing, shoes and bags; no kids, home or beauty"
+        ></textarea>
+      </label>
       <p class="hint" id="siteHint">
         Every category in the store's menu, one after another in this tab, then the store's sitemaps.
         Each piece is opened once. A big store takes days: Stop any time, Resume carries on.

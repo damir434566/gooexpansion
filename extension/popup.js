@@ -48,6 +48,7 @@ const el = {
   site: document.getElementById("site"),
   resume: document.getElementById("resume"),
   siteHint: document.getElementById("siteHint"),
+  rule: document.getElementById("rule"),
 };
 
 const SITE_HINT = el.siteHint.textContent.replace(/\s+/g, " ").trim();
@@ -89,6 +90,29 @@ function hostOf(url) {
 async function linksOnlyStores() {
   const stored = await chrome.storage.local.get(LINK_ONLY_KEY);
   return Array.isArray(stored[LINK_ONLY_KEY]) ? stored[LINK_ONLY_KEY] : [];
+}
+
+/**
+ * "What to collect", the rule AI picks a whole-store run's categories by. Like
+ * "Links only" it belongs to a store ("no kids" on one, "only shoes" on
+ * another), so it is kept per store, for the 500 stores used last.
+ */
+const RULES_KEY = "categoryRules";
+
+async function storeRules() {
+  const stored = await chrome.storage.local.get(RULES_KEY);
+  const rules = stored[RULES_KEY];
+  return rules && typeof rules === "object" && !Array.isArray(rules) ? rules : {};
+}
+
+async function rememberRule(host, rule) {
+  if (!host) return;
+  const rules = await storeRules();
+  delete rules[host];
+  const text = String(rule || "").trim().slice(0, 500);
+  if (text) rules[host] = text;
+  const kept = Object.entries(rules).slice(-500);
+  await chrome.storage.local.set({ [RULES_KEY]: Object.fromEntries(kept) });
 }
 
 async function rememberLinksOnly(host, on) {
@@ -136,6 +160,7 @@ async function init() {
   if (/^https?:/i.test(activeUrl)) {
     el.store.textContent = activeUrl.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70);
     el.linksOnly.checked = (await linksOnlyStores()).includes(hostOf(activeUrl));
+    el.rule.value = (await storeRules())[hostOf(activeUrl)] || "";
   } else {
     el.store.textContent = "Open a store page in this tab first.";
     el.start.disabled = true;
@@ -267,8 +292,12 @@ async function startSite(resume) {
 
   const studioOrigin = (el.studio.value || DEFAULT_STUDIO).replace(/\/+$/, "");
   const linksOnly = el.linksOnly.checked;
+  const rule = el.rule.value.trim().slice(0, 500);
   await chrome.storage.sync.set({ studioOrigin });
-  if (!resume) await rememberLinksOnly(hostOf(storeUrl), linksOnly);
+  if (!resume) {
+    await rememberLinksOnly(hostOf(storeUrl), linksOnly);
+    await rememberRule(hostOf(storeUrl), rule);
+  }
 
   let granted = false;
   try {
@@ -295,7 +324,8 @@ async function startSite(resume) {
     return;
   }
 
-  const res = await send("site", { storeUrl, linksOnly, tabId: activeTabId, resume });
+  // A resumed run keeps the categories its own rule chose.
+  const res = await send("site", { storeUrl, linksOnly, tabId: activeTabId, resume, rule: resume ? "" : rule });
   if (res && res.ok === false) {
     note(res.error ?? "Could not start.");
     done();
@@ -333,11 +363,16 @@ function num(n) {
 /** Where a whole-store run is, in a line. */
 function siteWhere(site) {
   if (site.stage === "menu") return "Whole store: reading the store's menu…";
-  if (site.stage === "categories") return `Category ${site.index + 1} of ${site.categories}: ${site.label}`;
+  if (site.stage === "categories") {
+    return `Category ${site.index + 1} of ${site.categories}${site.skipped ? ` (AI left out ${site.skipped})` : ""}: ${site.label}`;
+  }
   if (site.stage === "sitemaps") {
     return `Sitemaps, for pieces no category showed: ${num(site.sitemapsRead)} read${
       site.sitemapsQueued ? `, ${num(site.sitemapsQueued)} to go` : ""
     }`;
+  }
+  if (site.ai && !site.aiFailed) {
+    return `Whole store: the ${num(site.categories)} categories AI chose${site.skipped ? ` (${num(site.skipped)} left out)` : ""}`;
   }
   return `Whole store: all ${num(site.categories)} categories and ${num(site.sitemapsRead)} sitemaps`;
 }
@@ -451,6 +486,8 @@ function renderSite(shown, running, listing) {
       : `One page every ${((shown.delayMs || 1500) / 1000).toFixed(1)}s or slower`;
     const rate = siteRate(shown);
     el.pace.textContent = shown.message || (rate ? `${pace} · ${rate}` : pace);
+    // The rule was not applied: said where it cannot be missed.
+    if (shown.site.aiFailed && shown.site.ai) note(shown.site.ai);
   } else {
     el.pace.textContent = shown.message && shown.phase !== "halted" ? shown.message : "";
   }
@@ -479,6 +516,10 @@ el.start.addEventListener("click", () => {
 // Remembered as soon as it is ticked, not only when a run starts.
 el.linksOnly.addEventListener("change", () => {
   rememberLinksOnly(hostOf(activeUrl), el.linksOnly.checked).catch(() => {});
+});
+
+el.rule.addEventListener("change", () => {
+  rememberRule(hostOf(activeUrl), el.rule.value).catch(() => {});
 });
 
 el.stop.addEventListener("click", async () => {
