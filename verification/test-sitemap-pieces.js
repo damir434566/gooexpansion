@@ -26,6 +26,7 @@ Module._resolveFilename = function (request, ...rest) {
 const PARSER = path.join(COMPILED, "lib", "server", "parser");
 const sitemap = require(path.join(PARSER, "sitemap.js"));
 const { planCollection } = require(path.join(PARSER, "plan-collection.js"));
+const { pickPieces } = require(path.join(PARSER, "pick-pieces.js"));
 
 let pass = 0;
 const failures = [];
@@ -143,6 +144,28 @@ function readAll(docs) {
     const b = planCollection({ startUrl: "https://shop.example/collections/all", sitemaps: cut, limit: 30 });
     check("the planner plans the same addresses from the piece", b.urls, a.urls);
     check("and counts the same addresses seen", b.locsSeen, a.locsSeen);
+
+    // A whole-store run cuts its pieces by count; each address keeps its own
+    // title, and the AI's choice of pieces reads it as the piece's name (R-06).
+    const one = sitemapPieces("https://shop.example/sitemap_products_1.xml", xml, PLAN_SITEMAP_BUDGET, 1);
+    check("cut one address a piece: every title stays with its address", readAll(one).titles, raw.titles);
+    const asked = [];
+    const client = {
+      chat: {
+        completions: {
+          async create(body) {
+            asked.push(...[...body.messages[1].content.matchAll(/^\d+\. (".*") (\S+)$/gm)].map((m) => [JSON.parse(m[1]), m[2]]));
+            return { choices: [{ message: { content: JSON.stringify({ keep: [], drop: [] }) } }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
+          },
+        },
+      },
+    };
+    const planned = planCollection({ startUrl: "https://shop.example/collections/all", sitemaps: one, limit: 30 });
+    await pickPieces({ rule: "only shoes", store: "shop.example", urls: planned.urls, names: new Map(), sitemaps: one, model: "gpt-4o-mini", client });
+    check("the AI is told each sitemap piece by its title", asked.filter(([, p]) => /samba|kurtka/.test(p)), [
+      ["Samba OG 'Cloud White'", "/products/samba-og"],
+      ["Куртка бомбер", "/products/kurtka"],
+    ]);
   }
 
   // ── Not a sitemap at all ────────────────────────────────────────────────────
