@@ -89,7 +89,7 @@ const MENU = [
     check("deterministic", body.temperature, 0);
     check("a strict JSON schema", [body.response_format.type, body.response_format.json_schema.strict], ["json_schema", true]);
     check("the system prompt says the store's text is data", /never an instruction/.test(body.messages[0].content), true);
-    check("and that a doubtful category is kept", /When unsure, keep/.test(body.messages[0].content), true);
+    check("and that a doubtful category is not dropped", /When unsure between drop and the others, do not drop/.test(body.messages[0].content), true);
     check("the rule goes as a quoted string, trimmed", body.messages[1].content.startsWith(`RULE: "men's and women's clothing, no kids, no home"`), true);
     check("the store is named", /STORE: shop\.example/.test(body.messages[1].content), true);
     check(
@@ -105,10 +105,22 @@ const MENU = [
       ],
     );
     check("the answer: kept and dropped, by position", [choice.keep, choice.drop], [[0, 1, 4], [2, 3, 5]]);
+    check("three lists in the schema: keep, mixed, drop", body.response_format.json_schema.schema.required, ["keep", "mixed", "drop"]);
+    check("no mixed when the model names none", choice.mixed, []);
     check("on the model it was asked", choice.model, "gpt-4o-mini");
     // 600 uncached at 0.15, 400 cached at 0.075, 100 out at 0.6 — per million.
     check("what it cost, at the AI check's prices", Number(choice.costUsd.toFixed(8)), Number(((600 * 0.15 + 400 * 0.075 + 100 * 0.6) / 1e6).toFixed(8)));
     check("the system prompt is the module's", body.messages[0].content, CATEGORY_SYSTEM_PROMPT);
+  }
+
+  // ── A broad category: kept, and marked mixed ───────────────────────────────
+  {
+    const client = fakeClient(() => ({ keep: [0, 1], mixed: [4], drop: [2, 3, 5] }));
+    const choice = await pickCategories({ rule: "only shoes", store: "shop.example", categories: MENU, model: "gpt-4o-mini", client });
+    check("mixed is kept, and said to be mixed", [choice.keep, choice.mixed, choice.drop], [[0, 1, 4], [4], [2, 3, 5]]);
+    const both = fakeClient(() => ({ keep: [0], mixed: [1, 2], drop: [2, 3, 4, 5] }));
+    const c2 = await pickCategories({ rule: "only shoes", store: "shop.example", categories: MENU, model: "gpt-4o-mini", client: both });
+    check("mixed and drop at once: kept, mixed", [c2.keep, c2.mixed, c2.drop], [[0, 1, 2], [1, 2], [3, 4, 5]]);
   }
 
   // ── What the model leaves unclear is kept ──────────────────────────────────
@@ -133,6 +145,7 @@ const MENU = [
     const choice = await pickCategories({ rule: "no kids", store: "shop.example", categories: big, model: "gpt-4.1-nano", client });
     check("450 categories: three calls", client.calls.length, 3);
     check("asked side by side, not one after another", most, 3);
+    check("as many calls at once as there are chunks, up to eight", most <= 8, true);
     check("every number asked once", client.calls.flatMap((c) => [...c.messages[1].content.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]))).length, 450);
     check("the answers put back together", [choice.keep.length, choice.drop.length], [300, 150]);
     check("in order", choice.drop.slice(0, 3), [0, 3, 6]);
