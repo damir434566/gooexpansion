@@ -33,9 +33,11 @@ import { notAProductPage } from "@/lib/server/parser/page-guards";
 import { planCollection, type FetchedSitemap } from "@/lib/server/parser/plan-collection";
 import { commonTitleSuffix } from "@/lib/server/product-fields";
 import { measurePendingBackdrops } from "@/lib/server/bg-color";
-import { checkPendingProducts, getCheckSettings } from "@/lib/server/catalogue-check/store";
+import { capSpent, checkPendingProducts, getCheckSettings, recordCollectSpend } from "@/lib/server/catalogue-check/store";
 import { getOpenAIKey } from "@/lib/server/get-openai-key";
 import { pickCategories, readCategoryQuestion, type CategoryChoice } from "@/lib/server/parser/pick-categories";
+import { pickPieces, readPieceQuestion, type PieceChoice } from "@/lib/server/parser/pick-pieces";
+import type { CheckModel, Usage } from "@/lib/server/catalogue-check/ai";
 import { getSiteConfigs, getAiSettings } from "@/lib/server/parser/configs";
 import type { CrawlItemResult } from "@/lib/server/parser/types";
 
@@ -134,29 +136,96 @@ function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
+/** Why the extension's choice was not asked: its words, and whether the cap is the reason. */
+type NoChoice = { error: string; limit?: true };
+
+/**
+ * The AI check's key and model, which the extension's choices are asked of,
+ * while the AI check's monthly cap has room. Its error says why there is no
+ * asking, for the extension to show.
+ */
+async function aiModel(): Promise<{ apiKey: string; model: CheckModel } | NoChoice> {
+  const [apiKey, { model }, cap] = await Promise.all([
+    getOpenAIKey(),
+    getCheckSettings(),
+    capSpent().catch(() => null),
+  ]);
+  if (!apiKey) return { error: "no OpenAI key is set in the studio" };
+  if (cap && cap.spent >= cap.cap) {
+    return {
+      error: `this month's AI limit is spent ($${cap.spent.toFixed(2)} of $${cap.cap.toFixed(2)}); raise it in Goo Studio → AI check`,
+      limit: true,
+    };
+  }
+  return { apiKey, model };
+}
+
+/** What a choice cost goes into the day's `collect` run, after the answer has gone. */
+function spent(model: CheckModel, judged: number, usage: Usage) {
+  after(() => recordCollectSpend(model, judged, usage));
+}
+
+function storeOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
+function failed(err: unknown): { error: string } {
+  return { error: err instanceof Error ? err.message.slice(0, 200) : "the model did not answer" };
+}
+
 /**
  * A whole-store run's question, asked once with its first plan: which of the
- * categories it read off the store's menu does the admin's rule keep? The
- * answer is the AI check's model's, with its key. Without a rule nothing is
- * asked; without a key, or when the call fails, the answer says why and the
- * extension walks every category, as it would without a rule.
+ * categories it read off the store's menu does the admin's rule keep? Without
+ * a rule nothing is asked; without a key, or when the call fails, the answer
+ * says why and the extension walks every category, as it would without a rule.
  */
-async function chooseCategories(body: unknown, url: string): Promise<CategoryChoice | { error: string } | null> {
+async function chooseCategories(body: unknown, url: string): Promise<Omit<CategoryChoice, "usage"> | NoChoice | null> {
   const question = readCategoryQuestion(body);
   if (!question) return null;
-  const apiKey = await getOpenAIKey();
-  if (!apiKey) return { error: "no OpenAI key is set in the studio" };
+  const ai = await aiModel();
+  if ("error" in ai) return ai;
   try {
-    const { model } = await getCheckSettings();
-    let store = url;
-    try {
-      store = new URL(url).hostname;
-    } catch {
-      /* the address as given */
-    }
-    return await pickCategories({ ...question, store, model, apiKey });
+    const { usage, ...choice } = await pickCategories({ ...question, store: storeOf(url), model: ai.model, apiKey: ai.apiKey });
+    spent(choice.model, question.categories.length, usage);
+    return choice;
   } catch (err) {
-    return { error: err instanceof Error ? err.message.slice(0, 200) : "the model did not answer" };
+    return failed(err);
+  }
+}
+
+/**
+ * The question a whole-store run asks with every plan once it has a rule:
+ * which of the pieces just found does the rule want? The plan then answers
+ * with those alone. Without an answer every piece is kept, and the error
+ * says why.
+ */
+async function choosePieces(
+  body: unknown,
+  url: string,
+  urls: string[],
+  sitemaps: FetchedSitemap[],
+): Promise<{ urls: string[]; choice: Omit<PieceChoice, "urls" | "usage"> | NoChoice } | null> {
+  const question = readPieceQuestion(body);
+  if (!question || !urls.length) return null;
+  const ai = await aiModel();
+  if ("error" in ai) return { urls, choice: ai };
+  try {
+    const { urls: kept, usage, ...choice } = await pickPieces({
+      ...question,
+      store: storeOf(url),
+      urls,
+      sitemaps,
+      model: ai.model,
+      apiKey: ai.apiKey,
+    });
+    spent(choice.model, urls.length, usage);
+    return { urls: kept, choice };
+  } catch (err) {
+    return { urls, choice: failed(err) };
   }
 }
 
@@ -210,10 +279,12 @@ export async function POST(req: Request) {
     });
 
     const categoryChoice = await chooseCategories(body, url);
+    const pieces = await choosePieces(body, url, plan.urls, sitemaps);
 
     return NextResponse.json({
       ok: true,
       ...plan,
+      ...(pieces ? { urls: pieces.urls, pieceChoice: pieces.choice } : {}),
       ...(catalogue === null ? { linksNote: "the catalogue could not be read — pages are opened in the store's order" } : {}),
       ...(categoryChoice ? { categoryChoice } : {}),
     });

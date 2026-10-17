@@ -50,6 +50,8 @@ cat > "$CONFIG" <<JSON
     "src/lib/server/parser/robots.ts",
     "src/lib/server/parser/plan-collection.ts",
     "src/lib/server/parser/pick-categories.ts",
+    "src/lib/server/parser/pick-pieces.ts",
+    "src/lib/server/catalogue-check/store.ts",
     "src/lib/server/parser/parse-page.ts",
     "src/lib/server/parser/import-product.ts",
     "src/lib/server/parser/shopify.ts",

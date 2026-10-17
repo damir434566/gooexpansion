@@ -13,6 +13,9 @@
  *   - `planHtml` is read by `planCollection` as the page would have been: the
  *     same pieces, in the order the page showed them, the page still known for
  *     a product page when it is one.
+ *   - the names the walk reads off the cards (plan 001, R-06): `listingStep`
+ *     run in Chromium on a page of cards, and `planPieces`, which sends them
+ *     to the planner beside the links for the AI's choice of pieces.
  */
 const path = require("path");
 const Module = require("module");
@@ -38,7 +41,7 @@ function check(name, got, want) {
 }
 
 (async () => {
-  const { robotsRules, robotsAllows, planHtml } = await import(
+  const { robotsRules, robotsAllows, planHtml, planPieces, listingStep, PLAN_NAMES } = await import(
     pathToFileURL(path.join(__dirname, "..", "extension", "listing.js")).href
   );
 
@@ -165,6 +168,86 @@ function check(name, got, want) {
     const many = Array.from({ length: 15_000 }, (_, i) => `https://www.farfetch.com/lt/shopping/men/a-long-name-of-a-piece-${i}-item-${20_000_000 + i}.aspx`);
     const html = planHtml([{ ld: ["x".repeat(500_000)], ogType: "" }], many);
     check("15,000 links and the kept structured data stay under the route's 3 MB", html.length < 3_000_000, true);
+  }
+
+  // ── The names sent beside the links ───────────────────────────────────────
+  {
+    const names = new Map([
+      ["https://shop.example/p/samba", "Samba OG"],
+      ["https://shop.example/p/dress", "Linen midi dress"],
+    ]);
+    const links = ["https://shop.example/p/dress", "https://shop.example/p/plain", "https://shop.example/p/samba"];
+    check("a name for each link that has one, in the links' order", planPieces(links, names), [
+      { url: "https://shop.example/p/dress", name: "Linen midi dress" },
+      { url: "https://shop.example/p/samba", name: "Samba OG" },
+    ]);
+    check("only for the links sent in this call", planPieces(["https://shop.example/p/samba"], names), [{ url: "https://shop.example/p/samba", name: "Samba OG" }]);
+    check("no names, nothing sent", planPieces(links, undefined), []);
+    const lots = Array.from({ length: 2_500 }, (_, i) => `https://shop.example/p/${i}`);
+    check("never more than the route reads", planPieces(lots, new Map(lots.map((u) => [u, "x"]))).length, PLAN_NAMES);
+    check("which is the route's own limit", PLAN_NAMES, 2_000);
+  }
+
+  // ── The names off the cards, read in a real page ──────────────────────────
+  const playwright = (() => {
+    try {
+      return require(process.env.PLAYWRIGHT_MODULE || "playwright");
+    } catch {
+      return null;
+    }
+  })();
+  if (!playwright) {
+    failures.push("Playwright is not installed: the card names were not checked (set NODE_PATH or PLAYWRIGHT_MODULE)");
+  } else {
+    const browser = await playwright.chromium.launch({
+      executablePath: process.env.CHROME_PATH || "/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
+    });
+    const page = await browser.newPage();
+    const cards = `<!doctype html><html><body>
+      <div class="card"><a href="/p/samba"><img src="data:," alt="Samba OG shoes"></a><a href="/p/samba">Samba OG</a></div>
+      <div class="card"><a href="/p/boot">
+           Leather Chelsea boot
+           <span>€120</span>
+         </a></div>
+      <div class="card"><a href="/p/wish" aria-label="Wool scarf"><img src="data:,"></a></div>
+      <div class="card"><a href="/p/bare"><img src="data:,"></a></div>
+      <div class="card" data-href="/p/box"><h3>Canvas tote</h3><p>€40</p></div>
+      <a href="/p/long">${"Very long name ".repeat(20)}</a>
+      <a href="https://elsewhere.example/p/away">Not this store</a>
+      <goo-card></goo-card>
+      <script>
+        customElements.define("goo-card", class extends HTMLElement {
+          connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML = '<a href="/p/shadow">Shadow sneaker</a>'; }
+        });
+      </script>
+    </body></html>`;
+    await page.route("https://shop.example/**", (route) => route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: cards }));
+    await page.goto("https://shop.example/c/new-in");
+    const step = (opts) => page.evaluate(`(${listingStep.toString()})(${JSON.stringify(opts)})`);
+    const first = await step({ reset: true, scroll: false });
+    const n = first.names;
+    check("a card's photo link names it by the photo's alt text", n["https://shop.example/p/samba"], "Samba OG shoes");
+    check("a link's text, its spaces folded", n["https://shop.example/p/boot"], "Leather Chelsea boot €120");
+    check("a link with no text, by its label", n["https://shop.example/p/wish"], "Wool scarf");
+    check("a link with nothing to say has no name", "https://shop.example/p/bare" in n, false);
+    check("a clickable box, by its text", n["https://shop.example/p/box"], "Canvas tote €40");
+    check("a link inside a web component", n["https://shop.example/p/shadow"], "Shadow sneaker");
+    check("a long name is cut", n["https://shop.example/p/long"].length, 160);
+    check("another store's link is neither a link nor a name", [first.links.some((u) => /elsewhere/.test(u)), Object.keys(n).some((u) => /elsewhere/.test(u))], [false, false]);
+
+    const again = await step({ scroll: false });
+    check("a name is reported once", [again.links.length, Object.keys(again.names).length], [0, 0]);
+    await page.evaluate(() => {
+      const a = document.createElement("a");
+      a.href = "/p/bare";
+      a.textContent = "Ribbed beanie";
+      document.body.append(a);
+    });
+    const later = await step({ scroll: false });
+    check("a card that gains its title later is named then, its link not reported twice", [later.links, later.names], [[], { "https://shop.example/p/bare": "Ribbed beanie" }]);
+    const fresh = await step({ reset: true, scroll: false });
+    check("a new run reads the names afresh", fresh.names["https://shop.example/p/samba"], "Samba OG shoes");
+    await browser.close();
   }
 
   console.log("");

@@ -41,6 +41,13 @@
  *            pieces. The sitemap index names a product sitemap (every piece,
  *            two hats no category shows, the French copies and the forbidden
  *            piece), a blog sitemap and a collections sitemap.
+ *   shoes  — a store to collect "only men's and women's shoes" from (plan
+ *            001, runs W4 and W5). Its menu: Women's shoes, Men's shoes,
+ *            Dresses, Kids, New in (shoes, a dress and a jacket), Gift cards.
+ *            Each card names its piece; two of them have addresses that say
+ *            nothing (a loafer, a dress), so only the name tells. The sitemap
+ *            lists every piece, and two only it knows: a sneaker and a scarf,
+ *            named by `<image:title>`.
  *
  * Records every request with a timestamp so the test can assert on pacing.
  */
@@ -68,6 +75,7 @@ function products() {
   if (mode === "page") return Array.from({ length: PAGE_TOTAL }, (_, i) => `jacket-${i + 1}`);
   if (mode === "slow") return ["s1", "s2", "s3", "s4", "s5", "s6", "s7"];
   if (mode === "site") return SITE_PIECES;
+  if (mode === "shoes") return Object.keys(SHOE_NAMES);
   return ["alpha", "beta", "gamma", "delta", "secret-hidden"];
 }
 
@@ -167,6 +175,81 @@ function siteProductSitemap() {
   ];
   const locs = paths.map((p) => `  <url><loc>${ORIGIN}${p}</loc></url>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${locs}\n</urlset>\n`;
+}
+
+// ── The `shoes` store ────────────────────────────────────────────────────────
+
+/** Every piece of the `shoes` store, and the name its card gives it. The last two only the sitemap knows. */
+const SHOE_NAMES = {
+  "boot-w1": "Leather Chelsea boot",
+  "sneaker-w2": "Running sneaker",
+  "p-1042": "Suede loafer",
+  "sneaker-m1": "Court sneaker",
+  "boot-m2": "Hiking boot",
+  "dress-1": "Silk slip dress",
+  "dress-2": "Wrap dress",
+  "p-2001": "Linen midi dress",
+  "kids-tee-1": "Kids logo tee",
+  "new-sandal-1": "Leather sandal",
+  "new-jacket-1": "Denim jacket",
+  "p-3001": "Canvas sneaker",
+  "p-3002": "Wool scarf",
+};
+const SHOE_LISTINGS = {
+  "/": ["boot-w1", "dress-1"],
+  "/c/women-shoes": ["boot-w1", "sneaker-w2", "p-1042"],
+  "/c/men-shoes": ["sneaker-m1", "boot-m2"],
+  "/c/dresses": ["dress-1", "dress-2", "p-2001"],
+  "/c/kids": ["kids-tee-1"],
+  "/c/new-in": ["sneaker-m1", "p-2001", "new-sandal-1", "new-jacket-1"],
+};
+
+function shoeFrame(title, body) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title} | Fixture Shoes</title>
+<style>body { margin: 0; font: 14px sans-serif; } .card { height: 300px; } .card img { width: 120px; height: 160px; }</style>
+</head><body>
+<header class="site-header">
+  <a href="/" class="logo">Fixture Shoes</a>
+  <nav aria-label="Main">
+    <a href="/c/women-shoes">Women's shoes</a>
+    <a href="/c/men-shoes">Men's shoes</a>
+    <a href="/c/dresses">Dresses</a>
+    <a href="/c/kids">Kids</a>
+    <a href="/c/new-in">New in</a>
+    <a href="/gift-cards">Gift cards</a>
+  </nav>
+  <a href="/cart">Bag (0)</a>
+</header>
+<main>${body}</main>
+<footer><a href="/help">Help</a></footer>
+</body></html>`;
+}
+
+const shoeCard = (slug) =>
+  `<div class="card"><a href="/product/${slug}"><img alt="" src="/img/${slug}-1.jpg"></a> <a href="/product/${slug}">${SHOE_NAMES[slug]}</a> <span>€90</span></div>`;
+
+function shoeSitemap() {
+  const entries = Object.keys(SHOE_NAMES).map(
+    (slug) =>
+      `  <url><loc>${ORIGIN}/product/${slug}</loc><image:image><image:loc>${ORIGIN}/img/${slug}-1.jpg</image:loc><image:title>${SHOE_NAMES[slug]}</image:title></image:image></url>`,
+  );
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+${entries.join("\n")}
+</urlset>
+`;
+}
+
+/** The `shoes` store's own pages, or null when the path is not one. */
+function shoePage(p) {
+  const listing = SHOE_LISTINGS[p];
+  if (listing) {
+    const title = p === "/" ? "Home" : p.slice(3);
+    return ["text/html", shoeFrame(title, `<h1>${title}</h1><div id="grid">${listing.map(shoeCard).join("")}</div>`)];
+  }
+  if (p === "/gift-cards") return ["text/html", shoeFrame("Gift cards", "<h1>Gift cards</h1><p>Give the gift of shoes.</p>")];
+  if (p === "/sitemap.xml") return ["application/xml", shoeSitemap()];
+  return null;
 }
 
 /** The `site` store's own pages, or null when the path is not one. */
@@ -343,7 +426,7 @@ function robots() {
   const lines = ["User-agent: Googlebot", "Disallow:", "", "User-agent: *"];
   // A path the run must never open. If it does, the test fails loudly.
   lines.push("Disallow: /product/secret-");
-  if (!["many", "wary", "spa", "bigmap", "page", "slow", "site"].includes(mode)) lines.push("Crawl-delay: 2");
+  if (!["many", "wary", "spa", "bigmap", "page", "slow", "site", "shoes"].includes(mode)) lines.push("Crawl-delay: 2");
   lines.push("", `Sitemap: ${ORIGIN}/sitemap.xml`);
   return lines.join("\n") + "\n";
 }
@@ -633,6 +716,10 @@ const server = http.createServer((req, res) => {
   }
   if (mode === "site") {
     const page = sitePage(p, url);
+    if (page) return send(200, page[0], page[1]);
+  }
+  if (mode === "shoes") {
+    const page = shoePage(p);
     if (page) return send(200, page[0], page[1]);
   }
   if (p === "/sitemap.xml") return send(200, "application/xml", sitemap());

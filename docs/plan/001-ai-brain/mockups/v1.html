@@ -1,0 +1,511 @@
+<title>Goo Collect AI Mockups</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  /* Layout: a board of popup states, each row = what happens + the popup in light and dark. */
+  :root {
+    --page: #f3f3f1;
+    --ink: #161616;
+    --ink-soft: #5f5f5b;
+    --rule: #dcdcd7;
+    --tag: #e7e7e2;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page: #101010;
+      --ink: #ededea;
+      --ink-soft: #a3a39e;
+      --rule: #2b2b29;
+      --tag: #22221f;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #101010;
+    --ink: #ededea;
+    --ink-soft: #a3a39e;
+    --rule: #2b2b29;
+    --tag: #22221f;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.5 var(--sans);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 32px 64px;
+  }
+  .board { max-width: 1120px; margin: 0 auto; display: grid; gap: 40px; }
+  header.top { display: grid; gap: 8px; max-width: 70ch; }
+  header.top h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
+  header.top p { margin: 0; color: var(--ink-soft); }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; }
+  .meta span {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    background: var(--tag); padding: 3px 8px; border-radius: 999px; color: var(--ink-soft);
+  }
+
+  .state {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 24px;
+    align-items: start; padding-top: 28px; border-top: 1px solid var(--rule);
+  }
+  .state .about { min-width: 0; display: grid; gap: 8px; max-width: 46ch; }
+  .state .about .n { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft); }
+  .state .about h2 { margin: 0; font-size: 18px; font-weight: 600; text-wrap: balance; }
+  .state .about p { margin: 0; color: var(--ink-soft); }
+  .state .about ul { margin: 0; padding-left: 18px; color: var(--ink-soft); display: grid; gap: 4px; }
+  .theme-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 6px; }
+  .frames { display: contents; }
+  @media (max-width: 1060px) {
+    .state { grid-template-columns: minmax(0, 1fr); }
+    .frames { display: flex; flex-wrap: wrap; gap: 24px; }
+  }
+
+  /* ── The popup, with Goo Collect's own tokens (extension/popup.css) ── */
+  .pop {
+    --surface: #ffffff;
+    --background: #fafafa;
+    --foreground: #111111;
+    --foreground-muted: #5c5c5c;
+    --foreground-subtle: #8e8e8e;
+    --border: #e4e4e4;
+    --ok: #059669;
+    --warn: #b45309;
+    width: 320px; max-width: 100%;
+    padding: 16px; border-radius: 10px;
+    background: var(--surface); color: var(--foreground);
+    font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 8px 28px rgba(0,0,0,.12);
+    border: 1px solid var(--border);
+  }
+  .pop.dark {
+    --surface: #161616;
+    --background: #1e1e1e;
+    --foreground: #f2f2f2;
+    --foreground-muted: #a8a8a8;
+    --foreground-subtle: #767676;
+    --border: #2e2e2e;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    color-scheme: dark;
+  }
+  .pop * { box-sizing: border-box; }
+  .pop h3 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
+  .pop .sub { margin: 4px 0 0; font-size: 11px; color: var(--foreground-muted); overflow-wrap: anywhere; }
+  .pop .rows { margin: 14px 0; display: grid; gap: 8px; }
+  .pop .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--foreground-subtle);
+  }
+  .pop .row small, .pop .rule small {
+    display: block; margin-top: 2px; font-size: 10px; letter-spacing: 0; text-transform: none; color: var(--foreground-subtle);
+  }
+  .pop .box {
+    width: 14px; height: 14px; flex: none; border-radius: 3px; border: 1px solid var(--foreground-subtle);
+    display: grid; place-items: center; font-size: 10px; line-height: 1;
+  }
+  .pop .box.on { background: var(--foreground); border-color: var(--foreground); color: var(--surface); }
+  .pop .box.on::after { content: "✓"; }
+  .pop .field {
+    width: 150px; padding: 6px 8px; font-size: 12px; color: var(--foreground);
+    background: var(--background); border: 1px solid var(--border); border-radius: 8px; text-transform: none; letter-spacing: normal;
+  }
+  .pop .actions { display: flex; gap: 8px; }
+  .pop .btn {
+    flex: 1; padding: 9px 12px; font-size: 11px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase;
+    border-radius: 8px; border: 1px solid transparent; text-align: center; cursor: default;
+  }
+  .pop .primary { background: var(--foreground); color: var(--surface); }
+  .pop .ghost { background: transparent; color: var(--foreground-muted); border-color: var(--border); }
+  .pop .whole { margin-top: 8px; }
+  .pop .rule { display: block; margin-top: 8px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--foreground-subtle); }
+  .pop .rule .text {
+    margin-top: 6px; padding: 6px 8px; font-size: 12px; letter-spacing: normal; text-transform: none; color: var(--foreground);
+    background: var(--background); border: 1px solid var(--border); border-radius: 8px; min-height: 44px;
+  }
+  .pop .rule .text.focus { border-color: var(--foreground); }
+  .pop .hint, .pop .pace, .pop .foot { font-size: 10px; color: var(--foreground-subtle); }
+  .pop .hint { margin: 6px 0 0; }
+  .pop .progress { margin-top: 14px; }
+  .pop .bar { height: 3px; border-radius: 999px; background: var(--border); overflow: hidden; }
+  .pop .bar > div { height: 100%; background: var(--foreground); }
+  .pop .bar.busy > div { width: 30%; animation: slide 1.4s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  @media (prefers-reduced-motion: reduce) { .pop .bar.busy > div { animation: none; } }
+  .pop .found { margin: 8px 0 0; font-size: 12px; font-weight: 500; }
+  .pop .counts { margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--foreground-muted); }
+  .pop .counts strong { font-size: 15px; font-weight: 500; color: var(--foreground); }
+  .pop .ok { color: var(--ok); }
+  .pop .warn { color: var(--warn); }
+  .pop .pace { margin: 4px 0 0; }
+  .pop .ai { margin: 6px 0 0; font-size: 11px; color: var(--foreground-muted); font-variant-numeric: tabular-nums; }
+  .pop .ai b { font-weight: 600; color: var(--foreground); }
+  .pop .note { margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); color: var(--warn); font-size: 10px; }
+  .pop .foot { margin: 14px 0 0; padding-top: 10px; border-top: 1px solid var(--border); }
+
+  /* the new preview list */
+  .pop .pick-head { margin-top: 14px; display: grid; gap: 4px; }
+  .pop .pick-head .found { margin: 0; }
+  .pop .chips { display: flex; gap: 6px; margin-top: 8px; }
+  .pop .chip {
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; padding: 4px 8px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--foreground-muted); font-variant-numeric: tabular-nums;
+  }
+  .pop .chip.on { background: var(--foreground); color: var(--surface); border-color: var(--foreground); }
+  .pop .list {
+    margin-top: 8px; max-height: 236px; overflow: auto; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--background);
+  }
+  .pop .item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 7px 10px; border-top: 1px solid var(--border); }
+  .pop .item:first-child { border-top: 0; }
+  .pop .item .name { font-size: 12px; min-width: 0; }
+  .pop .item .path { display: block; font-size: 10px; color: var(--foreground-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pop .item .tag { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--foreground-subtle); }
+  .pop .item.off .name { color: var(--foreground-subtle); }
+  .pop .item .tag.broad { color: var(--warn); }
+  .pop .stack { display: grid; gap: 8px; margin-top: 12px; }
+  .pop .small { font-size: 10px; color: var(--foreground-subtle); margin: 0; }
+</style>
+
+<div class="board">
+  <header class="top">
+    <h1>Goo Collect 1.4.0 — ИИ выбирает, что собирать</h1>
+    <p>Макеты popup расширения к плану 001. Расширение остаётся в своём стиле: тот же шрифт, те же кнопки, светлая и тёмная тема по системе. Тексты в popup на английском, как во всём расширении; правило администратор пишет на любом языке.</p>
+    <div class="meta"><span>v1</span><span>popup 320 px</span><span>светлая и тёмная</span><span>2026-10-17</span></div>
+  </header>
+
+  <!-- 1 -->
+  <section class="state">
+    <div class="about">
+      <span class="n">Экран 1 · обычное состояние</span>
+      <h2>Правило и старт</h2>
+      <p>Администратор открывает магазин, пишет словами, что собирать, и нажимает «Collect the whole store». Правило запоминается для этого магазина.</p>
+      <ul>
+        <li>Пустое поле — собирается всё, как сейчас.</li>
+        <li>Подсказка под полем говорит, что ИИ отбирает и категории, и каждую вещь.</li>
+      </ul>
+    </div>
+    <div class="frames">
+      <div><div class="theme-label">светлая</div>
+        <div class="pop">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="rows">
+            <div class="row"><span>Everything on this page<small>Ticked: scrolls this tab to the end, then collects all of it.</small></span><span class="box on"></span></div>
+            <div class="row"><span>Links only<small>Only add this store's link to pieces we already have.</small></span><span class="box"></span></div>
+          </div>
+          <div class="actions"><div class="btn primary">Collect this page</div></div>
+          <div class="whole">
+            <div class="actions"><div class="btn ghost">Collect the whole store</div></div>
+            <div class="rule">What to collect<small>AI keeps the categories that fit, then checks every piece by its name before opening it. Empty: everything.</small>
+              <div class="text focus">Вся обувь, мужская и женская. Без одежды, аксессуаров и детского.</div>
+            </div>
+          </div>
+          <p class="foot">Keep the store tab in front while it scrolls. robots.txt is obeyed.</p>
+        </div>
+      </div>
+      <div><div class="theme-label">тёмная</div>
+        <div class="pop dark">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="rows">
+            <div class="row"><span>Everything on this page<small>Ticked: scrolls this tab to the end, then collects all of it.</small></span><span class="box on"></span></div>
+            <div class="row"><span>Links only<small>Only add this store's link to pieces we already have.</small></span><span class="box"></span></div>
+          </div>
+          <div class="actions"><div class="btn primary">Collect this page</div></div>
+          <div class="whole">
+            <div class="actions"><div class="btn ghost">Collect the whole store</div></div>
+            <div class="rule">What to collect<small>AI keeps the categories that fit, then checks every piece by its name before opening it. Empty: everything.</small>
+              <div class="text focus">Вся обувь, мужская и женская. Без одежды, аксессуаров и детского.</div>
+            </div>
+          </div>
+          <p class="foot">Keep the store tab in front while it scrolls. robots.txt is obeyed.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section class="state">
+    <div class="about">
+      <span class="n">Экран 2 · загрузка</span>
+      <h2>ИИ читает меню</h2>
+      <p>Несколько секунд, пока расширение читает меню, а ИИ на сайте выбирает категории. Магазин в это время ничего не получает — меню уже на открытой странице.</p>
+    </div>
+    <div class="frames">
+      <div><div class="theme-label">светлая</div>
+        <div class="pop">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="progress">
+            <div class="bar busy"><div></div></div>
+            <p class="found">Reading the store's menu: 112 categories</p>
+            <p class="pace">AI is choosing which of them fit your rule…</p>
+          </div>
+          <div class="stack"><div class="actions"><div class="btn ghost">Stop</div></div></div>
+        </div>
+      </div>
+      <div><div class="theme-label">тёмная</div>
+        <div class="pop dark">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="progress">
+            <div class="bar busy"><div></div></div>
+            <p class="found">Reading the store's menu: 112 categories</p>
+            <p class="pace">AI is choosing which of them fit your rule…</p>
+          </div>
+          <div class="stack"><div class="actions"><div class="btn ghost">Stop</div></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section class="state">
+    <div class="about">
+      <span class="n">Экран 3 · новое</span>
+      <h2>Предпросмотр: беру / пропускаю</h2>
+      <p>Список категорий с галочками, как выбрал ИИ. Галочку можно поставить или снять. «Show skipped» показывает отброшенные, чтобы вернуть нужную.</p>
+      <ul>
+        <li>Широкие категории («New in», «Sale») ИИ берёт с пометкой <b>mixed</b>: внутри них каждая вещь проверяется по названию.</li>
+        <li>Закрыли popup — при следующем открытии список на месте.</li>
+        <li>Кнопка называет, сколько категорий уйдёт в сбор.</li>
+      </ul>
+    </div>
+    <div class="frames">
+      <div><div class="theme-label">светлая</div>
+        <div class="pop">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="pick-head">
+            <p class="found">AI picked 18 of the menu's 112 categories</p>
+            <p class="small">Rule: «Вся обувь, мужская и женская. Без одежды, аксессуаров и детского.»</p>
+            <div class="chips"><span class="chip on">Taking 18</span><span class="chip">Show skipped 94</span></div>
+          </div>
+          <div class="list">
+            <div class="item"><span class="box on"></span><span class="name">Men · Shoes<span class="path">/men/shoes/cat/?cid=4209</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Men · Trainers<span class="path">/men/shoes/trainers/cat/?cid=5775</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Men · Boots<span class="path">/men/shoes/boots/cat/?cid=5774</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Women · Shoes<span class="path">/women/shoes/cat/?cid=4172</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Women · Heels<span class="path">/women/shoes/heels/cat/?cid=6461</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">New in<span class="path">/men/new-in/cat/?cid=27110</span></span><span class="tag broad">mixed</span></div>
+            <div class="item"><span class="box on"></span><span class="name">Sale<span class="path">/men/sale/cat/?cid=8409</span></span><span class="tag broad">mixed</span></div>
+            <div class="item"><span class="box on"></span><span class="name">Women · Sandals<span class="path">/women/shoes/sandals/cat/?cid=6458</span></span><span class="tag"></span></div>
+          </div>
+          <div class="stack">
+            <div class="actions"><div class="btn primary">Collect 18 categories</div></div>
+            <div class="actions"><div class="btn ghost">Cancel</div></div>
+            <p class="small">Inside them AI checks every piece by its name before opening it, and the store's sitemaps go through the same check at the end.</p>
+          </div>
+        </div>
+      </div>
+      <div><div class="theme-label">тёмная · показаны пропущенные</div>
+        <div class="pop dark">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="pick-head">
+            <p class="found">AI picked 18 of the menu's 112 categories</p>
+            <p class="small">Rule: «Вся обувь, мужская и женская. Без одежды, аксессуаров и детского.»</p>
+            <div class="chips"><span class="chip">Taking 18</span><span class="chip on">Show skipped 94</span></div>
+          </div>
+          <div class="list">
+            <div class="item off"><span class="box"></span><span class="name">Men · Jackets &amp; coats<span class="path">/men/jackets-coats/cat/?cid=3606</span></span><span class="tag"></span></div>
+            <div class="item off"><span class="box"></span><span class="name">Men · Jeans<span class="path">/men/jeans/cat/?cid=4208</span></span><span class="tag"></span></div>
+            <div class="item off"><span class="box"></span><span class="name">Women · Dresses<span class="path">/women/dresses/cat/?cid=8799</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Men · Socks<span class="path">/men/socks/cat/?cid=16329</span></span><span class="tag"></span></div>
+            <div class="item off"><span class="box"></span><span class="name">Kids · Shoes<span class="path">/kids/shoes/cat/?cid=5788</span></span><span class="tag"></span></div>
+            <div class="item off"><span class="box"></span><span class="name">Face + Body<span class="path">/women/face-body/cat/?cid=1314</span></span><span class="tag"></span></div>
+            <div class="item off"><span class="box"></span><span class="name">Gift vouchers<span class="path">/gift-vouchers/</span></span><span class="tag"></span></div>
+          </div>
+          <div class="stack">
+            <div class="actions"><div class="btn primary">Collect 19 categories</div></div>
+            <div class="actions"><div class="btn ghost">Cancel</div></div>
+            <p class="small">You ticked Men · Socks yourself: 19 categories now.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section class="state">
+    <div class="about">
+      <span class="n">Экран 3 · ошибка</span>
+      <h2>ИИ не смог выбрать</h2>
+      <p>Нет ключа, исчерпан лимит, на сайте ещё нет обновления. Отмечено всё, жёлтая плашка называет причину. Можно снять галочки руками или нажать Cancel и исправить причину.</p>
+      <ul>
+        <li>Отбор вещей по названию в таком прогоне тоже выключен — плашка говорит об этом.</li>
+      </ul>
+    </div>
+    <div class="frames">
+      <div><div class="theme-label">светлая</div>
+        <div class="pop">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="pick-head">
+            <p class="found">All 112 of the menu's categories</p>
+            <div class="chips"><span class="chip on">Taking 112</span><span class="chip">Show skipped 0</span></div>
+          </div>
+          <p class="note">AI could not choose (no OpenAI key is set in Goo Studio → Settings). Every category is ticked and pieces will not be checked by name. Untick what you don't want, or Cancel and set the key.</p>
+          <div class="list" style="max-height: 120px">
+            <div class="item"><span class="box on"></span><span class="name">Men · Jackets &amp; coats<span class="path">/men/jackets-coats/cat/?cid=3606</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Men · Shoes<span class="path">/men/shoes/cat/?cid=4209</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Men · Jeans<span class="path">/men/jeans/cat/?cid=4208</span></span><span class="tag"></span></div>
+          </div>
+          <div class="stack">
+            <div class="actions"><div class="btn primary">Collect 112 categories</div></div>
+            <div class="actions"><div class="btn ghost">Cancel</div></div>
+          </div>
+        </div>
+      </div>
+      <div><div class="theme-label">тёмная</div>
+        <div class="pop dark">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="pick-head">
+            <p class="found">All 112 of the menu's categories</p>
+            <div class="chips"><span class="chip on">Taking 112</span><span class="chip">Show skipped 0</span></div>
+          </div>
+          <p class="note">AI could not choose (no OpenAI key is set in Goo Studio → Settings). Every category is ticked and pieces will not be checked by name. Untick what you don't want, or Cancel and set the key.</p>
+          <div class="list" style="max-height: 120px">
+            <div class="item"><span class="box on"></span><span class="name">Men · Jackets &amp; coats<span class="path">/men/jackets-coats/cat/?cid=3606</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Men · Shoes<span class="path">/men/shoes/cat/?cid=4209</span></span><span class="tag"></span></div>
+            <div class="item"><span class="box on"></span><span class="name">Men · Jeans<span class="path">/men/jeans/cat/?cid=4208</span></span><span class="tag"></span></div>
+          </div>
+          <div class="stack">
+            <div class="actions"><div class="btn primary">Collect 112 categories</div></div>
+            <div class="actions"><div class="btn ghost">Cancel</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section class="state">
+    <div class="about">
+      <span class="n">Экран 4 · сбор идёт</span>
+      <h2>Сбор: что взято и что пропущено</h2>
+      <p>Новая строка — сколько вещей ИИ пропустил по правилу. Остальное как сейчас: категория из скольких, счётчики, темп, Stop.</p>
+    </div>
+    <div class="frames">
+      <div><div class="theme-label">светлая</div>
+        <div class="pop">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="progress">
+            <div class="bar"><div style="width: 22%"></div></div>
+            <p class="found">Category 4 of 18 (AI left out 94): Women · Shoes</p>
+            <p class="counts"><strong>1,204</strong><span>pieces</span><span class="ok">1,180 new</span><span>24 updated</span><span class="warn">3 failed</span></p>
+            <p class="ai">AI skipped <b>3,417</b> pieces that don't fit the rule</p>
+            <p class="pace">One page every 1.9s or slower · about 1,100 pieces an hour</p>
+          </div>
+          <div class="stack"><div class="actions"><div class="btn ghost">Stop</div></div></div>
+        </div>
+      </div>
+      <div><div class="theme-label">тёмная</div>
+        <div class="pop dark">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="progress">
+            <div class="bar"><div style="width: 22%"></div></div>
+            <p class="found">Category 4 of 18 (AI left out 94): Women · Shoes</p>
+            <p class="counts"><strong>1,204</strong><span>pieces</span><span class="ok">1,180 new</span><span>24 updated</span><span class="warn">3 failed</span></p>
+            <p class="ai">AI skipped <b>3,417</b> pieces that don't fit the rule</p>
+            <p class="pace">One page every 1.9s or slower · about 1,100 pieces an hour</p>
+          </div>
+          <div class="stack"><div class="actions"><div class="btn ghost">Stop</div></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section class="state">
+    <div class="about">
+      <span class="n">Экран 4 · предупреждение</span>
+      <h2>Лимит ИИ на месяц кончился</h2>
+      <p>Сбор не останавливается. Плашка говорит, что дальше вещи не отбираются по названию, а проверка новых карточек ждёт следующего месяца или поднятого лимита в AI check.</p>
+    </div>
+    <div class="frames">
+      <div><div class="theme-label">светлая</div>
+        <div class="pop">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="progress">
+            <div class="bar"><div style="width: 61%"></div></div>
+            <p class="found">Category 11 of 18 (AI left out 94): Men · Boots</p>
+            <p class="counts"><strong>38,912</strong><span>pieces</span><span class="ok">38,140 new</span><span>772 updated</span></p>
+            <p class="ai">AI skipped <b>96,204</b> pieces that don't fit the rule</p>
+            <p class="pace">One page every 1.9s or slower · about 1,050 pieces an hour</p>
+          </div>
+          <p class="note">This month's AI limit is spent ($5.00 of $5.00). Collecting goes on without AI: every piece in the chosen categories is opened, and new cards wait for the AI check. Raise the limit in Goo Studio → AI check.</p>
+          <div class="stack"><div class="actions"><div class="btn ghost">Stop</div></div></div>
+        </div>
+      </div>
+      <div><div class="theme-label">тёмная</div>
+        <div class="pop dark">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="progress">
+            <div class="bar"><div style="width: 61%"></div></div>
+            <p class="found">Category 11 of 18 (AI left out 94): Men · Boots</p>
+            <p class="counts"><strong>38,912</strong><span>pieces</span><span class="ok">38,140 new</span><span>772 updated</span></p>
+            <p class="ai">AI skipped <b>96,204</b> pieces that don't fit the rule</p>
+            <p class="pace">One page every 1.9s or slower · about 1,050 pieces an hour</p>
+          </div>
+          <p class="note">This month's AI limit is spent ($5.00 of $5.00). Collecting goes on without AI: every piece in the chosen categories is opened, and new cards wait for the AI check. Raise the limit in Goo Studio → AI check.</p>
+          <div class="stack"><div class="actions"><div class="btn ghost">Stop</div></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section class="state">
+    <div class="about">
+      <span class="n">Экран 5 · готово</span>
+      <h2>Итог прогона</h2>
+      <p>Сколько категорий и сайтмапов пройдено, сколько вещей собрано и сколько ИИ пропустил. Retry, как сейчас, открывает заново только упавшие страницы.</p>
+      <ul>
+        <li>Проверенные ИИ поля (бренд, цвет, стиль…) видны в карточках и на экране AI check в Goo Studio.</li>
+      </ul>
+    </div>
+    <div class="frames">
+      <div><div class="theme-label">светлая</div>
+        <div class="pop">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="progress">
+            <div class="bar"><div style="width: 100%"></div></div>
+            <p class="found">Whole store: the 18 categories AI chose (94 left out) and 6 sitemaps</p>
+            <p class="counts"><strong>61,480</strong><span>pieces</span><span class="ok">60,302 new</span><span>1,166 updated</span><span class="warn">12 failed</span></p>
+            <p class="ai">AI skipped <b>148,930</b> pieces that don't fit the rule</p>
+          </div>
+          <div class="stack">
+            <div class="actions"><div class="btn ghost">Retry 12 failed</div></div>
+            <div class="actions"><div class="btn ghost">Collect the whole store</div></div>
+          </div>
+        </div>
+      </div>
+      <div><div class="theme-label">тёмная</div>
+        <div class="pop dark">
+          <h3>Goo Collect</h3>
+          <p class="sub">asos.com/men/</p>
+          <div class="progress">
+            <div class="bar"><div style="width: 100%"></div></div>
+            <p class="found">Whole store: the 18 categories AI chose (94 left out) and 6 sitemaps</p>
+            <p class="counts"><strong>61,480</strong><span>pieces</span><span class="ok">60,302 new</span><span>1,166 updated</span><span class="warn">12 failed</span></p>
+            <p class="ai">AI skipped <b>148,930</b> pieces that don't fit the rule</p>
+          </div>
+          <div class="stack">
+            <div class="actions"><div class="btn ghost">Retry 12 failed</div></div>
+            <div class="actions"><div class="btn ghost">Collect the whole store</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>

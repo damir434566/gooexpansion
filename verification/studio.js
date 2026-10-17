@@ -31,37 +31,65 @@ const { parsePage } = require(path.join(PARSER, "parse-page.js"));
 const { notAProductPage } = require(path.join(PARSER, "page-guards.js"));
 const { toUsd } = require(path.join(COMPILED, "lib", "server", "fx.js"));
 const { pickCategories, readCategoryQuestion } = require(path.join(PARSER, "pick-categories.js"));
+const { pickPieces, readPieceQuestion } = require(path.join(PARSER, "pick-pieces.js"));
 
 /**
  * The AI check's model, stood in for: there is no OpenAI key in this
- * container, and an assertion needs an answer it can predict. It keeps a
- * category when a word of its label is a word of the rule, and drops the
- * rest. A rule with FAIL in it fails the call, as a key over its limit does.
- * Everything around it — what the request carries, how the answer is read —
- * is the shipping `pick-categories.ts`.
+ * container, and an assertion needs an answer it can predict. Everything
+ * around it — what the request carries, how the answer is read — is the
+ * shipping `pick-categories.ts` and `pick-pieces.ts`.
+ *
+ * Categories: kept when a word of the label is a word of the rule; a broad
+ * one ("New in", "Sale") is mixed; the rest dropped. Pieces: kept when a word
+ * of the name or the path is one the rule names, a word of the same family
+ * counting ("shoes" is a boot, a sneaker, a loafer, a sandal), the rule's
+ * small words and genders aside. A rule with FAIL in it fails every call, as
+ * a key over its rate does; PIECEFAIL fails only the pieces.
  */
+const BROAD = new Set(["new in", "sale", "all", "new"]);
+const FAMILIES = { shoe: ["shoe", "boot", "sneaker", "loafer", "sandal", "trainer"] };
+const SMALL = new Set(["only", "and", "the", "all", "nothing", "else", "with", "for", "men", "women", "man", "woman"]);
+const stem = (w) => w.replace(/s$/, "");
 const STAND_IN_MODEL = {
   chat: {
     completions: {
       async create(body) {
         const text = body.messages[1].content;
         const rule = JSON.parse(text.match(/^RULE: (".*")$/m)[1]).toLowerCase();
-        if (/fail/.test(rule)) throw new Error("429 Rate limit reached for gpt-4o-mini");
+        const pieces = body.response_format.json_schema.name === "piece_choice";
+        if (/\bfail\b/.test(rule) || (pieces && /piecefail/.test(rule))) throw new Error("429 Rate limit reached for gpt-4o-mini");
         const words = new Set(rule.split(/[^a-z]+/).filter((w) => w.length > 2));
+        const stems = new Set(
+          [...words].filter((w) => !SMALL.has(w)).flatMap((w) => FAMILIES[stem(w)] || [stem(w)]),
+        );
         const keep = [];
+        const mixed = [];
         const drop = [];
-        for (const m of text.matchAll(/^(\d+)\. (".*") \S+$/gm)) {
+        for (const m of text.matchAll(/^(\d+)\. (".*") (\S+)$/gm)) {
           const label = JSON.parse(m[2]).toLowerCase();
-          (label.split(/[^a-z]+/).some((w) => words.has(w)) ? keep : drop).push(Number(m[1]));
+          const n = Number(m[1]);
+          if (pieces) {
+            const seen = `${label} ${m[3].toLowerCase()}`.split(/[^a-z]+/).map(stem);
+            (seen.some((w) => stems.has(w)) ? keep : drop).push(n);
+          } else if (label.split(/[^a-z]+/).some((w) => words.has(w))) keep.push(n);
+          else if (BROAD.has(label)) mixed.push(n);
+          else drop.push(n);
         }
         return {
-          choices: [{ message: { content: JSON.stringify({ keep, drop }) } }],
+          choices: [{ message: { content: JSON.stringify(pieces ? { keep, drop } : { keep, mixed, drop }) } }],
           usage: { prompt_tokens: 500, completion_tokens: 20 },
         };
       },
     },
   },
 };
+
+/** The route's `aiModel`: a rule with LIMIT in it stands for a month's cap spent, and nothing is asked. */
+const LIMIT_SPENT = {
+  error: "this month's AI limit is spent ($5.00 of $5.00); raise it in Goo Studio → AI check",
+  limit: true,
+};
+const capSpent = (rule) => /\blimit\b/i.test(String(rule || ""));
 
 /**
  * A rate provider that answers the same thing every time.
@@ -266,6 +294,8 @@ const server = http.createServer(async (req, res) => {
       finalUrl: body.finalUrl,
       categoryRule: body.categoryRule,
       categories: Array.isArray(body.categories) ? body.categories.map((c) => c && c.url) : undefined,
+      pieceRule: body.pieceRule,
+      pieces: Array.isArray(body.pieces) ? body.pieces.map((x) => [x && x.url, x && x.name]) : undefined,
     });
 
     if (body.action === "ingest") {
@@ -354,17 +384,45 @@ const server = http.createServer(async (req, res) => {
         seen: body.seen || [],
         limit: Number(body.limit) || 60,
       });
-      // The route's question, asked the route's way (`chooseCategories`).
+      // The route's questions, asked the route's way (`chooseCategories`, `choosePieces`).
+      const store = new URL(body.url).hostname;
       const question = readCategoryQuestion(body);
       let categoryChoice = null;
-      if (question) {
+      if (question && capSpent(question.rule)) categoryChoice = LIMIT_SPENT;
+      else if (question) {
         try {
-          categoryChoice = await pickCategories({ ...question, store: new URL(body.url).hostname, model: "gpt-4o-mini", client: STAND_IN_MODEL });
+          const { usage, ...choice } = await pickCategories({ ...question, store, model: "gpt-4o-mini", client: STAND_IN_MODEL });
+          categoryChoice = choice;
         } catch (e) {
           categoryChoice = { error: e.message };
         }
       }
-      return json(200, { ok: true, ...plan, ...(categoryChoice ? { categoryChoice } : {}) });
+      const pieceQuestion = readPieceQuestion(body);
+      let pieces = null;
+      if (pieceQuestion && plan.urls.length) {
+        if (capSpent(pieceQuestion.rule)) pieces = { urls: plan.urls, choice: LIMIT_SPENT };
+        else {
+          try {
+            const { urls, usage, ...choice } = await pickPieces({
+              ...pieceQuestion,
+              store,
+              urls: plan.urls,
+              sitemaps: body.sitemaps || [],
+              model: "gpt-4o-mini",
+              client: STAND_IN_MODEL,
+            });
+            pieces = { urls, choice };
+          } catch (e) {
+            pieces = { urls: plan.urls, choice: { error: e.message } };
+          }
+        }
+      }
+      return json(200, {
+        ok: true,
+        ...plan,
+        ...(pieces ? { urls: pieces.urls, pieceChoice: pieces.choice } : {}),
+        ...(categoryChoice ? { categoryChoice } : {}),
+      });
     } catch (e) {
       return json(500, { error: e.message });
     }

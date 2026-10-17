@@ -44,10 +44,12 @@ export function listingStep(opts) {
   // `reset` starts a run afresh. What a page remembers lives as long as the
   // page does, so without it a second run on the same tab, unreloaded, took
   // the cards the first one had seen for old news and never reported them.
-  if (o.reset || !globalThis.__gooListing) {
-    globalThis.__gooListing = { seen: new Set(), dead: new WeakSet() };
+  if (o.reset || !globalThis.__gooListing || !globalThis.__gooListing.names) {
+    globalThis.__gooListing = { seen: new Set(), names: new Set(), dead: new WeakSet() };
   }
   const st = globalThis.__gooListing;
+  /** Names found by this step, by address: the card's text, for the AI's choice of pieces. */
+  const named = {};
 
   /** An address on this store, without its fragment, or "". */
   const resolve = (href) => {
@@ -63,6 +65,39 @@ export function listingStep(opts) {
   };
 
   /**
+   * What a card calls its piece: the link's own text, else its label, else
+   * the alt text of its photo. A card often links twice, photo then title, so
+   * the first of its links with any text names it. Its text nodes are read
+   * one by one and joined with spaces, so a title and a price in two blocks
+   * do not run together; not `innerText`, which would lay the page out on
+   * every link several times a second.
+   */
+  const textIn = (el) => {
+    const parts = [];
+    let size = 0;
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node && size < 200; node = walker.nextNode()) {
+      const tag = node.parentNode && node.parentNode.nodeName;
+      if (tag === "SCRIPT" || tag === "STYLE" || tag === "TEMPLATE") continue;
+      const t = node.nodeValue.replace(/\s+/g, " ").trim();
+      if (t) {
+        parts.push(t);
+        size += t.length + 1;
+      }
+    }
+    return parts.join(" ");
+  };
+  const nameOf = (el) => {
+    let text = textIn(el);
+    if (!text) text = (el.getAttribute("aria-label") || el.getAttribute("title") || "").trim();
+    if (!text) {
+      const img = el.querySelector ? el.querySelector("img[alt]") : null;
+      text = img ? (img.getAttribute("alt") || "").trim() : "";
+    }
+    return text.slice(0, 160);
+  };
+
+  /**
    * Every address the page offers: ordinary links, links inside web
    * components (their open shadow roots are invisible to a plain query), and
    * cards that are clickable boxes carrying the address in `data-href` or
@@ -70,19 +105,27 @@ export function listingStep(opts) {
    */
   const harvest = () => {
     const out = [];
-    const note = (href) => {
+    const note = (href, el) => {
       const url = resolve(href);
-      if (url && !st.seen.has(url)) {
+      if (!url) return;
+      if (!st.seen.has(url)) {
         st.seen.add(url);
         out.push(url);
+      }
+      if (!st.names.has(url)) {
+        const name = nameOf(el);
+        if (name) {
+          st.names.add(url);
+          named[url] = name;
+        }
       }
     };
     const roots = [document];
     for (let i = 0; i < roots.length && i < 2000; i++) {
       const root = roots[i];
-      for (const a of root.querySelectorAll("a[href], area[href]")) note(a.getAttribute("href"));
+      for (const a of root.querySelectorAll("a[href], area[href]")) note(a.getAttribute("href"), a);
       for (const el of root.querySelectorAll("[data-href], [data-url], [data-link]")) {
-        note(el.getAttribute("data-href") || el.getAttribute("data-url") || el.getAttribute("data-link"));
+        note(el.getAttribute("data-href") || el.getAttribute("data-url") || el.getAttribute("data-link"), el);
       }
       for (const el of root.querySelectorAll("*")) if (el.shadowRoot) roots.push(el.shadowRoot);
     }
@@ -116,6 +159,7 @@ export function listingStep(opts) {
     url: location.href,
     visible: document.visibilityState === "visible",
     links: harvest(),
+    names: named,
     head: null,
     grew: false,
     clicked: "",
@@ -412,4 +456,23 @@ export function planHtml(heads, links) {
   }
   const body = links.map((u) => `<a href="${attr(u)}"></a>`);
   return `<!doctype html><html><head>${head.join("\n")}</head><body>\n${body.join("\n")}\n</body></html>`;
+}
+
+/** Names one plan call carries (`MAX_PIECE_NAMES` in pick-pieces.ts). */
+export const PLAN_NAMES = 2_000;
+
+/**
+ * The names the walk read off the cards, for the links sent in one plan call:
+ * `{url, name}` in link order, links without a name left out. The planner
+ * asks the AI about the pieces by these names (`pick-pieces.ts`).
+ */
+export function planPieces(links, names) {
+  const out = [];
+  if (!names) return out;
+  for (const url of links) {
+    const name = names.get(url);
+    if (name) out.push({ url, name });
+    if (out.length >= PLAN_NAMES) break;
+  }
+  return out;
 }

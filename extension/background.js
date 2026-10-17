@@ -38,7 +38,7 @@
  */
 
 import { sitemapPieces, takePieces, queuedBytes, PLAN_SITEMAP_BUDGET, PLAN_SITEMAP_DOCS } from "./sitemap-pieces.js";
-import { listingStep, robotsRules, robotsAllows, planHtml } from "./listing.js";
+import { listingStep, robotsRules, robotsAllows, planHtml, planPieces } from "./listing.js";
 import {
   menuStep,
   categoryCandidates,
@@ -1185,6 +1185,8 @@ function navigate(tabId, url) {
 async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly, site = null) {
   const links = [];
   const known = new Set();
+  /** What each card called its piece, by address: sent to the planner with the links. */
+  const names = new Map();
   const heads = [];
   let ldSize = 0;
   const visited = new Set([startUrl.split("#")[0]]);
@@ -1207,7 +1209,7 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly, 
     handed = links.length;
     headsHanded = heads.length;
     const t0 = Date.now();
-    const ok = await site.onBatch(chunk, newHeads, [...visited].map(pagePath));
+    const ok = await site.onBatch(chunk, newHeads, [...visited].map(pagePath), names);
     // Collecting is not walking: the clock and the wait for the tab start
     // again where they were.
     started += Date.now() - t0;
@@ -1309,6 +1311,7 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly, 
       known.add(url);
       links.push(url);
     }
+    for (const [url, name] of Object.entries(res.names || {})) if (!names.has(url)) names.set(url, name);
     if (first) {
       first = false;
       const opening = initial < 0;
@@ -1341,7 +1344,7 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly, 
           (u) => pagePath(u) !== here,
         );
         if (looked.ok && others.length < GRID_MIN) {
-          return { links, heads, pages, partial, note, product: true, seenTab, walked: [here] };
+          return { links, names, heads, pages, partial, note, product: true, seenTab, walked: [here] };
         }
       }
     }
@@ -1406,7 +1409,7 @@ async function walkListing(tabId, startUrl, limit, rules, robotsTxt, linksOnly, 
   // Back where the admin started, rather than on the listing's last page. A
   // whole-store run goes on to its next category instead.
   if (pages > 1 && !site) chrome.tabs.update(tabId, { url: startUrl }).catch(() => {});
-  return { links, heads, pages, partial, note, product: false, halted, unseen, seenTab, walked: [...visited].map(pagePath) };
+  return { links, names, heads, pages, partial, note, product: false, halted, unseen, seenTab, walked: [...visited].map(pagePath) };
 }
 
 /**
@@ -1447,6 +1450,7 @@ async function runPage({ tabId, storeUrl, limit, linksOnly = false }) {
   const planned = await askPage("plan", {
     url: storeUrl,
     html: planHtml(walk.heads, walk.links),
+    pieces: planPieces(walk.links, walk.names),
     robotsTxt,
     sitemaps: [],
     seen: [],
@@ -1890,10 +1894,11 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
   };
 
   /** What a category's walk hands over: planned a chunk at a time, then collected. */
-  const walkBatch = (cat) => async (chunk, heads, walked) => {
+  const walkBatch = (cat) => async (chunk, heads, walked, names) => {
     const listing = new Set(walked);
     for (let i = 0; i < chunk.length; i += PLAN_LINKS) {
-      const data = await plan({ url: cat.url, html: planHtml(i === 0 ? heads : [], chunk.slice(i, i + PLAN_LINKS)) });
+      const links = chunk.slice(i, i + PLAN_LINKS);
+      const data = await plan({ url: cat.url, html: planHtml(i === 0 ? heads : [], links), pieces: planPieces(links, names) });
       if (!data) return false;
       const urls = (Array.isArray(data.urls) ? data.urls : []).filter(
         (u) => !listing.has(pagePath(u)) && !categoryPaths.has(pagePath(u)),
