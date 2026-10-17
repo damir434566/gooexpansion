@@ -398,6 +398,15 @@ export class SeenStore {
     await this.tx("readwrite", (store) => void store.put(1, url));
   }
 
+  /** Many at once, in one transaction: the pieces AI left out of a plan. */
+  async addAll(urls) {
+    await this.open();
+    const list = (urls || []).filter((u) => typeof u === "string" && u);
+    if (this.memory) return void list.forEach((u) => this.memory.add(u));
+    if (!list.length) return;
+    await this.tx("readwrite", (store) => void list.forEach((u) => store.put(1, u)));
+  }
+
   /** The addresses not opened yet, each once, in the order given. */
   async fresh(urls) {
     await this.open();

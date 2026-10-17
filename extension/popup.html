@@ -11,7 +11,7 @@
       <p class="sub" id="store">Reading this tab…</p>
     </header>
 
-    <section class="rows">
+    <section class="rows" id="rows">
       <label class="row check" for="all">
         <span>
           Everything on this page
@@ -39,7 +39,7 @@
       </label>
     </section>
 
-    <div class="actions">
+    <div class="actions" id="pageActions">
       <button id="start" class="primary">Collect this page</button>
       <button id="stop" class="ghost" hidden>Stop</button>
     </div>
@@ -68,6 +68,21 @@
       </p>
     </section>
 
+    <section id="pick" class="pick" hidden>
+      <p class="found" id="pickFound"></p>
+      <p class="small" id="pickRule"></p>
+      <div class="chips">
+        <button type="button" class="chip on" id="showTaking" aria-pressed="true">Taking 0</button>
+        <button type="button" class="chip" id="showSkipped" aria-pressed="false">Show skipped 0</button>
+      </div>
+      <div class="list" id="pickList"></div>
+      <div class="stack">
+        <button id="pickGo" class="primary">Collect 0 categories</button>
+        <button id="pickCancel" class="ghost">Cancel</button>
+        <p class="small" id="pickHint"></p>
+      </div>
+    </section>
+
     <section id="progress" class="progress" hidden>
       <div class="bar"><div id="fill"></div></div>
       <p class="found" id="found" hidden></p>
@@ -78,6 +93,7 @@
         <span class="warn" id="skipped"></span>
         <span class="warn" id="failed"></span>
       </p>
+      <p class="ai" id="aiSkipped" hidden></p>
       <p class="pace" id="pace"></p>
       <button id="retry" class="ghost retry" hidden>Retry failed</button>
     </section>

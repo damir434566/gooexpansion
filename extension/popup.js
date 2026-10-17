@@ -41,6 +41,7 @@ const el = {
   updated: document.getElementById("updated"),
   skipped: document.getElementById("skipped"),
   failed: document.getElementById("failed"),
+  aiSkipped: document.getElementById("aiSkipped"),
   pace: document.getElementById("pace"),
   retry: document.getElementById("retry"),
   note: document.getElementById("note"),
@@ -49,6 +50,17 @@ const el = {
   resume: document.getElementById("resume"),
   siteHint: document.getElementById("siteHint"),
   rule: document.getElementById("rule"),
+  rows: document.getElementById("rows"),
+  pageActions: document.getElementById("pageActions"),
+  pick: document.getElementById("pick"),
+  pickFound: document.getElementById("pickFound"),
+  pickRule: document.getElementById("pickRule"),
+  showTaking: document.getElementById("showTaking"),
+  showSkipped: document.getElementById("showSkipped"),
+  pickList: document.getElementById("pickList"),
+  pickGo: document.getElementById("pickGo"),
+  pickCancel: document.getElementById("pickCancel"),
+  pickHint: document.getElementById("pickHint"),
 };
 
 const SITE_HINT = el.siteHint.textContent.replace(/\s+/g, " ").trim();
@@ -60,10 +72,14 @@ let activeTabId = null;
 let lastRun = null;
 /** The last whole-store run, as far as it got: what Resume picks up. */
 let savedSite = null;
+/** Ticks changed in the list since the popup opened: a read begun before one is stale. */
+let pickEdits = 0;
 
 async function readSavedSite() {
+  const edits = pickEdits;
   try {
     const { siteRun } = await chrome.storage.local.get("siteRun");
+    if (edits !== pickEdits) return;
     savedSite = siteRun && typeof siteRun === "object" && Array.isArray(siteRun.categories) ? siteRun : null;
   } catch {
     savedSite = null;
@@ -340,6 +356,117 @@ function unfinished() {
   return !!savedSite && savedSite.stage !== "done" && hostOf(savedSite.store) === hostOf(activeUrl);
 }
 
+// ── AI's choice of categories, before a whole-store run walks ───────────────
+
+const PICK_HINT =
+  "Inside them AI checks every piece by its name before opening it, and the store's sitemaps go through the same check at the end.";
+/** Which half of the list is shown: what AI took, or what it left out. */
+let pickView = "taking";
+/** The list as last drawn, so the poll does not redraw it under the admin's pointer. */
+let pickKey = "";
+
+/** A whole-store run of this store waiting for its categories to be confirmed. */
+function picking(running) {
+  return (
+    !running &&
+    !!savedSite &&
+    savedSite.stage === "pick" &&
+    Array.isArray(savedSite.pick) &&
+    hostOf(savedSite.store) === hostOf(activeUrl)
+  );
+}
+
+/** "/men/shoes/cat/?cid=4209" */
+function pathOf(url) {
+  try {
+    const u = new URL(url);
+    return `${u.pathname}${u.search}`;
+  } catch {
+    return url;
+  }
+}
+
+function pickRow(item, index) {
+  const row = document.createElement("label");
+  row.className = item.keep ? "item" : "item off";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = !!item.keep;
+  box.dataset.index = String(index);
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = item.label || pathOf(item.url);
+  const path = document.createElement("span");
+  path.className = "path";
+  path.textContent = pathOf(item.url);
+  name.append(path);
+  const tag = document.createElement("span");
+  tag.className = "tag";
+  tag.textContent = item.mixed ? "mixed" : "";
+  row.append(box, name, tag);
+  return row;
+}
+
+/** The list, the counts on the chips and the button, and why AI could not choose. */
+function renderPick() {
+  const run = savedSite;
+  const items = run.pick;
+  const byAi = items.filter((p) => p.ai).length;
+  const ticked = items.filter((p) => p.keep).length;
+  const failed = !run.rule;
+  el.pickFound.textContent = failed
+    ? `All ${num(items.length)} of the menu's categories`
+    : `AI picked ${num(byAi)} of the menu's ${num(items.length)} categories`;
+  el.pickRule.textContent = run.askedRule ? `Rule: «${run.askedRule}»` : "";
+  el.showTaking.textContent = `Taking ${num(byAi)}`;
+  el.showSkipped.textContent = `Show skipped ${num(items.length - byAi)}`;
+  el.showTaking.classList.toggle("on", pickView === "taking");
+  el.showSkipped.classList.toggle("on", pickView === "skipped");
+  el.showTaking.setAttribute("aria-pressed", String(pickView === "taking"));
+  el.showSkipped.setAttribute("aria-pressed", String(pickView === "skipped"));
+  el.pickGo.textContent = `Collect ${num(ticked)} ${ticked === 1 ? "category" : "categories"}`;
+  el.pickGo.disabled = !ticked;
+
+  const changed = items.filter((p) => !!p.keep !== !!p.ai);
+  el.pickHint.textContent = !changed.length
+    ? PICK_HINT
+    : changed.length === 1
+      ? `You ${changed[0].keep ? "ticked" : "unticked"} ${changed[0].label || pathOf(changed[0].url)} yourself: ${num(ticked)} ${
+          ticked === 1 ? "category" : "categories"
+        } now.`
+      : `You changed ${changed.length} of AI's choices: ${num(ticked)} ${ticked === 1 ? "category" : "categories"} now.`;
+
+  const shown = items.map((p, i) => [p, i]).filter(([p]) => (pickView === "taking" ? p.ai : !p.ai));
+  const key = JSON.stringify([pickView, shown.map(([p, i]) => [i, !!p.keep])]);
+  if (key !== pickKey) {
+    pickKey = key;
+    if (shown.length) el.pickList.replaceChildren(...shown.map(([p, i]) => pickRow(p, i)));
+    else {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = pickView === "taking" ? "AI took none of them." : "AI left none out.";
+      el.pickList.replaceChildren(empty);
+    }
+  }
+
+  note(
+    failed
+      ? `AI could not choose (${run.aiWhy || "it did not answer"}). Every category is ticked and pieces will not be checked by name. Untick what you don't want, or Cancel and fix the cause.`
+      : "",
+  );
+}
+
+/** The popup while a run waits on the list: only the list and its two buttons. */
+function showPick(on) {
+  el.pick.hidden = !on;
+  el.rows.hidden = on;
+  el.pageActions.hidden = on;
+  if (on) {
+    el.whole.hidden = true;
+    el.progress.hidden = true;
+  }
+}
+
 // ── Display ──────────────────────────────────────────────────────────────────
 
 /** "214", or "at least 214" when a run that asked for a few stopped looking early. */
@@ -358,6 +485,23 @@ function showCounts(counts) {
 /** "3,412" */
 function num(n) {
   return Number(n || 0).toLocaleString("en-US");
+}
+
+/** "AI skipped 3,417 pieces that don't fit the rule", the number in bold. */
+function showAiSkipped(site) {
+  const n = site ? site.aiSkipped || 0 : 0;
+  el.aiSkipped.hidden = !n;
+  if (!n) return;
+  const count = document.createElement("b");
+  count.textContent = num(n);
+  el.aiSkipped.replaceChildren("AI skipped ", count, ` ${n === 1 ? "piece that doesn't" : "pieces that don't"} fit the rule`);
+}
+
+/** Why AI is not choosing for the run: the month's limit, an error. Said where it cannot be missed. */
+function siteWarning(site) {
+  if (site.aiWarn) return site.aiWarn;
+  // The rule was not applied to the categories.
+  return site.aiFailed && site.ai ? site.ai : "";
 }
 
 /** Where a whole-store run is, in a line. */
@@ -426,6 +570,12 @@ function render(state) {
   el.stop.hidden = !running;
   el.start.disabled = running || !/^https?:/i.test(activeUrl);
   showResume(running);
+  const pickNow = picking(running);
+  showPick(pickNow);
+  if (pickNow) {
+    renderPick();
+    return;
+  }
 
   // A worker that has slept since its last run remembers nothing; what that
   // run came to was kept for exactly this.
@@ -436,9 +586,12 @@ function render(state) {
   if (!shown) return;
 
   const listing = running && shown.phase === "listing";
+  showAiSkipped(shown.site);
   if (shown.site) {
     renderSite(shown, running, listing);
     finishRender(shown, running);
+    const warning = siteWarning(shown.site);
+    if (warning && (running || shown.phase === "done")) note(warning);
     return;
   }
   const pct = shown.planned ? Math.min(100, Math.round((shown.done / shown.planned) * 100)) : 0;
@@ -486,8 +639,6 @@ function renderSite(shown, running, listing) {
       : `One page every ${((shown.delayMs || 1500) / 1000).toFixed(1)}s or slower`;
     const rate = siteRate(shown);
     el.pace.textContent = shown.message || (rate ? `${pace} · ${rate}` : pace);
-    // The rule was not applied: said where it cannot be missed.
-    if (shown.site.aiFailed && shown.site.ai) note(shown.site.ai);
   } else {
     el.pace.textContent = shown.message && shown.phase !== "halted" ? shown.message : "";
   }
@@ -541,6 +692,49 @@ el.resume.addEventListener("click", () => {
     note(err?.message ?? "Could not resume.");
     el.resume.disabled = false;
   });
+});
+
+el.showTaking.addEventListener("click", () => {
+  pickView = "taking";
+  if (picking(false)) renderPick();
+});
+
+el.showSkipped.addEventListener("click", () => {
+  pickView = "skipped";
+  if (picking(false)) renderPick();
+});
+
+// A tick is kept as it is made: a popup closed and opened again finds it.
+el.pickList.addEventListener("change", (event) => {
+  const box = event.target;
+  if (!(box instanceof HTMLInputElement) || !savedSite || !Array.isArray(savedSite.pick)) return;
+  const item = savedSite.pick[Number(box.dataset.index)];
+  if (!item) return;
+  item.keep = box.checked;
+  box.closest(".item")?.classList.toggle("off", !box.checked);
+  pickEdits++;
+  chrome.storage.local.set({ siteRun: savedSite }).catch(() => {});
+  renderPick();
+});
+
+el.pickGo.addEventListener("click", () => {
+  el.pickGo.disabled = true;
+  startSite(true).catch((err) => {
+    note(err?.message ?? "Could not start.");
+    el.pickGo.disabled = false;
+  });
+});
+
+el.pickCancel.addEventListener("click", async () => {
+  el.pickCancel.disabled = true;
+  await send("site-cancel");
+  pickEdits++;
+  savedSite = null;
+  lastRun = null;
+  pickKey = "";
+  el.pickCancel.disabled = false;
+  note("");
+  render(await send("state"));
 });
 
 el.retry.addEventListener("click", async () => {
