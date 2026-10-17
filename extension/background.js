@@ -19,7 +19,13 @@
  *
  *   - robots.txt is obeyed. The server applies it; nothing here can override it.
  *   - Between pages, the store's own Crawl-delay, never faster than 1.5s, plus
- *     a random spread so the pattern does not read as clockwork.
+ *     a random spread so the pattern does not read as clockwork. Counted from
+ *     one page request to the next, as Crawl-delay is meant; up to 1.2.0 it
+ *     was counted from when the last page had been read, and the store saw a
+ *     page every seven seconds while our own reading took five of them.
+ *   - One page at a time, never two tabs on the store at once.
+ *   - After one refusal, a rest and then half the pace for the next twenty
+ *     pages: a store that has started to push back is given room.
  *   - A ten-second rest every twenty pages, because a steady rate held for an
  *     hour is what a rate limiter is built to notice.
  *   - Two refusals in a row and the run stops and says so. One refusal can be a
@@ -56,6 +62,13 @@ const REST_EVERY = 20;
 const REST_MS = 10_000;
 /** Consecutive refusals that end the run. */
 const REFUSAL_LIMIT = 2;
+/** Pages after a refusal that go at half the pace. */
+const CAREFUL_PAGES = 20;
+/**
+ * Added to every pause, so the store's own clock sees the whole gap however
+ * long the request takes to leave the browser.
+ */
+const PACE_MARGIN_MS = 100;
 /**
  * Statuses counted as the store refusing us.
  *
@@ -116,6 +129,8 @@ const state = {
   foundAtLeast: false,
   /** While the page is walked: pages opened and links seen so far. */
   listing: null,
+  /** Pages still to go at half the pace after a refusal. */
+  careful: 0,
   /**
    * A whole-store run's place in the store: which stage (the menu, the
    * categories, the sitemaps), which category of how many, how many
@@ -181,10 +196,33 @@ function wakeAll() {
   for (const entry of [...sleepers]) entry.resolve();
 }
 
-/** The store's pace plus a spread, so the rhythm is not machine-flat. */
+/** When a page of the store was last asked for: the pause is counted from there. */
+let lastStorePage = 0;
+/** When the run last finished a rest: the pause after a rest comes on top of it. */
+let restedAt = 0;
+
+/** A rest, after which the next page still waits its full pause. */
+async function restFor(ms) {
+  await sleep(ms);
+  restedAt = Date.now();
+}
+
+/** Say a page of the store is being asked for now. */
+function storePageNow() {
+  lastStorePage = Date.now();
+  if (state.careful > 0) state.careful--;
+}
+
+/**
+ * The store's pace plus a spread, so the rhythm is not machine-flat, from the
+ * last page asked for. Reading that page and handing it to the site happen
+ * inside the pause rather than on top of it; the store sees the same gap
+ * between its pages either way. Half the pace while the run is careful.
+ */
 function politePause() {
-  const base = Math.max(state.delayMs, MIN_DELAY_MS);
-  return sleep(base + Math.random() * base * JITTER);
+  const base = Math.max(state.delayMs, MIN_DELAY_MS) * (state.careful > 0 ? 2 : 1);
+  const gap = base + Math.random() * base * JITTER + PACE_MARGIN_MS;
+  return sleep(Math.max(0, gap - (Date.now() - Math.max(lastStorePage, restedAt))));
 }
 
 // ── Talking to the collect tab ───────────────────────────────────────────────
@@ -546,6 +584,72 @@ function waitForLoad(tabId) {
   });
 }
 
+/** Scroll steps down a piece's page, and the pause after each. */
+const WALK_STEPS = 4;
+const WALK_STEP_MS = 150;
+/**
+ * From the first scroll, how long a piece's page is given before it is read.
+ * Its own lazy loaders run on timers that a background tab holds to one a
+ * second, so a second and a little lets each of them fire once.
+ */
+const WALK_SETTLE_MS = 1_100;
+
+/**
+ * Scroll a piece's page down and back, so lazy images commit to a real `src`,
+ * then mark it walked for snapshot.js.
+ *
+ * snapshot.js used to do this itself, pausing a fifth of a second between
+ * steps. In a background tab Chrome holds a page's timers to one a second,
+ * so those pauses took about five seconds a piece: most of the seven a piece
+ * took, and none of it time the store saw. From here the pauses are the
+ * worker's, which Chrome does not hold. A page that fits on one screen is
+ * only given SETTLE_MS, as before.
+ */
+async function walkPiece(tabId) {
+  const started = Date.now();
+  const step = async (i) => {
+    try {
+      const [out] = await withTimeout(
+        chrome.scripting.executeScript({
+          target: { tabId },
+          func: (n, steps) => {
+            const height = document.body ? document.body.scrollHeight : 0;
+            if (height <= window.innerHeight) return false;
+            window.scrollTo(0, n >= steps ? 0 : (height / steps) * (n + 1));
+            return true;
+          },
+          args: [i, WALK_STEPS],
+        }),
+        2_000,
+        [],
+      );
+      return out?.result === true;
+    } catch {
+      return false;
+    }
+  };
+  let scrolled = false;
+  for (let i = 0; i < WALK_STEPS && !state.stopped; i++) {
+    if (!(await step(i))) break;
+    scrolled = true;
+    await sleep(WALK_STEP_MS);
+  }
+  if (scrolled) await step(WALK_STEPS);
+  const rest = (scrolled ? WALK_SETTLE_MS : SETTLE_MS) - (Date.now() - started);
+  if (rest > 0 && !state.stopped) await sleep(rest);
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (done) => {
+        globalThis.__gooWalked = done;
+      },
+      args: [scrolled],
+    });
+  } catch {
+    /* the read finds out for itself */
+  }
+}
+
 /**
  * Open one page, let it render, take the DOM, close the tab.
  *
@@ -556,6 +660,7 @@ function waitForLoad(tabId) {
 async function snapshotPage(url) {
   let tab;
   try {
+    storePageNow();
     tab = await chrome.tabs.create({ url, active: false });
   } catch (err) {
     return { error: err?.message ?? "Could not open a tab" };
@@ -573,12 +678,11 @@ async function snapshotPage(url) {
     if (status >= 400) return { error: `HTTP ${status}`, status };
     if (!page.ok) return { error: page.error };
 
-    await sleep(SETTLE_MS);
-    if (state.stopped) return { error: "Stopped" };
-
     // A page whose scripts lock it up would hold the read, and the run with
     // it, for as long as it liked. Closing the tab ends the read below.
     const read = async () => {
+      await walkPiece(tabId);
+      if (state.stopped) return { ok: false, error: "Stopped" };
       const [injected] = await withTimeout(
         chrome.scripting.executeScript({ target: { tabId }, files: ["snapshot.js"] }),
         READ_TIMEOUT_MS,
@@ -595,7 +699,6 @@ async function snapshotPage(url) {
       await sleep(CHECK_WAIT_MS);
       if (state.stopped) return { error: "Stopped" };
       await waitForPage(tabId);
-      await sleep(SETTLE_MS);
       result = await read();
       if (result && result.ok && result.botCheck) {
         return { refused: true, status, check: String(result.botCheck).slice(0, 80) };
@@ -686,6 +789,7 @@ function begin(storeUrl, linksOnly, phase) {
     foundAtLeast: false,
     listing: null,
     site: null,
+    careful: 0,
     counts: { new: 0, updated: 0, skipped: 0, failed: 0 },
     failures: [],
     delayMs: MIN_DELAY_MS,
@@ -855,6 +959,15 @@ async function collect(urls, ctx) {
         ctx.refusals++;
         state.done++;
         failedUnseen(url, snap.check ? `the store showed a bot check ("${snap.check}")` : `the store refused it (HTTP ${snap.status})`);
+        if (ctx.refusals < REFUSAL_LIMIT) {
+          // One refusal can be a bad page, or the store starting to push
+          // back. A rest, then half the pace for a while.
+          state.careful = CAREFUL_PAGES;
+          const said = state.message;
+          state.message = "The store refused a page: resting, then going slower for a while…";
+          await restFor(REST_MS);
+          state.message = said;
+        }
         if (ctx.refusals >= REFUSAL_LIMIT) {
           await settle();
           halt(
@@ -886,7 +999,7 @@ async function collect(urls, ctx) {
         ctx.sinceRest = 0;
         const said = state.message;
         state.message = "Resting so the store does not notice a rhythm…";
-        await sleep(REST_MS);
+        await restFor(REST_MS);
         state.message = said;
       }
     }
@@ -1050,6 +1163,7 @@ function navigate(tabId, url) {
     chrome.tabs.onUpdated.addListener(onUpdated);
     const timer = setTimeout(() => done(started), PAGE_TIMEOUT_MS);
     mainFrameStatus.delete(tabId);
+    storePageNow();
     chrome.tabs.update(tabId, { url }).catch(() => done(false));
   });
 }
@@ -1586,6 +1700,7 @@ async function storeTab(tabId, host, url) {
   const tab = Number.isInteger(tabId) ? await chrome.tabs.get(tabId).catch(() => null) : null;
   if (tab && tab.url && hostOf(tab.url) === host) return { id: tab.id, opened: false };
   try {
+    storePageNow();
     const made = await chrome.tabs.create({ url, active: true });
     await waitForLoad(made.id);
     return { id: made.id, opened: true };

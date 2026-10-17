@@ -7,6 +7,9 @@
  *   check  — every product answers 200 with a bot check (Akamai's "Access Denied")
  *   soldout — "beta" is sold out: its address redirects to a category
  *   many   — 21 products, no Crawl-delay (so the 1.5s floor applies)
+ *   wary   — the same 21, and p4 answers 403 the first time it is opened: one
+ *            refusal, not two, which the run should take as a reason to slow
+ *            down rather than to stop
  *   spa    — two pages built the way a single-page storefront builds them:
  *            the gallery lives in a hydration payload rather than in markup,
  *            and one of them never states its currency outside rendered text
@@ -61,7 +64,7 @@ const SPA_PATHS = [
 ];
 
 function products() {
-  if (mode === "many") return Array.from({ length: 21 }, (_, i) => `p${i + 1}`);
+  if (mode === "many" || mode === "wary") return Array.from({ length: 21 }, (_, i) => `p${i + 1}`);
   if (mode === "page") return Array.from({ length: PAGE_TOTAL }, (_, i) => `jacket-${i + 1}`);
   if (mode === "slow") return ["s1", "s2", "s3", "s4", "s5", "s6", "s7"];
   if (mode === "site") return SITE_PIECES;
@@ -340,7 +343,7 @@ function robots() {
   const lines = ["User-agent: Googlebot", "Disallow:", "", "User-agent: *"];
   // A path the run must never open. If it does, the test fails loudly.
   lines.push("Disallow: /product/secret-");
-  if (!["many", "spa", "bigmap", "page", "slow", "site"].includes(mode)) lines.push("Crawl-delay: 2");
+  if (!["many", "wary", "spa", "bigmap", "page", "slow", "site"].includes(mode)) lines.push("Crawl-delay: 2");
   lines.push("", `Sitemap: ${ORIGIN}/sitemap.xml`);
   return lines.join("\n") + "\n";
 }
@@ -647,6 +650,10 @@ const server = http.createServer((req, res) => {
 
   if (p.startsWith("/product/")) {
     if (mode === "refuse") return send(403, "text/html", "<html><body>Go away</body></html>");
+    if (mode === "wary" && p === "/product/p4" && !flakyServed.has(p)) {
+      flakyServed.add(p);
+      return send(403, "text/html", "<html><body>Slow down</body></html>");
+    }
     if (mode === "check") {
       return send(
         200,
