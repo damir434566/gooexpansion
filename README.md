@@ -768,8 +768,9 @@
 > — ошибка выбора). Сквозные W3 (правило «Coats and sale only»: Knitwear не
 > открыт, сайтмапы не тронуты, 13 вещей) и W3b (модель отвечает 429: все пять
 > категорий, жёлтая плашка). Модель в заглушке Студии подменена; всё вокруг
-> неё — настоящий `pick-categories.ts`. На сайте: `tsc --noEmit` — 0 ошибок,
-> ESLint по изменённым файлам и по `extension/` — чисто.
+> неё — настоящий `pick-categories.ts`. Сквозной на 1.2.0 против `goo-fashion`
+> @ `12c5cdc` — 185/185 (173 прежних и 12 в W3, W3b). На сайте: `tsc --noEmit`
+> — 0 ошибок, ESLint по изменённым файлам и по `extension/` — чисто.
 
 Здесь три круга работы:
 
@@ -1047,7 +1048,7 @@ node verification/test-site.js                               # 73/73  весь �
 node verification/test-pick-categories.js                    # 29/29  ИИ выбирает категории по правилу (модель подменена)
 node verification/store.js &                                 # фиктивный магазин
 node verification/studio.js &                                # заглушка Студии
-CHROME_PATH=/usr/bin/google-chrome node verification/run.js   # 173/173 сквозной прогон (с W и W2 — весь магазин)
+CHROME_PATH=/usr/bin/google-chrome node verification/run.js   # 185/185 сквозной прогон (с W–W3b — весь магазин и ИИ)
 ```
 
 Скомпилированный код сайта подтягивает `openai`, `@supabase/supabase-js`,
