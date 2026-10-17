@@ -1732,12 +1732,15 @@ function awaitPick() {
   void saveLastRun();
 }
 
+/** What the list adds to a category, taken off again once the walk has it. */
+const PICK_MARKS = new Set(["ai", "mixed", "keep"]);
+
 /**
  * The admin's ticks become the run's categories. When they changed AI's
  * choice, the note that stays in view at the first category says so.
  */
 function applyPick(run) {
-  const strip = ({ ai, mixed, keep, ...category }) => category;
+  const strip = (p) => Object.fromEntries(Object.entries(p).filter(([k]) => !PICK_MARKS.has(k)));
   const ticked = run.pick.filter((p) => p.keep);
   const changed = run.pick.filter((p) => p.keep !== p.ai).length;
   run.categories = [run.categories[0], ...ticked.map(strip)];
