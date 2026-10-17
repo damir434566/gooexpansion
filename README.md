@@ -811,7 +811,7 @@
 > Тесты: прогон D проверяет темп (в среднем меньше 3 с на вещь, все фото на
 > месте), новый D2 — один 403: прогон не встаёт, после отказа ≥10 с, дальше
 > ≥3 с между страницами; приёмка `snapshot.js` 24/24 (как у 1.2.0). Сквозной
-> полный прогон — в следующем коммите.
+> на 1.3.0 — 192/192 (185 прежних, 2 в D и 5 в D2).
 
 Здесь три круга работы:
 
@@ -1089,7 +1089,7 @@ node verification/test-site.js                               # 73/73  весь �
 node verification/test-pick-categories.js                    # 29/29  ИИ выбирает категории по правилу (модель подменена)
 node verification/store.js &                                 # фиктивный магазин
 node verification/studio.js &                                # заглушка Студии
-CHROME_PATH=/usr/bin/google-chrome node verification/run.js   # 185/185 сквозной прогон (с W–W3b — весь магазин и ИИ)
+CHROME_PATH=/usr/bin/google-chrome node verification/run.js   # 192/192 сквозной прогон (W–W3b — весь магазин и ИИ, D2 — осторожный темп)
 ```
 
 Скомпилированный код сайта подтягивает `openai`, `@supabase/supabase-js`,

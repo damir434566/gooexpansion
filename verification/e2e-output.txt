@@ -36,6 +36,14 @@
   ok   run D finished
   ok   with no Crawl-delay the 1.5s floor was applied
   ok   a ~10s rest landed after the 20th page
+  ok   a page every two seconds or so, not every seven
+  ok   and every piece still came with its lazy gallery: 2 photos each
+— run D2: one refusal, then the run slows down —
+  ok   run D2 finished rather than halting
+  ok   the refused page is the one failure; the other twenty came in
+  ok   before the refusal, the usual pace
+  ok   after it, a rest of ten seconds or more
+  ok   then half the pace: three seconds or more between pages
 — run E: a single-page storefront, and a store priced in hryvnia —
   ok   run E finished
   ok   both pages were collected
@@ -207,4 +215,4 @@
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
-  185 passed, 0 failed
+  192 passed, 0 failed
