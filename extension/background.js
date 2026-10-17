@@ -1683,6 +1683,7 @@ async function chooseCategories(found, rule, startUrl, robotsTxt, linksOnly) {
     return {
       keep: found,
       drop: [],
+      mixed: [],
       note: `AI could not choose the categories (${why}); ${all}.`,
       failed: true,
       limit: !!(choice && choice.limit),
@@ -1690,12 +1691,14 @@ async function chooseCategories(found, rule, startUrl, robotsTxt, linksOnly) {
     };
   }
   const kept = new Set(choice.keep.filter((n) => Number.isInteger(n)));
+  const broad = new Set((Array.isArray(choice.mixed) ? choice.mixed : []).filter((n) => Number.isInteger(n)));
   const keep = found.filter((_, i) => kept.has(i));
   const drop = found.filter((_, i) => !kept.has(i));
   const names = drop.slice(0, 6).map((c) => c.label).join(", ");
   return {
     keep,
     drop,
+    mixed: found.filter((_, i) => kept.has(i) && broad.has(i)),
     note: `AI kept ${keep.length} of the menu's ${found.length} categories${
       drop.length ? `, leaving out ${names}${drop.length > 6 ? ` and ${drop.length - 6} more` : ""}` : ""
     }.`,
@@ -1710,6 +1713,55 @@ async function chooseCategories(found, rule, startUrl, robotsTxt, linksOnly) {
 function limitNote(error) {
   const amounts = /\(\$[\d.,]+ of \$[\d.,]+\)/.exec(String(error || ""));
   return `This month's AI limit is spent${amounts ? ` ${amounts[0]}` : ""}. Collecting goes on without AI: every piece in the chosen categories is opened, and new cards wait for the AI check. Raise the limit in Goo Studio → AI check.`;
+}
+
+/**
+ * A whole-store run with a rule waits here for the admin: the popup shows
+ * AI's choice of categories, ticks and all, until "Collect N categories" or
+ * Cancel. Nothing runs meanwhile; the choice is in `SITE_KEY`, so a closed
+ * popup, or a worker Chrome has ended, finds it again.
+ */
+function awaitPick() {
+  letSleep();
+  currentSite = null;
+  state.running = false;
+  state.phase = "awaiting";
+  state.message = "";
+  if (state.site) state.site.stage = "pick";
+  pushProgress();
+  void saveLastRun();
+}
+
+/**
+ * The admin's ticks become the run's categories. When they changed AI's
+ * choice, the note that stays in view at the first category says so.
+ */
+function applyPick(run) {
+  const strip = ({ ai, mixed, keep, ...category }) => category;
+  const ticked = run.pick.filter((p) => p.keep);
+  const changed = run.pick.filter((p) => p.keep !== p.ai).length;
+  run.categories = [run.categories[0], ...ticked.map(strip)];
+  run.skipped = run.pick.filter((p) => !p.keep).map(strip);
+  if (changed && run.rule) {
+    run.aiNote = `Walking ${ticked.length} of the menu's ${run.pick.length} categories: AI's choice, ${changed} changed by you.`;
+  }
+  run.stage = "categories";
+  run.index = 0;
+  run.pageUrl = "";
+  delete run.pick;
+}
+
+/** Cancel under the popup's list: the run that waited for it is forgotten. */
+async function cancelPick() {
+  const run = await loadSiteRun();
+  if (run && run.stage === "pick") await chrome.storage.local.remove(SITE_KEY).catch(() => {});
+  // Nor is there a last run to show for it.
+  const last = await lastRun();
+  if (last && last.phase === "awaiting") await chrome.storage.local.remove("lastRun").catch(() => {});
+  if (state.phase === "awaiting") {
+    state.phase = "idle";
+    state.site = null;
+  }
 }
 
 /**
@@ -1748,6 +1800,8 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
     }
     storeUrl = run.store;
     linksOnly = run.linksOnly === true;
+    // "Collect N categories" under the popup's list.
+    if (run.stage === "pick" && Array.isArray(run.pick)) applyPick(run);
   }
 
   let origin;
@@ -1843,9 +1897,13 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
       rule: chosen && !chosen.failed ? rule : "",
       skipped: chosen ? chosen.drop : [],
       aiNote: chosen ? chosen.note : "",
-      // The rule every plan asks AI to choose the pieces by, whatever came
-      // of the categories; the pieces it left out; why it is not choosing.
-      pieceRule: rule || "",
+      // The rule as the admin wrote it, and the one every plan asks AI to
+      // choose the pieces by: none when AI could not choose the categories,
+      // as the popup warns before the run starts. Then the pieces AI left
+      // out, and why it is not choosing.
+      askedRule: rule || "",
+      aiWhy: chosen && chosen.failed ? chosen.why : "",
+      pieceRule: chosen && !chosen.failed ? rule : "",
       aiSkipped: 0,
       aiWarn: chosen && chosen.limit ? limitNote(chosen.why) : "",
       aiLimit: !!(chosen && chosen.limit),
@@ -1863,6 +1921,16 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
       aiFailed: !!(chosen && chosen.failed),
       aiWarn: run.aiWarn,
     });
+    // With a rule the admin sees AI's choice before a page is walked, and
+    // changes it if need be (plan 001, decision 4b).
+    if (chosen) {
+      const keep = new Set(chosen.keep);
+      const broad = new Set(chosen.mixed);
+      run.stage = "pick";
+      run.pick = found.map((c) => ({ ...c, ai: keep.has(c), mixed: broad.has(c), keep: keep.has(c) }));
+      await keepSite(run, "awaiting");
+      return awaitPick();
+    }
   }
   currentSite = run;
   await keepSite(run);
@@ -2060,7 +2128,8 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
     // A sitemap lists the whole store, what the rule leaves out with it. With
     // a rule its pieces go through AI like a category's; when AI is not
     // choosing them (the limit, an error), it is not read.
-    run.stage = run.pieceRule && run.aiWarn ? "done" : "sitemaps";
+    const ruled = !!(run.askedRule || run.rule);
+    run.stage = ruled && (!run.pieceRule || run.aiWarn) ? "done" : "sitemaps";
     run.pageUrl = "";
     run.sweep = null;
     await keepSite(run);
@@ -2242,6 +2311,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return undefined;
     }
+
+    case "site-cancel":
+      if (state.running) {
+        sendResponse({ ok: false, error: "A run is already going." });
+        return undefined;
+      }
+      cancelPick().then(() => sendResponse({ ok: true }));
+      return true;
 
     case "retry":
       // From the popup, or from the collect tab's button through the bridge.

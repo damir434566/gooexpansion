@@ -1295,6 +1295,30 @@ async function main() {
       found: document.getElementById("found").textContent,
       counts: document.querySelector(".counts").textContent,
     })`);
+  /** The popup's list of AI's categories, once the run waits on it; null when it never does. */
+  const pickShown = async (p, seconds = 30) => {
+    for (let i = 0; i < seconds * 2; i++) {
+      await sleep(500);
+      const shown = await p.evaluate(`document.getElementById("pick").hidden ? null : ({
+        found: document.getElementById("pickFound").textContent,
+        rule: document.getElementById("pickRule").textContent,
+        taking: document.getElementById("showTaking").textContent,
+        skipped: document.getElementById("showSkipped").textContent,
+        go: document.getElementById("pickGo").textContent,
+        hint: document.getElementById("pickHint").textContent,
+        note: document.getElementById("note").hidden ? "" : document.getElementById("note").textContent,
+        rows: [...document.querySelectorAll("#pickList .item")].map((r) => ({
+          label: r.querySelector(".name").firstChild.textContent,
+          on: r.querySelector("input").checked,
+          tag: r.querySelector(".tag").textContent,
+        })),
+        whole: !document.getElementById("whole").hidden,
+        progress: !document.getElementById("progress").hidden,
+      })`);
+      if (shown) return shown;
+    }
+    return null;
+  };
   popup = await popupOver(HOME);
   {
     const b = await buttons(popup);
@@ -1464,6 +1488,20 @@ async function main() {
   await sleep(300);
   await activate(home3.id);
   {
+    const list = await pickShown(popup);
+    check(
+      "the run waits on the popup's list: AI's choice, ticked, the rule above it, nothing walked yet",
+      !!list && list.found === "AI picked 2 of the menu's 4 categories" && list.rule === "Rule: «Coats and sale only»" &&
+        list.taking === "Taking 2" && list.skipped === "Show skipped 2" && list.go === "Collect 2 categories" &&
+        JSON.stringify(list.rows) === JSON.stringify([{ label: "Coats", on: true, tag: "" }, { label: "Sale", on: true, tag: "" }]) &&
+        !list.whole && !list.progress,
+      JSON.stringify(list),
+    );
+    const early = (await storeLog()).log;
+    check("not a category was opened before the admin said go", !early.some((l) => l.path.startsWith("/c/")), JSON.stringify(early.filter((l) => l.path.startsWith("/c/")).map((l) => l.path)));
+    await popup.evaluate(`document.getElementById("pickGo").click()`, { userGesture: true });
+    await sleep(300);
+    await activate(home3.id);
     const st = await untilEnded(popup, 300);
     const { api } = await studioEvents();
     const logW3 = (await storeLog()).log;
@@ -1525,22 +1563,28 @@ async function main() {
   await sleep(300);
   await activate(home4.id);
   {
-    let saved = null;
-    for (let i = 0; i < 60; i++) {
-      await sleep(500);
-      saved = await popup.evaluate("chrome.storage.local.get('siteRun').then((s) => s.siteRun)");
-      if (saved && saved.stage === "categories" && saved.startedAt && /429/.test(saved.aiNote || "")) break;
-    }
+    const list = await pickShown(popup);
+    const saved = await popup.evaluate("chrome.storage.local.get('siteRun').then((s) => s.siteRun)");
     check(
-      "all five categories are walked, and the run says AI could not choose",
-      !!saved && saved.categories.length === 5 && saved.rule === "" && /AI could not choose the categories \(429 Rate limit/.test(saved.aiNote),
-      JSON.stringify(saved && { n: saved.categories.length, rule: saved.rule, note: saved.aiNote }),
+      "every category is ticked, and the run says AI could not choose",
+      !!saved && saved.stage === "pick" && saved.categories.length === 5 && saved.rule === "" && /AI could not choose the categories \(429 Rate limit/.test(saved.aiNote) &&
+        !!list && list.found === "All 4 of the menu's categories" && list.taking === "Taking 4" && list.skipped === "Show skipped 0" &&
+        list.rows.length === 4 && list.rows.every((r) => r.on),
+      JSON.stringify({ list, saved: saved && { stage: saved.stage, n: saved.categories.length, rule: saved.rule, note: saved.aiNote } }),
     );
-    await sleep(1000);
-    const shown = await popup.evaluate(`document.getElementById("note").textContent`);
-    check("the popup shows it as a warning", /AI could not choose/.test(shown), shown);
-    await popup.evaluate(`document.getElementById("stop").click()`);
-    await untilEnded(popup, 60);
+    check(
+      "the popup shows it as a warning, and says the pieces will not be checked by name",
+      !!list && /^AI could not choose \(429 Rate limit/.test(list.note) && /pieces will not be checked by name/.test(list.note),
+      list && list.note,
+    );
+    await popup.evaluate(`document.getElementById("pickCancel").click()`);
+    await sleep(1500);
+    const gone = await popup.evaluate("chrome.storage.local.get('siteRun').then((s) => s.siteRun || null)");
+    const b = await buttons(popup);
+    const pickHidden = await popup.evaluate(`document.getElementById("pick").hidden`);
+    check("Cancel forgets the run: no list, no Resume, the whole store on offer again", gone === null && pickHidden && b.site === "Collect the whole store" && b.resume === "", JSON.stringify({ gone, pickHidden, b }));
+    const logB = (await storeLog()).log;
+    check("and not a category was walked", !logB.some((l) => l.path.startsWith("/c/")), JSON.stringify(logB.filter((l) => l.path.startsWith("/c/")).map((l) => l.path)));
     popup.close();
   }
   await fetch(`http://127.0.0.1:${PORT}/json/close/${home4.id}`);
@@ -1551,7 +1595,7 @@ async function main() {
   // shoe categories and New in (mixed), leaves out Dresses, Kids and Gift
   // cards; inside New in and in the sitemap it opens the shoes alone, by the
   // name on the card or in `<image:title>` when the address says nothing.
-  const wholeRun = async (rule, seconds) => {
+  const wholeRun = async (rule, seconds, onPick = null, midRun = null) => {
     await storeControl({ mode: "shoes", reset: true });
     await studioReset();
     const tab = await newTab(HOME);
@@ -1561,6 +1605,12 @@ async function main() {
     await popup.evaluate(`document.getElementById("site").click()`, { userGesture: true });
     await sleep(300);
     await activate(tab.id);
+    const list = await pickShown(popup);
+    if (onPick) await onPick(list);
+    await popup.evaluate(`document.getElementById("pickGo").click()`, { userGesture: true });
+    await sleep(300);
+    await activate(tab.id);
+    if (midRun) await midRun(tab);
     const st = await untilEnded(popup, seconds);
     popup.close();
     const { api } = await studioEvents();
@@ -1576,21 +1626,83 @@ async function main() {
     })`);
     popup.close();
     const ingested = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, "")).sort();
-    return { tab, st, api, log, saved, shown, ingested };
+    return { tab, st, api, log, saved, shown, ingested, list };
   };
   const SHOES = ["/product/boot-m2", "/product/boot-w1", "/product/new-sandal-1", "/product/p-1042", "/product/p-3001", "/product/sneaker-m1", "/product/sneaker-w2"];
   console.log("\n— run W4: only men's and women's shoes —");
   {
-    const w = await wholeRun("Only men's and women's shoes", 300);
+    let resumed = null;
+    const w = await wholeRun(
+      "Only men's and women's shoes",
+      300,
+      async (list) => {
+        check(
+          "the list: AI took the two shoe categories and New in, marked mixed",
+          !!list && list.found === "AI picked 3 of the menu's 5 categories" && list.taking === "Taking 3" && list.skipped === "Show skipped 2" &&
+            JSON.stringify(list.rows) ===
+              JSON.stringify([
+                { label: "Women's shoes", on: true, tag: "" },
+                { label: "Men's shoes", on: true, tag: "" },
+                { label: "New in", on: true, tag: "mixed" },
+              ]) &&
+            list.go === "Collect 3 categories",
+          JSON.stringify(list),
+        );
+        await popup.evaluate(`document.getElementById("showSkipped").click()`);
+        const skippedRows = (await pickShown(popup)).rows;
+        check(
+          "Show skipped: what AI left out, unticked",
+          JSON.stringify(skippedRows) === JSON.stringify([{ label: "Dresses", on: false, tag: "" }, { label: "Kids", on: false, tag: "" }]),
+          JSON.stringify(skippedRows),
+        );
+        await popup.evaluate(`[...document.querySelectorAll("#pickList .item")].find((r) => /^Kids/.test(r.textContent)).querySelector("input").click()`);
+        await sleep(400);
+        const ticked = await pickShown(popup);
+        check("a tick by hand counts: Collect 4 categories", ticked.go === "Collect 4 categories" && ticked.hint === "You ticked Kids yourself: 4 categories now.", JSON.stringify(ticked));
+        // Closed and opened again, the list is as the admin left it.
+        popup.close();
+        popup = await popupOver(HOME);
+        const again = await pickShown(popup);
+        await popup.evaluate(`document.getElementById("showSkipped").click()`);
+        const againRows = (await pickShown(popup)).rows;
+        check(
+          "a popup closed and opened again finds the list, Kids still ticked",
+          !!again && again.go === "Collect 4 categories" && againRows.some((r) => r.label === "Kids" && r.on),
+          JSON.stringify({ again, againRows }),
+        );
+      },
+      async (tab) => {
+        // Stop two pieces in, then Resume: it carries on without asking again.
+        for (let i = 0; i < 120; i++) {
+          await sleep(500);
+          const { api } = await studioEvents();
+          if (api.filter((a) => a.action === "ingest").length >= 2) break;
+        }
+        await popup.evaluate(`document.getElementById("stop").click()`);
+        await untilEnded(popup, 60);
+        popup.close();
+        popup = await popupOver(await targetUrl(tab.id));
+        await sleep(800);
+        resumed = {
+          b: await buttons(popup),
+          pick: await popup.evaluate(`!document.getElementById("pick").hidden`),
+        };
+        await popup.evaluate(`document.getElementById("resume").click()`, { userGesture: true });
+        await sleep(300);
+        await activate(tab.id);
+      },
+    );
+    check("Resume after Stop offers no list again", !!resumed && resumed.b.resume === "Resume" && !resumed.pick, JSON.stringify(resumed));
     check("run W4 finished", !!w.st && w.st.phase === "done", JSON.stringify(w.st && { phase: w.st.phase, message: w.st.message, site: w.st.site }));
     check(
-      "AI kept Women's shoes, Men's shoes and New in, and left out Dresses and Kids (Gift cards is no category to it at all)",
+      "it walked AI's three and Kids, ticked by hand; Dresses left out",
       !!w.saved &&
-        JSON.stringify(w.saved.categories.map((c) => c.url.replace(STORE, ""))) === JSON.stringify(["/", "/c/women-shoes", "/c/men-shoes", "/c/new-in"]) &&
-        JSON.stringify(w.saved.skipped.map((c) => c.label)) === JSON.stringify(["Dresses", "Kids"]),
-      JSON.stringify(w.saved && { categories: w.saved.categories.map((c) => c.label), skipped: w.saved.skipped.map((c) => c.label) }),
+        JSON.stringify(w.saved.categories.map((c) => c.url.replace(STORE, ""))) === JSON.stringify(["/", "/c/women-shoes", "/c/men-shoes", "/c/kids", "/c/new-in"]) &&
+        JSON.stringify(w.saved.skipped.map((c) => c.label)) === JSON.stringify(["Dresses"]) &&
+        w.saved.aiNote === "Walking 4 of the menu's 5 categories: AI's choice, 1 changed by you.",
+      JSON.stringify(w.saved && { categories: w.saved.categories.map((c) => c.label), skipped: w.saved.skipped.map((c) => c.label), note: w.saved.aiNote }),
     );
-    check("Dresses, Kids and Gift cards were never opened", !w.log.some((l) => ["/c/dresses", "/c/kids", "/gift-cards"].includes(l.path)));
+    check("Dresses and Gift cards were never opened, Kids was", !w.log.some((l) => ["/c/dresses", "/gift-cards"].includes(l.path)) && w.log.some((l) => l.path === "/c/kids"));
     check("the shoes were collected, and nothing else: 7", JSON.stringify(w.ingested) === JSON.stringify(SHOES), JSON.stringify(w.ingested));
     const opened = [...new Set(w.log.filter((l) => l.path.startsWith("/product/")).map((l) => l.path))].sort();
     check("no dress, tee, jacket or scarf was even opened", JSON.stringify(opened) === JSON.stringify(SHOES), JSON.stringify(opened));
@@ -1601,7 +1713,7 @@ async function main() {
       JSON.stringify([named.get(`${STORE}/product/p-1042`), named.get(`${STORE}/product/p-2001`)]),
     );
     check("the sneaker only the sitemap knows was found by its image:title and collected", w.ingested.includes("/product/p-3001") && w.log.some((l) => l.path === "/sitemap.xml"));
-    check("AI skipped 6, each once: a dress at home, a dress and a jacket in New in, then a dress, a tee and a scarf in the sitemap", !!w.saved && w.saved.aiSkipped === 6, JSON.stringify(w.saved && w.saved.aiSkipped));
+    check("AI skipped 6, each once: a dress at home, the tee in Kids, a dress and a jacket in New in, then a dress and a scarf in the sitemap", !!w.saved && w.saved.aiSkipped === 6, JSON.stringify(w.saved && w.saved.aiSkipped));
     check("the popup says so", w.shown.skipped === "AI skipped 6 pieces that don't fit the rule" && /7 new/.test(w.shown.counts) && w.shown.note === "", JSON.stringify(w.shown));
     await fetch(`http://127.0.0.1:${PORT}/json/close/${w.tab.id}`);
   }
@@ -1611,12 +1723,19 @@ async function main() {
   // it opened; the sitemaps, the whole store, are not read; the popup says why.
   console.log("\n— run W5: the month's AI limit spent, then AI failing on the pieces —");
   {
-    const w = await wholeRun("Only shoes LIMIT", 300);
+    const w = await wholeRun("Only shoes LIMIT", 300, async (list) => {
+      check(
+        "the list has every category ticked, and names the limit",
+        !!list && list.found === "All 5 of the menu's categories" && list.rows.every((r) => r.on) && /AI limit is spent \(\$5\.00 of \$5\.00\)/.test(list.note),
+        JSON.stringify(list),
+      );
+    });
     const all = ["/product/boot-m2", "/product/boot-w1", "/product/dress-1", "/product/dress-2", "/product/kids-tee-1", "/product/new-jacket-1", "/product/new-sandal-1", "/product/p-1042", "/product/p-2001", "/product/sneaker-m1", "/product/sneaker-w2"];
     check("run W5 (limit) finished", !!w.st && w.st.phase === "done", JSON.stringify(w.st && { phase: w.st.phase, message: w.st.message }));
     check("every category was walked, as without a rule", !!w.saved && w.saved.categories.length === 6 && w.saved.rule === "", JSON.stringify(w.saved && w.saved.categories.map((c) => c.label)));
     check("every piece in them collected: 11", JSON.stringify(w.ingested) === JSON.stringify(all), JSON.stringify(w.ingested));
     check("the sitemap was not read: without AI it is the whole store", !w.log.some((l) => /sitemap/.test(l.path)));
+    check("no plan asked about pieces: AI could not choose the categories", !w.api.some((a) => a.pieceRule), JSON.stringify(w.api.filter((a) => a.pieceRule).length));
     check(
       "the popup's warning names the limit and says the run went on",
       /^This month's AI limit is spent \(\$5\.00 of \$5\.00\)\. Collecting goes on without AI/.test(w.shown.note) && w.shown.skipped === "",
