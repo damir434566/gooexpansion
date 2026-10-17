@@ -198,6 +198,18 @@ button:disabled {
   color: var(--warn);
 }
 
+.ai {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--foreground-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai b {
+  font-weight: 600;
+  color: var(--foreground);
+}
+
 .pace,
 .note,
 .foot {

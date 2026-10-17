@@ -41,6 +41,7 @@ const el = {
   updated: document.getElementById("updated"),
   skipped: document.getElementById("skipped"),
   failed: document.getElementById("failed"),
+  aiSkipped: document.getElementById("aiSkipped"),
   pace: document.getElementById("pace"),
   retry: document.getElementById("retry"),
   note: document.getElementById("note"),
@@ -360,6 +361,23 @@ function num(n) {
   return Number(n || 0).toLocaleString("en-US");
 }
 
+/** "AI skipped 3,417 pieces that don't fit the rule", the number in bold. */
+function showAiSkipped(site) {
+  const n = site ? site.aiSkipped || 0 : 0;
+  el.aiSkipped.hidden = !n;
+  if (!n) return;
+  const count = document.createElement("b");
+  count.textContent = num(n);
+  el.aiSkipped.replaceChildren("AI skipped ", count, ` ${n === 1 ? "piece that doesn't" : "pieces that don't"} fit the rule`);
+}
+
+/** Why AI is not choosing for the run: the month's limit, an error. Said where it cannot be missed. */
+function siteWarning(site) {
+  if (site.aiWarn) return site.aiWarn;
+  // The rule was not applied to the categories.
+  return site.aiFailed && site.ai ? site.ai : "";
+}
+
 /** Where a whole-store run is, in a line. */
 function siteWhere(site) {
   if (site.stage === "menu") return "Whole store: reading the store's menu…";
@@ -436,9 +454,12 @@ function render(state) {
   if (!shown) return;
 
   const listing = running && shown.phase === "listing";
+  showAiSkipped(shown.site);
   if (shown.site) {
     renderSite(shown, running, listing);
     finishRender(shown, running);
+    const warning = siteWarning(shown.site);
+    if (warning && (running || shown.phase === "done")) note(warning);
     return;
   }
   const pct = shown.planned ? Math.min(100, Math.round((shown.done / shown.planned) * 100)) : 0;
@@ -486,8 +507,6 @@ function renderSite(shown, running, listing) {
       : `One page every ${((shown.delayMs || 1500) / 1000).toFixed(1)}s or slower`;
     const rate = siteRate(shown);
     el.pace.textContent = shown.message || (rate ? `${pace} · ${rate}` : pace);
-    // The rule was not applied: said where it cannot be missed.
-    if (shown.site.aiFailed && shown.site.ai) note(shown.site.ai);
   } else {
     el.pace.textContent = shown.message && shown.phase !== "halted" ? shown.message : "";
   }

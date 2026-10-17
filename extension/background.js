@@ -1680,7 +1680,14 @@ async function chooseCategories(found, rule, startUrl, robotsTxt, linksOnly) {
       : choice && choice.error
         ? choice.error
         : "the site has no AI category choice yet — it needs the site update";
-    return { keep: found, drop: [], note: `AI could not choose the categories (${why}); ${all}.`, failed: true };
+    return {
+      keep: found,
+      drop: [],
+      note: `AI could not choose the categories (${why}); ${all}.`,
+      failed: true,
+      limit: !!(choice && choice.limit),
+      why,
+    };
   }
   const kept = new Set(choice.keep.filter((n) => Number.isInteger(n)));
   const keep = found.filter((_, i) => kept.has(i));
@@ -1694,6 +1701,15 @@ async function chooseCategories(found, rule, startUrl, robotsTxt, linksOnly) {
     }.`,
     failed: false,
   };
+}
+
+/**
+ * The warning a run shows when the month's AI limit is spent. The amounts
+ * come from the site's own words: "($5.00 of $5.00)".
+ */
+function limitNote(error) {
+  const amounts = /\(\$[\d.,]+ of \$[\d.,]+\)/.exec(String(error || ""));
+  return `This month's AI limit is spent${amounts ? ` ${amounts[0]}` : ""}. Collecting goes on without AI: every piece in the chosen categories is opened, and new cards wait for the AI check. Raise the limit in Goo Studio → AI check.`;
 }
 
 /**
@@ -1763,6 +1779,9 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
     ai: run ? run.aiNote || "" : "",
     // A note without a rule kept: AI was asked and could not answer.
     aiFailed: !!(run && run.aiNote && !run.rule),
+    // Pieces AI left out by the rule, and why it is not choosing them now.
+    aiSkipped: run ? run.aiSkipped || 0 : 0,
+    aiWarn: run ? run.aiWarn || "" : "",
   };
   if (run) {
     state.done = run.done || 0;
@@ -1824,6 +1843,12 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
       rule: chosen && !chosen.failed ? rule : "",
       skipped: chosen ? chosen.drop : [],
       aiNote: chosen ? chosen.note : "",
+      // The rule every plan asks AI to choose the pieces by, whatever came
+      // of the categories; the pieces it left out; why it is not choosing.
+      pieceRule: rule || "",
+      aiSkipped: 0,
+      aiWarn: chosen && chosen.limit ? limitNote(chosen.why) : "",
+      aiLimit: !!(chosen && chosen.limit),
       index: 0,
       pageUrl: "",
       sweep: null,
@@ -1832,7 +1857,12 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
       counts: { ...state.counts },
       status: "running",
     };
-    Object.assign(state.site, { skipped: run.skipped.length, ai: run.aiNote, aiFailed: !!(chosen && chosen.failed) });
+    Object.assign(state.site, {
+      skipped: run.skipped.length,
+      ai: run.aiNote,
+      aiFailed: !!(chosen && chosen.failed),
+      aiWarn: run.aiWarn,
+    });
   }
   currentSite = run;
   await keepSite(run);
@@ -1853,6 +1883,7 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
       limit: MAX_LIMIT,
       linksOnly,
       html: "",
+      ...(run.pieceRule ? { pieceRule: run.pieceRule } : {}),
       ...payload,
     });
     if (!planned.ok) {
@@ -1862,6 +1893,35 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
     const data = planned.data ?? {};
     state.delayMs = Math.max(Number(data.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
     return data;
+  };
+
+  /**
+   * What AI made of a plan's pieces. Those it left out are marked as seen, so
+   * a piece the next category or the sitemaps show again is neither opened
+   * nor counted twice. When it could not choose — its error, the month's
+   * limit, a site without the choice — the plan's answer holds every piece,
+   * the popup says why, and false comes back.
+   */
+  const notePieces = async (data) => {
+    if (!run.pieceRule || !Array.isArray(data.urls) || !data.urls.length) return true;
+    const choice = data.pieceChoice;
+    if (choice && Array.isArray(choice.dropped)) {
+      const dropped = choice.dropped.filter((u) => typeof u === "string");
+      const fresh = await seenPieces.fresh(dropped).catch(() => dropped);
+      await seenPieces.addAll(fresh).catch(() => {});
+      run.aiSkipped = (run.aiSkipped || 0) + fresh.length;
+      run.aiWarn = "";
+      run.aiLimit = false;
+      Object.assign(state.site, { aiSkipped: run.aiSkipped, aiWarn: "" });
+      return true;
+    }
+    const why = choice && choice.error ? choice.error : "the site has no AI choice of pieces yet — it needs the site update";
+    run.aiLimit = !!(choice && choice.limit);
+    run.aiWarn = run.aiLimit
+      ? limitNote(why)
+      : `AI could not choose the pieces (${why}); every piece in the chosen categories is opened.`;
+    state.site.aiWarn = run.aiWarn;
+    return false;
   };
 
   let screenFrom = state.done;
@@ -1900,6 +1960,8 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
       const links = chunk.slice(i, i + PLAN_LINKS);
       const data = await plan({ url: cat.url, html: planHtml(i === 0 ? heads : [], links), pieces: planPieces(links, names) });
       if (!data) return false;
+      // Without AI's answer a category's pieces are all opened: it was chosen.
+      await notePieces(data);
       const urls = (Array.isArray(data.urls) ? data.urls : []).filter(
         (u) => !listing.has(pagePath(u)) && !categoryPaths.has(pagePath(u)),
       );
@@ -1995,9 +2057,10 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
   }
   if (state.stopped) return endSite(run, tabId);
   if (run.stage === "categories") {
-    // With a rule, the run is the categories AI chose. A sitemap lists the
-    // whole store, what the rule left out with it, so it is not read.
-    run.stage = run.rule ? "done" : "sitemaps";
+    // A sitemap lists the whole store, what the rule leaves out with it. With
+    // a rule its pieces go through AI like a category's; when AI is not
+    // choosing them (the limit, an error), it is not read.
+    run.stage = run.pieceRule && run.aiWarn ? "done" : "sitemaps";
     run.pageUrl = "";
     run.sweep = null;
     await keepSite(run);
@@ -2028,7 +2091,9 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
   }
   const sweep = run.sweep;
   const locale = commonLocale(run.locales) ?? localePrefix(new URL(startUrl).pathname);
-  while (!state.stopped && (sweep.current || sweep.queue.length) && sweep.read.length < SITE_DOCS) {
+  /** AI could not check a sitemap's pieces under the rule: the sitemaps end there. */
+  let unchecked = false;
+  while (!state.stopped && !unchecked && (sweep.current || sweep.queue.length) && sweep.read.length < SITE_DOCS) {
     if (!sweep.current) {
       sweep.current = sweep.queue.shift();
       sweep.piece = 0;
@@ -2052,6 +2117,10 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
         const piece = cut[sweep.piece];
         const data = await plan({ url: `${origin}/`, sitemaps: [{ url: piece.url, xml: piece.xml }] });
         if (!data) return;
+        if (!(await notePieces(data))) {
+          unchecked = true;
+          break;
+        }
         const urls = (Array.isArray(data.urls) ? data.urls : []).filter(
           (u) => localeOf(u) === locale && !categoryPaths.has(pagePath(u)),
         );
@@ -2062,7 +2131,7 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rul
         sweep.piece++;
         await keepSite(run);
       }
-      if (state.stopped) break;
+      if (state.stopped || unchecked) break;
     }
     sweep.read.push(docUrl);
     sweep.current = "";
