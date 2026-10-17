@@ -26,6 +26,12 @@ const MAX_NAME = 160;
 export interface PieceChoice {
   /** The addresses to open, in the planner's order. */
   urls: string[];
+  /**
+   * The addresses left out. The extension marks them, so a piece that the
+   * next category or the sitemaps show again is counted once in its "AI
+   * skipped N pieces".
+   */
+  dropped: string[];
   kept: number;
   skipped: number;
   model: CheckModel;
@@ -85,7 +91,7 @@ export async function pickPieces(input: {
   apiKey?: string;
   client?: ChatClient;
 }): Promise<PieceChoice> {
-  if (!input.urls.length) return { urls: [], kept: 0, skipped: 0, model: input.model, costUsd: 0, usage: NO_USAGE };
+  if (!input.urls.length) return { urls: [], dropped: [], kept: 0, skipped: 0, model: input.model, costUsd: 0, usage: NO_USAGE };
   const titles = new Map<string, string>();
   for (const doc of input.sitemaps ?? []) {
     for (const [loc, title] of sitemapTitles(doc.xml)) titles.set(loc.split("#")[0], title);
@@ -107,6 +113,7 @@ export async function pickPieces(input: {
   });
   return {
     urls: answer.keep.map((n) => input.urls[n]),
+    dropped: answer.drop.map((n) => input.urls[n]),
     kept: answer.keep.length,
     skipped: answer.drop.length,
     model: answer.model,

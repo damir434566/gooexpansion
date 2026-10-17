@@ -123,6 +123,7 @@ const URLS = [
     );
     check("the plan's addresses the rule keeps, in the plan's order", choice.urls, [URLS[0], URLS[2], URLS[5]]);
     check("and how many were kept and skipped", [choice.kept, choice.skipped], [3, 3]);
+    check("and which were skipped, for the extension to count each once", choice.dropped, [URLS[1], URLS[3], URLS[4]]);
     check("what it cost, at the AI check's prices", Number(choice.costUsd.toFixed(8)), Number(((2000 * 0.15 + 300 * 0.6) / 1e6).toFixed(8)));
   }
 
@@ -131,7 +132,7 @@ const URLS = [
     const client = fakeClient(() => ({ keep: [0], drop: [0, 1, 99, -2, 2.5] }));
     const choice = await pickPieces({ rule: "only shoes", store: "shop.example", urls: URLS, names: new Map(), model: "gpt-4o-mini", client });
     check("named in both: kept; not named: kept; numbers it was not asked about: ignored", choice.urls, [URLS[0], URLS[2], URLS[3], URLS[4], URLS[5]]);
-    check("one skipped", choice.skipped, 1);
+    check("one skipped", [choice.skipped, choice.dropped], [1, [URLS[1]]]);
   }
 
   // ── Many pieces, a few calls at a time ─────────────────────────────────────

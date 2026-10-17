@@ -1354,6 +1354,13 @@ async function main() {
     ];
     check("every piece in the store was collected: 21", pieces.every((p) => ingested.includes(p)) && ingested.length === 21, JSON.stringify(ingested));
     check("and none of them twice, Stop and Resume in between", twice.length === 0, JSON.stringify(twice));
+    const namedW = new Map(api.filter((a) => a.action === "plan" && a.pieces).flatMap((a) => a.pieces));
+    const cardsW = [...namedW].filter(([u]) => /\/product\/(coat|knit)-\d+$/.test(u));
+    check(
+      "the plan calls carry each card's name beside its link",
+      cardsW.length >= 10 && cardsW.every(([u, n]) => u.endsWith(`/product/${n}`)),
+      JSON.stringify(cardsW.slice(0, 4)),
+    );
     check("the two hats only the sitemap knows came from the sitemap", ingested.slice(-2).sort().join() === "/product/hat-1,/product/hat-2", JSON.stringify(ingested.slice(-3)));
     check("the knitwear behind \"Show more\" was loaded", logW.some((l) => l.path === "/api/knits"));
     check("the coats on page two were reached", logW.some((l) => l.path === "/c/coats" && l.search === "?page=2"));
@@ -1443,7 +1450,8 @@ async function main() {
   // "What to collect" in the popup: the rule goes to the site with the first
   // plan, once, with the menu's categories; the site's answer (the shipping
   // pick-categories.ts, the model stood in for in studio.js) decides which are
-  // walked. With a rule the sitemaps are not read: they list the whole store.
+  // walked. Every plan after it asks which of its pieces the rule wants
+  // (pick-pieces.ts), the sitemaps' too: only those are opened.
   console.log("\n— run W3: the whole store, AI choosing the categories by a rule —");
   await storeControl({ mode: "site", reset: true });
   await studioReset();
@@ -1475,15 +1483,18 @@ async function main() {
       JSON.stringify(saved && { categories: saved.categories, skipped: saved.skipped, note: saved.aiNote }),
     );
     check("Knitwear was never opened", !logW3.some((l) => l.path === "/c/knitwear"));
-    check("nor the sitemaps: with a rule, the run is the categories AI chose", !logW3.some((l) => /sitemap/.test(l.path)));
+    check("the product sitemap was read, its pieces put to the rule too", logW3.some((l) => l.path === "/sitemap-products.xml"));
+    const plansW3 = api.filter((a) => a.action === "plan" && a.pieces);
+    check("every plan of a walk asked about its pieces by the rule", plansW3.length >= 4 && plansW3.every((a) => a.pieceRule === "Coats and sale only"), JSON.stringify(plansW3.map((a) => a.pieceRule)));
     const ingested = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, "")).sort();
-    const want = [
-      ...Array.from({ length: 10 }, (_, i) => `/product/coat-${i + 1}`),
-      "/product/knit-1",
-      "/product/knit-3",
-      "/product/knit-8",
-    ].sort();
-    check("it collected the coats, and the knits the home page and Sale show: 13", JSON.stringify(ingested) === JSON.stringify(want), JSON.stringify(ingested));
+    const want = Array.from({ length: 10 }, (_, i) => `/product/coat-${i + 1}`).sort();
+    check("it collected the coats alone: 10", JSON.stringify(ingested) === JSON.stringify(want), JSON.stringify(ingested));
+    check("no knit or hat was opened", !logW3.some((l) => /^\/product\/(knit|hat)-/.test(l.path)), JSON.stringify(logW3.filter((l) => /^\/product\/(knit|hat)-/.test(l.path)).map((l) => l.path)));
+    check(
+      "AI skipped 10, each counted once: the knits the home page and Sale show, the rest of them and the hats in the sitemap",
+      !!saved && saved.aiSkipped === 10,
+      JSON.stringify(saved && saved.aiSkipped),
+    );
     check("a category AI left out is still not imported as a piece", !ingested.includes("/product/feature-coat"));
     check("the run is written down as done", !!saved && saved.status === "done" && saved.stage === "done");
     const rules = await popup.evaluate("chrome.storage.local.get('categoryRules').then((s) => s.categoryRules)");
@@ -1493,7 +1504,9 @@ async function main() {
     await sleep(800);
     const b = await buttons(popup);
     const rule = await popup.evaluate(`document.getElementById("rule").value`);
-    check("the popup says AI chose 3 categories and left out 2, and shows the rule again", /AI chose \(2 left out\)|3 categories AI chose \(2 left out\)/.test(b.found) && /13 new/.test(b.counts) && rule === "Coats and sale only", JSON.stringify({ b, rule }));
+    const skippedLine = await popup.evaluate(`document.getElementById("aiSkipped").hidden ? "" : document.getElementById("aiSkipped").textContent`);
+    check("the popup says AI chose 3 categories and left out 2, and shows the rule again", /AI chose \(2 left out\)|3 categories AI chose \(2 left out\)/.test(b.found) && /10 new/.test(b.counts) && rule === "Coats and sale only", JSON.stringify({ b, rule }));
+    check("and how many pieces AI skipped", skippedLine === "AI skipped 10 pieces that don't fit the rule", skippedLine);
     popup.close();
   }
   await fetch(`http://127.0.0.1:${PORT}/json/close/${home3.id}`);
@@ -1530,8 +1543,98 @@ async function main() {
     await untilEnded(popup, 60);
     popup.close();
   }
-  collect.close();
   await fetch(`http://127.0.0.1:${PORT}/json/close/${home4.id}`);
+
+  // ── Run W4: only shoes ────────────────────────────────────────────────────
+  //
+  // Plan 001: "all women's and men's shoes, nothing else". AI keeps the two
+  // shoe categories and New in (mixed), leaves out Dresses, Kids and Gift
+  // cards; inside New in and in the sitemap it opens the shoes alone, by the
+  // name on the card or in `<image:title>` when the address says nothing.
+  const wholeRun = async (rule, seconds) => {
+    await storeControl({ mode: "shoes", reset: true });
+    await studioReset();
+    const tab = await newTab(HOME);
+    await sleep(1500);
+    popup = await popupOver(HOME);
+    await popup.evaluate(`(() => { const r = document.getElementById("rule"); r.value = ${JSON.stringify(rule)}; r.dispatchEvent(new Event("change")); })()`);
+    await popup.evaluate(`document.getElementById("site").click()`, { userGesture: true });
+    await sleep(300);
+    await activate(tab.id);
+    const st = await untilEnded(popup, seconds);
+    popup.close();
+    const { api } = await studioEvents();
+    const log = (await storeLog()).log;
+    popup = await popupOver(HOME);
+    await sleep(800);
+    const saved = await popup.evaluate("chrome.storage.local.get('siteRun').then((s) => s.siteRun)");
+    const shown = await popup.evaluate(`({
+      found: document.getElementById("found").textContent,
+      counts: document.querySelector(".counts").textContent,
+      skipped: document.getElementById("aiSkipped").hidden ? "" : document.getElementById("aiSkipped").textContent,
+      note: document.getElementById("note").hidden ? "" : document.getElementById("note").textContent,
+    })`);
+    popup.close();
+    const ingested = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, "")).sort();
+    return { tab, st, api, log, saved, shown, ingested };
+  };
+  const SHOES = ["/product/boot-m2", "/product/boot-w1", "/product/new-sandal-1", "/product/p-1042", "/product/p-3001", "/product/sneaker-m1", "/product/sneaker-w2"];
+  console.log("\n— run W4: only men's and women's shoes —");
+  {
+    const w = await wholeRun("Only men's and women's shoes", 300);
+    check("run W4 finished", !!w.st && w.st.phase === "done", JSON.stringify(w.st && { phase: w.st.phase, message: w.st.message, site: w.st.site }));
+    check(
+      "AI kept Women's shoes, Men's shoes and New in, and left out Dresses, Kids and Gift cards",
+      !!w.saved &&
+        JSON.stringify(w.saved.categories.map((c) => c.url.replace(STORE, ""))) === JSON.stringify(["/", "/c/women-shoes", "/c/men-shoes", "/c/new-in"]) &&
+        JSON.stringify(w.saved.skipped.map((c) => c.label)) === JSON.stringify(["Dresses", "Kids", "Gift cards"]),
+      JSON.stringify(w.saved && { categories: w.saved.categories.map((c) => c.label), skipped: w.saved.skipped.map((c) => c.label) }),
+    );
+    check("Dresses, Kids and Gift cards were never opened", !w.log.some((l) => ["/c/dresses", "/c/kids", "/gift-cards"].includes(l.path)));
+    check("the shoes were collected, and nothing else: 7", JSON.stringify(w.ingested) === JSON.stringify(SHOES), JSON.stringify(w.ingested));
+    const opened = [...new Set(w.log.filter((l) => l.path.startsWith("/product/")).map((l) => l.path))].sort();
+    check("no dress, tee, jacket or scarf was even opened", JSON.stringify(opened) === JSON.stringify(SHOES), JSON.stringify(opened));
+    const named = new Map(w.api.filter((a) => a.action === "plan" && a.pieces).flatMap((a) => a.pieces));
+    check(
+      "the loafer and the dress whose addresses say nothing went to AI by the names on their cards",
+      named.get(`${STORE}/product/p-1042`) === "Suede loafer" && named.get(`${STORE}/product/p-2001`) === "Linen midi dress",
+      JSON.stringify([named.get(`${STORE}/product/p-1042`), named.get(`${STORE}/product/p-2001`)]),
+    );
+    check("the sneaker only the sitemap knows was found by its image:title and collected", w.ingested.includes("/product/p-3001") && w.log.some((l) => l.path === "/sitemap.xml"));
+    check("AI skipped 6, each once: a dress at home, a dress and a jacket in New in, then a dress, a tee and a scarf in the sitemap", !!w.saved && w.saved.aiSkipped === 6, JSON.stringify(w.saved && w.saved.aiSkipped));
+    check("the popup says so", w.shown.skipped === "AI skipped 6 pieces that don't fit the rule" && /7 new/.test(w.shown.counts) && w.shown.note === "", JSON.stringify(w.shown));
+    await fetch(`http://127.0.0.1:${PORT}/json/close/${w.tab.id}`);
+  }
+
+  // ── Run W5: AI's month spent, AI failing on the pieces ────────────────────
+  // The run goes on without AI: every category is walked and every piece in
+  // it opened; the sitemaps, the whole store, are not read; the popup says why.
+  console.log("\n— run W5: the month's AI limit spent, then AI failing on the pieces —");
+  {
+    const w = await wholeRun("Only shoes LIMIT", 300);
+    const all = ["/product/boot-m2", "/product/boot-w1", "/product/dress-1", "/product/dress-2", "/product/kids-tee-1", "/product/new-jacket-1", "/product/new-sandal-1", "/product/p-1042", "/product/p-2001", "/product/sneaker-m1", "/product/sneaker-w2"];
+    check("run W5 (limit) finished", !!w.st && w.st.phase === "done", JSON.stringify(w.st && { phase: w.st.phase, message: w.st.message }));
+    check("every category was walked, as without a rule", !!w.saved && w.saved.categories.length === 7 && w.saved.rule === "", JSON.stringify(w.saved && w.saved.categories.map((c) => c.label)));
+    check("every piece in them collected: 11", JSON.stringify(w.ingested) === JSON.stringify(all), JSON.stringify(w.ingested));
+    check("the sitemap was not read: without AI it is the whole store", !w.log.some((l) => /sitemap/.test(l.path)));
+    check(
+      "the popup's warning names the limit and says the run went on",
+      /^This month's AI limit is spent \(\$5\.00 of \$5\.00\)\. Collecting goes on without AI/.test(w.shown.note) && w.shown.skipped === "",
+      JSON.stringify(w.shown),
+    );
+    await fetch(`http://127.0.0.1:${PORT}/json/close/${w.tab.id}`);
+  }
+  {
+    const w = await wholeRun("Only shoes PIECEFAIL", 300);
+    const chosen = ["/product/boot-m2", "/product/boot-w1", "/product/dress-1", "/product/new-jacket-1", "/product/new-sandal-1", "/product/p-1042", "/product/p-2001", "/product/sneaker-m1", "/product/sneaker-w2"];
+    check("run W5 (pieces failing) finished", !!w.st && w.st.phase === "done", JSON.stringify(w.st && { phase: w.st.phase, message: w.st.message }));
+    check("the categories were still chosen", !!w.saved && w.saved.categories.length === 4, JSON.stringify(w.saved && w.saved.categories.map((c) => c.label)));
+    check("every piece in the chosen categories collected: 9", JSON.stringify(w.ingested) === JSON.stringify(chosen), JSON.stringify(w.ingested));
+    check("and the sitemap left unread", !w.log.some((l) => /sitemap/.test(l.path)));
+    check("the popup says AI could not choose the pieces, and why", /^AI could not choose the pieces \(429 Rate limit/.test(w.shown.note), JSON.stringify(w.shown));
+    await fetch(`http://127.0.0.1:${PORT}/json/close/${w.tab.id}`);
+  }
+  collect.close();
 
   console.log("\n— run G: the extension reloaded under an open collect tab —");
   await storeControl({ mode: "normal", reset: true });
