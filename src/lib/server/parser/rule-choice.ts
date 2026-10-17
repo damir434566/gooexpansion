@@ -15,7 +15,7 @@
  * instructions.
  */
 import OpenAI from "openai";
-import { CHECK_MODELS, type CheckModel } from "@/lib/server/catalogue-check/ai";
+import { CHECK_MODELS, addUsage, NO_USAGE, type CheckModel, type Usage } from "@/lib/server/catalogue-check/ai";
 
 /** Longest rule the admin can send. */
 export const MAX_RULE = 500;
@@ -45,6 +45,8 @@ export interface RuleAnswer {
   lists: Record<string, number[]>;
   model: CheckModel;
   costUsd: number;
+  /** Tokens and cost of every call, for the AI check's spend. */
+  usage: Usage;
 }
 
 export function str(v: unknown): string {
@@ -64,12 +66,13 @@ function line(n: number, item: RuleItem): string {
   return `${n}. ${JSON.stringify(label)} ${path.slice(0, MAX_PATH)}`;
 }
 
-function cost(model: CheckModel, usage: OpenAI.CompletionUsage | undefined): number {
+function usageOf(model: CheckModel, usage: OpenAI.CompletionUsage | undefined): Usage {
   const price = CHECK_MODELS[model];
   const input = usage?.prompt_tokens ?? 0;
   const cached = usage?.prompt_tokens_details?.cached_tokens ?? 0;
   const output = usage?.completion_tokens ?? 0;
-  return ((input - cached) * price.input + cached * price.cached + output * price.output) / 1_000_000;
+  const costUsd = ((input - cached) * price.input + cached * price.cached + output * price.output) / 1_000_000;
+  return { input, cached, output, costUsd };
 }
 
 /** Run `jobs` with at most `width` going at once, answers in job order. */
@@ -150,22 +153,22 @@ export async function chooseByRule(input: {
       const drop = placed("drop");
       // Named in "drop" and in a list that keeps: kept.
       for (const l of keeping) for (const n of lists[l]) drop.delete(n);
-      return { drop, lists, costUsd: cost(input.model, res.usage) };
+      return { drop, lists, usage: usageOf(input.model, res.usage) };
     }),
     input.width,
   );
 
   const dropped = new Set<number>();
   const lists: Record<string, number[]> = Object.fromEntries(keeping.map((l) => [l, [] as number[]]));
-  let costUsd = 0;
+  let usage = NO_USAGE;
   for (const a of answers) {
     for (const n of a.drop) dropped.add(n);
     for (const l of keeping) for (const n of a.lists[l]) lists[l].push(n);
-    costUsd += a.costUsd;
+    usage = addUsage(usage, a.usage);
   }
   for (const l of keeping) lists[l].sort((x, y) => x - y);
   const keep: number[] = [];
   const drop: number[] = [];
   for (let n = 0; n < input.items.length; n++) (dropped.has(n) ? drop : keep).push(n);
-  return { keep, drop, lists, model: input.model, costUsd };
+  return { keep, drop, lists, model: input.model, costUsd: usage.costUsd, usage };
 }

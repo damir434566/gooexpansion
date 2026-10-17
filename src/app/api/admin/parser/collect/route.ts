@@ -33,11 +33,11 @@ import { notAProductPage } from "@/lib/server/parser/page-guards";
 import { planCollection, type FetchedSitemap } from "@/lib/server/parser/plan-collection";
 import { commonTitleSuffix } from "@/lib/server/product-fields";
 import { measurePendingBackdrops } from "@/lib/server/bg-color";
-import { checkPendingProducts, getCheckSettings } from "@/lib/server/catalogue-check/store";
+import { capSpent, checkPendingProducts, getCheckSettings, recordCollectSpend } from "@/lib/server/catalogue-check/store";
 import { getOpenAIKey } from "@/lib/server/get-openai-key";
 import { pickCategories, readCategoryQuestion, type CategoryChoice } from "@/lib/server/parser/pick-categories";
 import { pickPieces, readPieceQuestion, type PieceChoice } from "@/lib/server/parser/pick-pieces";
-import type { CheckModel } from "@/lib/server/catalogue-check/ai";
+import type { CheckModel, Usage } from "@/lib/server/catalogue-check/ai";
 import { getSiteConfigs, getAiSettings } from "@/lib/server/parser/configs";
 import type { CrawlItemResult } from "@/lib/server/parser/types";
 
@@ -136,15 +136,33 @@ function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
+/** Why the extension's choice was not asked: its words, and whether the cap is the reason. */
+type NoChoice = { error: string; limit?: true };
+
 /**
- * The AI check's key and model, which the extension's choices are asked of.
- * Its error says why there is no asking, for the extension to show.
+ * The AI check's key and model, which the extension's choices are asked of,
+ * while the AI check's monthly cap has room. Its error says why there is no
+ * asking, for the extension to show.
  */
-async function aiModel(): Promise<{ apiKey: string; model: CheckModel } | { error: string }> {
-  const apiKey = await getOpenAIKey();
+async function aiModel(): Promise<{ apiKey: string; model: CheckModel } | NoChoice> {
+  const [apiKey, { model }, cap] = await Promise.all([
+    getOpenAIKey(),
+    getCheckSettings(),
+    capSpent().catch(() => null),
+  ]);
   if (!apiKey) return { error: "no OpenAI key is set in the studio" };
-  const { model } = await getCheckSettings();
+  if (cap && cap.spent >= cap.cap) {
+    return {
+      error: `this month's AI limit is spent ($${cap.spent.toFixed(2)} of $${cap.cap.toFixed(2)}); raise it in Goo Studio → AI check`,
+      limit: true,
+    };
+  }
   return { apiKey, model };
+}
+
+/** What a choice cost goes into the day's `collect` run, after the answer has gone. */
+function spent(model: CheckModel, judged: number, usage: Usage) {
+  after(() => recordCollectSpend(model, judged, usage));
 }
 
 function storeOf(url: string): string {
@@ -165,13 +183,15 @@ function failed(err: unknown): { error: string } {
  * a rule nothing is asked; without a key, or when the call fails, the answer
  * says why and the extension walks every category, as it would without a rule.
  */
-async function chooseCategories(body: unknown, url: string): Promise<CategoryChoice | { error: string } | null> {
+async function chooseCategories(body: unknown, url: string): Promise<Omit<CategoryChoice, "usage"> | NoChoice | null> {
   const question = readCategoryQuestion(body);
   if (!question) return null;
   const ai = await aiModel();
   if ("error" in ai) return ai;
   try {
-    return await pickCategories({ ...question, store: storeOf(url), model: ai.model, apiKey: ai.apiKey });
+    const { usage, ...choice } = await pickCategories({ ...question, store: storeOf(url), model: ai.model, apiKey: ai.apiKey });
+    spent(choice.model, question.categories.length, usage);
+    return choice;
   } catch (err) {
     return failed(err);
   }
@@ -188,13 +208,13 @@ async function choosePieces(
   url: string,
   urls: string[],
   sitemaps: FetchedSitemap[],
-): Promise<{ urls: string[]; choice: Omit<PieceChoice, "urls"> | { error: string } } | null> {
+): Promise<{ urls: string[]; choice: Omit<PieceChoice, "urls" | "usage"> | NoChoice } | null> {
   const question = readPieceQuestion(body);
   if (!question || !urls.length) return null;
   const ai = await aiModel();
   if ("error" in ai) return { urls, choice: ai };
   try {
-    const { urls: kept, ...choice } = await pickPieces({
+    const { urls: kept, usage, ...choice } = await pickPieces({
       ...question,
       store: storeOf(url),
       urls,
@@ -202,6 +222,7 @@ async function choosePieces(
       model: ai.model,
       apiKey: ai.apiKey,
     });
+    spent(choice.model, urls.length, usage);
     return { urls: kept, choice };
   } catch (err) {
     return { urls, choice: failed(err) };

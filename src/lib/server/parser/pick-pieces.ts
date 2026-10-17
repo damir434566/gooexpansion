@@ -12,7 +12,7 @@
  * is unsure of ("Samba OG", "550"), is kept: the AI check sorts out its
  * category once it is in. The asking itself is `rule-choice.ts`.
  */
-import type { CheckModel } from "@/lib/server/catalogue-check/ai";
+import { NO_USAGE, type CheckModel, type Usage } from "@/lib/server/catalogue-check/ai";
 import { chooseByRule, str, MAX_RULE, type ChatClient } from "./rule-choice";
 import { titles as sitemapTitles } from "./sitemap";
 
@@ -30,6 +30,7 @@ export interface PieceChoice {
   skipped: number;
   model: CheckModel;
   costUsd: number;
+  usage: Usage;
 }
 
 export const PIECE_SYSTEM_PROMPT = `You decide which products GOO's collector opens. GOO is a fashion catalogue. The collector has found these products in an online store; opening one costs time and a request to the store, so a product the admin does not want should not be opened.
@@ -84,7 +85,7 @@ export async function pickPieces(input: {
   apiKey?: string;
   client?: ChatClient;
 }): Promise<PieceChoice> {
-  if (!input.urls.length) return { urls: [], kept: 0, skipped: 0, model: input.model, costUsd: 0 };
+  if (!input.urls.length) return { urls: [], kept: 0, skipped: 0, model: input.model, costUsd: 0, usage: NO_USAGE };
   const titles = new Map<string, string>();
   for (const doc of input.sitemaps ?? []) {
     for (const [loc, title] of sitemapTitles(doc.xml)) titles.set(loc.split("#")[0], title);
@@ -110,5 +111,6 @@ export async function pickPieces(input: {
     skipped: answer.drop.length,
     model: answer.model,
     costUsd: answer.costUsd,
+    usage: answer.usage,
   };
 }

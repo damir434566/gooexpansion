@@ -12,7 +12,7 @@
  * marked mixed: the popup says so, and inside it every piece is checked by
  * name (`pick-pieces.ts`). The asking itself is `rule-choice.ts`.
  */
-import type { CheckModel } from "@/lib/server/catalogue-check/ai";
+import type { CheckModel, Usage } from "@/lib/server/catalogue-check/ai";
 import { chooseByRule, str, MAX_RULE, type ChatClient, type RuleItem } from "./rule-choice";
 
 export { MAX_RULE, type ChatClient };
@@ -34,6 +34,7 @@ export interface CategoryChoice {
   drop: number[];
   model: CheckModel;
   costUsd: number;
+  usage: Usage;
 }
 
 export const CATEGORY_SYSTEM_PROMPT = `You choose which categories of an online store GOO's collector walks. GOO is a fashion catalogue. The collector opens a store's categories one by one and imports every piece in them, a few seconds a piece, so a category that is not wanted costs hours.
@@ -87,5 +88,12 @@ export async function pickCategories(input: {
     apiKey: input.apiKey,
     client: input.client,
   });
-  return { keep: answer.keep, mixed: answer.lists.mixed, drop: answer.drop, model: answer.model, costUsd: answer.costUsd };
+  return {
+    keep: answer.keep,
+    mixed: answer.lists.mixed,
+    drop: answer.drop,
+    model: answer.model,
+    costUsd: answer.costUsd,
+    usage: answer.usage,
+  };
 }
