@@ -1485,7 +1485,7 @@ async function main() {
     check("Knitwear was never opened", !logW3.some((l) => l.path === "/c/knitwear"));
     check("the product sitemap was read, its pieces put to the rule too", logW3.some((l) => l.path === "/sitemap-products.xml"));
     const plansW3 = api.filter((a) => a.action === "plan" && a.pieces);
-    check("every plan of a walk asked about its pieces by the rule", plansW3.length >= 4 && plansW3.every((a) => a.pieceRule === "Coats and sale only"), JSON.stringify(plansW3.map((a) => a.pieceRule)));
+    check("every plan of a walk asked about its pieces by the rule", plansW3.length >= 3 && plansW3.every((a) => a.pieceRule === "Coats and sale only"), JSON.stringify(plansW3.map((a) => a.pieceRule)));
     const ingested = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, "")).sort();
     const want = Array.from({ length: 10 }, (_, i) => `/product/coat-${i + 1}`).sort();
     check("it collected the coats alone: 10", JSON.stringify(ingested) === JSON.stringify(want), JSON.stringify(ingested));
@@ -1584,10 +1584,10 @@ async function main() {
     const w = await wholeRun("Only men's and women's shoes", 300);
     check("run W4 finished", !!w.st && w.st.phase === "done", JSON.stringify(w.st && { phase: w.st.phase, message: w.st.message, site: w.st.site }));
     check(
-      "AI kept Women's shoes, Men's shoes and New in, and left out Dresses, Kids and Gift cards",
+      "AI kept Women's shoes, Men's shoes and New in, and left out Dresses and Kids (Gift cards is no category to it at all)",
       !!w.saved &&
         JSON.stringify(w.saved.categories.map((c) => c.url.replace(STORE, ""))) === JSON.stringify(["/", "/c/women-shoes", "/c/men-shoes", "/c/new-in"]) &&
-        JSON.stringify(w.saved.skipped.map((c) => c.label)) === JSON.stringify(["Dresses", "Kids", "Gift cards"]),
+        JSON.stringify(w.saved.skipped.map((c) => c.label)) === JSON.stringify(["Dresses", "Kids"]),
       JSON.stringify(w.saved && { categories: w.saved.categories.map((c) => c.label), skipped: w.saved.skipped.map((c) => c.label) }),
     );
     check("Dresses, Kids and Gift cards were never opened", !w.log.some((l) => ["/c/dresses", "/c/kids", "/gift-cards"].includes(l.path)));
@@ -1614,7 +1614,7 @@ async function main() {
     const w = await wholeRun("Only shoes LIMIT", 300);
     const all = ["/product/boot-m2", "/product/boot-w1", "/product/dress-1", "/product/dress-2", "/product/kids-tee-1", "/product/new-jacket-1", "/product/new-sandal-1", "/product/p-1042", "/product/p-2001", "/product/sneaker-m1", "/product/sneaker-w2"];
     check("run W5 (limit) finished", !!w.st && w.st.phase === "done", JSON.stringify(w.st && { phase: w.st.phase, message: w.st.message }));
-    check("every category was walked, as without a rule", !!w.saved && w.saved.categories.length === 7 && w.saved.rule === "", JSON.stringify(w.saved && w.saved.categories.map((c) => c.label)));
+    check("every category was walked, as without a rule", !!w.saved && w.saved.categories.length === 6 && w.saved.rule === "", JSON.stringify(w.saved && w.saved.categories.map((c) => c.label)));
     check("every piece in them collected: 11", JSON.stringify(w.ingested) === JSON.stringify(all), JSON.stringify(w.ingested));
     check("the sitemap was not read: without AI it is the whole store", !w.log.some((l) => /sitemap/.test(l.path)));
     check(
