@@ -1,9 +1,11 @@
+
 — launching chromium with the unpacked extension —
   extension id pjbcdcadhhapgbljlmbiakkkniiialfa
   ok   installs with access to no store whatsoever (no <all_urls>) — only goo-fashion itself
   ok   the only pages it may touch at install are our own collect screen
   ok   asks only for the four narrow APIs
   store origin granted (stands in for the popup prompt)
+
 — the popup —
   ok   the popup starts up without an error
   ok   and its Stop button runs without an error
@@ -25,25 +27,30 @@
   ok   the real extractor found a product in every capture
   ok   it read the name, brand and price from the captured DOM
   ok   the lazy gallery was woken by the scroll (2 real images, no data-URI)
+
 — run B: the store answers 403 —
   ok   the run halted and said why
   ok   it named the refusal
   ok   it stopped after exactly two refusals, not more
+
 — run C: Stop mid-run —
   ok   nothing was imported after Stop
   ok   the store stopped being asked for pages
+
 — run D: 21 products, to catch the rest —
   ok   run D finished
   ok   with no Crawl-delay the 1.5s floor was applied
   ok   a ~10s rest landed after the 20th page
   ok   a page every two seconds or so, not every seven
   ok   and every piece still came with its lazy gallery: 2 photos each
+
 — run D2: one refusal, then the run slows down —
   ok   run D2 finished rather than halting
   ok   the refused page is the one failure; the other twenty came in
   ok   before the refusal, the usual pace
   ok   after it, a rest of ten seconds or more
   ok   then half the pace: three seconds or more between pages
+
 — run E: a single-page storefront, and a store priced in hryvnia —
   ok   run E finished
   ok   both pages were collected
@@ -74,6 +81,7 @@
   ok   the item's own number came off the offer, check digit and all
   ok   and an article number off a plain Ukrainian line, where nothing is declared
   ok   the piece is tagged with a style, from words only the rendered page had
+
 — run H: the popup's Links only box —
   ok   ticked: Start in the popup runs without an error
   ok   ticked: the run finished
@@ -89,15 +97,18 @@
   ok   cleared: every page reached the site with linksOnly: false
   ok   and the store is forgotten as a links store
   ok   and the popup opens with it cleared again
+
 — run I: the store shows a bot check instead of its products —
   ok   the run stopped at the check
   ok   after two pages, not all of them
   ok   no check page was sent to the site as a product
+
 — run J: a sold-out piece sends the tab to a category —
   ok   run J finished
   ok   the page says where the tab ended up
   ok   and the category is not imported as the piece
   ok   the other pieces are
+
 — run K: the sitemaps are far bigger than one message can carry —
   ok   run K finished rather than halting
   ok   it collected the two products on the page and the two only the sitemap names
@@ -105,6 +116,7 @@
   ok   and no request to the site was over Vercel's 4.5 MB limit
   ok   the first sitemap had enough, so the other two were never downloaded
   ok   no address only a sitemap's padding names was opened
+
 — run L: the whole category, walked in the admin's own tab —
   ok   the walk starts in the admin's tab
   ok   with the store tab in the background it waits, and says why
@@ -126,18 +138,21 @@
   ok   the popup says it: found 36, 35 new, 1 failed, and offers a retry
   ok   Retry opens only the page that failed
   ok   and this time it comes in
+
 — run M: "or only the first" five —
   ok   run M finished
   ok   it collected the first five the page showed, no more
   ok   and stopped reading the page early: page two was never opened
   ok   the page already showed eight: it did not scroll at all, no more cards were loaded
   ok   the popup remembers the choice
+
 — run M2: "or only the first" twelve, the page showing eight —
   ok   run M2 finished
   ok   it collected the first twelve the page showed
   ok   it scrolled for the cards it needed
   ok   and no further: "Show more" was never pressed
   ok   nor page two opened
+
 — run N: a category that looks like a product, and a product —
   ok   a category numbered like a piece: the run finished
   ok   a category numbered like a piece: its pieces were collected, not the category
@@ -148,6 +163,7 @@
   ok   a product page: the run finished
   ok   a product page gives that product alone, not its "You may also like"
   ok   and says it found one piece
+
 — run S: failing and slow pages are skipped, not waited out —
   ok   run S went on to the end rather than stopping
   ok   the good page with a tracker that never finishes was read, not failed
@@ -158,12 +174,14 @@
   ok   the page that never answered was given up after 15 s, not 45
   ok   the dropped connection was skipped at once
   ok   a slow import on the site did not keep the next page from opening
+
 — run T: a second bridge injected into a collect tab that has one —
   ok   a second bridge went into the collect tab
   ok   run T finished
   ok   every piece reached the collect screen once
   ok   the run was greeted once, not once per bridge
   ok   and no plan round was asked for twice
+
 — run W: the whole store, category by category, then its sitemaps —
   ok   the popup offers the whole store, and nothing to resume yet
   ok   it walks the store's categories, in the admin's own tab
@@ -175,6 +193,7 @@
   ok   run W finished
   ok   every piece in the store was collected: 21
   ok   and none of them twice, Stop and Resume in between
+  ok   the plan calls carry each card's name beside its link
   ok   the two hats only the sitemap knows came from the sitemap
   ok   the knitwear behind "Show more" was loaded
   ok   the coats on page two were reached
@@ -190,6 +209,7 @@
   ok   the store tab is back on the page the run started from
   ok   the run is written down as done
   ok   the popup says it: the whole store, 21 new, and nothing left to resume
+
 — run W2: the whole store, the store tab in the background —
   ok   after a finished run, a new one starts from the beginning
   ok   run W2 finished
@@ -198,21 +218,65 @@
   ok   "Show more" was not pressed in a tab nobody could see
   ok   the knitwear behind it came from the sitemaps, after the categories
   ok   it waited a minute for the tab at the first category, then only seconds at the next ones
+
 — run W3: the whole store, AI choosing the categories by a rule —
+  ok   the run waits on the popup's list: AI's choice, ticked, the rule above it, nothing walked yet
+  ok   not a category was opened before the admin said go
   ok   run W3 finished
   ok   the rule went to the site once, with the menu's four categories (not the page it started on)
   ok   AI kept Coats and Sale, and left out Knitwear and the menu's own piece
   ok   Knitwear was never opened
-  ok   nor the sitemaps: with a rule, the run is the categories AI chose
-  ok   it collected the coats, and the knits the home page and Sale show: 13
+  ok   the product sitemap was read, its pieces put to the rule too
+  ok   every plan of a walk asked about its pieces by the rule
+  ok   it collected the coats alone: 10
+  ok   no knit or hat was opened
+  ok   AI skipped 10, each counted once: the knits the home page and Sale show, the rest of them and the hats in the sitemap
   ok   a category AI left out is still not imported as a piece
   ok   the run is written down as done
   ok   the rule is remembered for this store
   ok   the popup says AI chose 3 categories and left out 2, and shows the rule again
+  ok   and how many pieces AI skipped
+
 — run W3b: AI cannot answer, every category is walked —
-  ok   all five categories are walked, and the run says AI could not choose
-  ok   the popup shows it as a warning
+  ok   every category is ticked, and the run says AI could not choose
+  ok   the popup shows it as a warning, and says the pieces will not be checked by name
+  ok   Cancel forgets the run: no list, no Resume, the whole store on offer again
+  ok   and not a category was walked
+
+— run W4: only men's and women's shoes —
+  ok   the list: AI took the two shoe categories and New in, marked mixed
+  ok   Show skipped: what AI left out, unticked
+  ok   a tick by hand counts: Collect 4 categories
+  ok   a popup closed and opened again finds the list, Kids still ticked
+  ok   Resume after Stop offers no list again
+  ok   run W4 finished
+  ok   it walked AI's three and Kids, ticked by hand; Dresses left out
+  ok   Dresses and Gift cards were never opened, Kids was
+  ok   the shoes were collected, and nothing else: 7
+  ok   no dress, tee, jacket or scarf was even opened
+  ok   the loafer and the dress whose addresses say nothing went to AI by the names on their cards
+  ok   the sneaker only the sitemap knows was found by its image:title and collected
+  ok   AI skipped 6, each once: a dress at home, the tee in Kids, a dress and a jacket in New in, then a dress and a scarf in the sitemap
+  ok   the popup says so
+
+— run W5: the month's AI limit spent, then AI failing on the pieces —
+  ok   the list has every category ticked, and names the limit
+  ok   run W5 (limit) finished
+  ok   every category was walked, as without a rule
+  ok   every piece in them collected: 11
+  ok   the sitemap was not read: without AI it is the whole store
+  ok   no plan asked about pieces: AI could not choose the categories
+  ok   the popup's warning names the limit and says the run went on
+  ok   run W5 (pieces failing) finished
+  ok   the categories were still chosen
+  ok   every piece in the chosen categories collected: 9
+  ok   and the sitemap left unread
+  ok   the popup says AI could not choose the pieces, and why
+
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
-  192 passed, 0 failed
+
+  227 passed, 0 failed
+
+exit=0
