@@ -190,7 +190,21 @@
   ok   "Show more" was not pressed in a tab nobody could see
   ok   the knitwear behind it came from the sitemaps, after the categories
   ok   it waited a minute for the tab at the first category, then only seconds at the next ones
+— run W3: the whole store, AI choosing the categories by a rule —
+  ok   run W3 finished
+  ok   the rule went to the site once, with the menu's four categories (not the page it started on)
+  ok   AI kept Coats and Sale, and left out Knitwear and the menu's own piece
+  ok   Knitwear was never opened
+  ok   nor the sitemaps: with a rule, the run is the categories AI chose
+  ok   it collected the coats, and the knits the home page and Sale show: 13
+  ok   a category AI left out is still not imported as a piece
+  ok   the run is written down as done
+  ok   the rule is remembered for this store
+  ok   the popup says AI chose 3 categories and left out 2, and shows the rule again
+— run W3b: AI cannot answer, every category is walked —
+  ok   all five categories are walked, and the run says AI could not choose
+  ok   the popup shows it as a warning
 — run G: the extension reloaded under an open collect tab —
   ok   the new worker found the old collect tab and gave it a working bridge
   ok   and the collect screen hears the extension again
-  173 passed, 0 failed
+  185 passed, 0 failed

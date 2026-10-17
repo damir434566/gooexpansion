@@ -1295,8 +1295,15 @@
     // Walk the page so lazy images commit to a real `src`. Four steps is enough
     // for the galleries this is aimed at without turning a snapshot into a
     // visible scroll animation the admin has to wait through.
+    //
+    // Goo Collect 1.3.0 walks it from the worker before this runs, and says so
+    // in `__gooWalked`: a page in a background tab has its timers held to one a
+    // second, so the five short pauses below took five seconds a piece. The
+    // walk here stays for whoever injects this file without walking first.
+    const walked = globalThis.__gooWalked === true;
+    globalThis.__gooWalked = false;
     const height = document.body ? document.body.scrollHeight : 0;
-    if (height > window.innerHeight) {
+    if (!walked && height > window.innerHeight) {
       for (let i = 1; i <= 4; i++) {
         window.scrollTo(0, (height / 4) * i);
         await sleep(220);

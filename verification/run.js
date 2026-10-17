@@ -500,7 +500,44 @@ async function main() {
     typeof restGap === "number" && restGap >= 11000,
     `gap after page 20 was ${restGap}ms`,
   );
+  // The pause is counted from one page request to the next (1.3.0). Up to
+  // 1.2.0 it came on top of reading the page, whose own scroll pauses Chrome
+  // stretched to a second each in a background tab: a page every 7 s.
+  {
+    const plain = gapsD.filter((g, i) => i !== 19);
+    const mean = plain.reduce((a, b) => a + b, 0) / plain.length;
+    check("a page every two seconds or so, not every seven", mean < 3000, `mean gap ${Math.round(mean)}ms`);
+    const { imported: importedD } = await studioEvents();
+    check("and every piece still came with its lazy gallery: 2 photos each", importedD.length === 21 && importedD.every((i) => i.images >= 2), JSON.stringify(importedD.map((i) => i.images)));
+  }
 
+  collect.close(); popup.close();
+
+  // ── Run D2: one refusal is a reason to slow down ──────────────────────────
+  //
+  // The store answers 403 once (p4), then serves as usual. Two in a row still
+  // ends the run (run B); one now buys a ten-second rest and half the pace for
+  // the next twenty pages, so a store that has started to push back gets room.
+  console.log("\n— run D2: one refusal, then the run slows down —");
+  await storeControl({ mode: "wary", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  popup = await openPopup(extId);
+  await popup.evaluate(
+    `chrome.runtime.sendMessage({type:'start',payload:{storeUrl:'${STORE}/collections/all',limit:21}})`,
+  );
+  {
+    const doneD2 = await waitForEvent("done", 300000);
+    const st = await popup.evaluate("chrome.runtime.sendMessage({type:'state'})");
+    check("run D2 finished rather than halting", !!doneD2 && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message }));
+    check("the refused page is the one failure; the other twenty came in", st.counts.new === 20 && st.counts.failed === 1, JSON.stringify(st.counts));
+    const hits = (await storeLog()).log.filter((l) => l.path.startsWith("/product/")).map((l) => ({ p: l.path, at: l.at }));
+    const at = hits.findIndex((h) => h.p === "/product/p4");
+    const gaps = hits.slice(1).map((h, i) => h.at - hits[i].at);
+    check("before the refusal, the usual pace", gaps.slice(0, at - 1).every((g) => g >= 1500 && g < 3000), JSON.stringify(gaps.slice(0, at)));
+    check("after it, a rest of ten seconds or more", gaps[at] >= 10000, `${gaps[at]}ms`);
+    check("then half the pace: three seconds or more between pages", gaps.slice(at + 1).every((g) => g >= 3000), JSON.stringify(gaps.slice(at + 1)));
+  }
   collect.close(); popup.close();
 
   // ── Run E: the gallery in the payload, the currency in the text ───────────
