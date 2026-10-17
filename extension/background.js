@@ -354,7 +354,10 @@ function siteLine() {
   if (!s) return "";
   const sofar = `${state.done} piece${state.done === 1 ? "" : "s"} so far`;
   if (s.stage === "menu") return "Whole store: reading the store's menu…";
-  if (s.stage === "categories") return `Whole store: category ${s.index + 1} of ${s.categories}, ${s.label}. ${sofar}.`;
+  if (s.stage === "categories") {
+    const left = s.skipped ? ` (AI left out ${s.skipped})` : "";
+    return `Whole store: category ${s.index + 1} of ${s.categories}${left}, ${s.label}. ${sofar}.`;
+  }
   if (s.stage === "sitemaps") {
     return `Whole store: the sitemaps, for the pieces no category showed (${s.sitemapsRead} read). ${sofar}.`;
   }
@@ -1404,7 +1407,7 @@ async function runRetry(last) {
   // pace comes from it. A whole-store run can leave more failed pages than
   // one plan call answers for, so they are planned a chunk at a time.
   const set = new Set(wanted);
-  const urls = [];
+  const taken = new Set();
   let plan = {};
   for (let i = 0; i < wanted.length; i += PLAN_LINKS) {
     const planned = await askPage("plan", {
@@ -1421,8 +1424,9 @@ async function runRetry(last) {
       return;
     }
     plan = planned.data ?? {};
-    for (const u of Array.isArray(plan.urls) ? plan.urls : []) if (set.has(u) && !urls.includes(u)) urls.push(u);
+    for (const u of Array.isArray(plan.urls) ? plan.urls : []) if (set.has(u)) taken.add(u);
   }
+  const urls = [...taken];
   state.found = urls.length;
   state.delayMs = Math.max(Number(plan.delayMs) || MIN_DELAY_MS, MIN_DELAY_MS);
   state.planned = urls.length;
@@ -1529,6 +1533,52 @@ function localeOf(url) {
 }
 
 /**
+ * Ask the site which of the menu's categories the admin's rule keeps
+ * ("What to collect" in the popup). The site puts the question to the model
+ * the AI check in Goo Studio uses, with its key (`pick-categories.ts`); the
+ * key never comes here. With no answer to go by (no key, a failed call, a
+ * site without the AI choice yet) every category is kept, `failed` is set,
+ * and `note` says why.
+ */
+async function chooseCategories(found, rule, startUrl, robotsTxt, linksOnly) {
+  const all = `walking all ${found.length}`;
+  state.message = `AI is choosing which of the menu's ${found.length} categories to walk…`;
+  pushProgress();
+  const asked = await askPage("plan", {
+    url: startUrl,
+    html: "",
+    robotsTxt,
+    sitemaps: [],
+    seen: [],
+    limit: 1,
+    linksOnly,
+    categoryRule: rule,
+    categories: found.map((c) => ({ url: c.url, label: c.label })),
+  });
+  const choice = asked.ok ? asked.data?.categoryChoice : null;
+  if (!choice || !Array.isArray(choice.keep)) {
+    const why = !asked.ok
+      ? asked.error || "the collect tab did not answer"
+      : choice && choice.error
+        ? choice.error
+        : "the site has no AI category choice yet — it needs the site update";
+    return { keep: found, drop: [], note: `AI could not choose the categories (${why}); ${all}.`, failed: true };
+  }
+  const kept = new Set(choice.keep.filter((n) => Number.isInteger(n)));
+  const keep = found.filter((_, i) => kept.has(i));
+  const drop = found.filter((_, i) => !kept.has(i));
+  const names = drop.slice(0, 6).map((c) => c.label).join(", ");
+  return {
+    keep,
+    drop,
+    note: `AI kept ${keep.length} of the menu's ${found.length} categories${
+      drop.length ? `, leaving out ${names}${drop.length > 6 ? ` and ${drop.length - 6} more` : ""}` : ""
+    }.`,
+    failed: false,
+  };
+}
+
+/**
  * The tab a whole-store run walks: the admin's own, when it is on the store,
  * or a new one in front when they resume from somewhere else.
  */
@@ -1553,7 +1603,7 @@ async function storeTab(tabId, host, url) {
  * or was cut off: the category and page it was on, the sitemap and the piece
  * of it.
  */
-async function runSite({ tabId, storeUrl, linksOnly = false, resume = false }) {
+async function runSite({ tabId, storeUrl, linksOnly = false, resume = false, rule = "" }) {
   let run = null;
   if (resume) {
     run = await loadSiteRun();
@@ -1590,6 +1640,10 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false }) {
     startedAt: run ? run.startedAt : Date.now(),
     resumedAt: Date.now(),
     doneAtResume: run ? run.done || 0 : 0,
+    skipped: run && Array.isArray(run.skipped) ? run.skipped.length : 0,
+    ai: run ? run.aiNote || "" : "",
+    // A note without a rule kept: AI was asked and could not answer.
+    aiFailed: !!(run && run.aiNote && !run.rule),
   };
   if (run) {
     state.done = run.done || 0;
@@ -1636,17 +1690,21 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false }) {
     }
     // The page the admin started on comes first: it is a category too, or
     // the home page with its own pieces. The menu's categories go only where
-    // robots.txt lets the run go.
-    const categories = [
-      { url: startUrl, label: "This page", where: "start" },
-      ...categoryCandidates(menu && menu.links, startUrl).filter((c) => robotsAllows(rules, c.url)),
-    ];
+    // robots.txt lets the run go, and, with a rule, where AI says it fits.
+    const found = categoryCandidates(menu && menu.links, startUrl).filter((c) => robotsAllows(rules, c.url));
+    const chosen = rule && found.length ? await chooseCategories(found, rule, startUrl, robotsTxt, linksOnly) : null;
+    if (state.stopped) return finish();
+    const categories = [{ url: startUrl, label: "This page", where: "start" }, ...(chosen ? chosen.keep : found)];
     run = {
       store: startUrl,
       linksOnly,
       startedAt: state.site.startedAt,
       stage: "categories",
       categories,
+      // A rule AI applied, and the categories it left out. Without one, "".
+      rule: chosen && !chosen.failed ? rule : "",
+      skipped: chosen ? chosen.drop : [],
+      aiNote: chosen ? chosen.note : "",
       index: 0,
       pageUrl: "",
       sweep: null,
@@ -1655,12 +1713,16 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false }) {
       counts: { ...state.counts },
       status: "running",
     };
+    Object.assign(state.site, { skipped: run.skipped.length, ai: run.aiNote, aiFailed: !!(chosen && chosen.failed) });
   }
   currentSite = run;
   await keepSite(run);
 
-  /** A category is never a piece: a store that numbers its categories like pieces would have them collected. */
-  const categoryPaths = new Set(run.categories.map((c) => pagePath(c.url)));
+  /**
+   * A category is never a piece: a store that numbers its categories like
+   * pieces would have them collected. Those AI left out are categories too.
+   */
+  const categoryPaths = new Set([...run.categories, ...(run.skipped || [])].map((c) => pagePath(c.url)));
 
   /** The planner's answer for one call, or null when the run has had to halt. */
   const plan = async (payload) => {
@@ -1749,7 +1811,8 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false }) {
     });
     state.phase = "listing";
     state.listing = { pages: 1, links: 0 };
-    state.message = "";
+    // What AI made of the rule stays in view while the first page is walked.
+    state.message = run.index === 0 && run.aiNote ? run.aiNote : "";
     await keepSite(run);
 
     // A link in the menu that a walk before it has already collected as a piece.
@@ -1812,11 +1875,14 @@ async function runSite({ tabId, storeUrl, linksOnly = false, resume = false }) {
   }
   if (state.stopped) return endSite(run, tabId);
   if (run.stage === "categories") {
-    run.stage = "sitemaps";
+    // With a rule, the run is the categories AI chose. A sitemap lists the
+    // whole store, what the rule left out with it, so it is not read.
+    run.stage = run.rule ? "done" : "sitemaps";
     run.pageUrl = "";
     run.sweep = null;
     await keepSite(run);
   }
+  if (run.stage === "done") return endSite(run, tabId);
 
   // ── The sitemaps ────────────────────────────────────────────────────────
   // Last, for what no category led to: a piece only search finds, a category
@@ -1980,6 +2046,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         storeUrl: typeof p.storeUrl === "string" ? p.storeUrl : "",
         linksOnly: p.linksOnly === true,
         resume: p.resume === true,
+        rule: typeof p.rule === "string" ? p.rule.trim().slice(0, 500) : "",
       }).catch((err) => {
         halt(err?.message ?? "The run failed unexpectedly.");
       });

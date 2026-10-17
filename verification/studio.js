@@ -30,6 +30,38 @@ const { planCollection } = require(path.join(PARSER, "plan-collection.js"));
 const { parsePage } = require(path.join(PARSER, "parse-page.js"));
 const { notAProductPage } = require(path.join(PARSER, "page-guards.js"));
 const { toUsd } = require(path.join(COMPILED, "lib", "server", "fx.js"));
+const { pickCategories, readCategoryQuestion } = require(path.join(PARSER, "pick-categories.js"));
+
+/**
+ * The AI check's model, stood in for: there is no OpenAI key in this
+ * container, and an assertion needs an answer it can predict. It keeps a
+ * category when a word of its label is a word of the rule, and drops the
+ * rest. A rule with FAIL in it fails the call, as a key over its limit does.
+ * Everything around it — what the request carries, how the answer is read —
+ * is the shipping `pick-categories.ts`.
+ */
+const STAND_IN_MODEL = {
+  chat: {
+    completions: {
+      async create(body) {
+        const text = body.messages[1].content;
+        const rule = JSON.parse(text.match(/^RULE: (".*")$/m)[1]).toLowerCase();
+        if (/fail/.test(rule)) throw new Error("429 Rate limit reached for gpt-4o-mini");
+        const words = new Set(rule.split(/[^a-z]+/).filter((w) => w.length > 2));
+        const keep = [];
+        const drop = [];
+        for (const m of text.matchAll(/^(\d+)\. (".*") \S+$/gm)) {
+          const label = JSON.parse(m[2]).toLowerCase();
+          (label.split(/[^a-z]+/).some((w) => words.has(w)) ? keep : drop).push(Number(m[1]));
+        }
+        return {
+          choices: [{ message: { content: JSON.stringify({ keep, drop }) } }],
+          usage: { prompt_tokens: 500, completion_tokens: 20 },
+        };
+      },
+    },
+  },
+};
 
 /**
  * A rate provider that answers the same thing every time.
@@ -232,6 +264,8 @@ const server = http.createServer(async (req, res) => {
       images: Array.isArray(body.images) ? body.images.length : 0,
       url: body.url,
       finalUrl: body.finalUrl,
+      categoryRule: body.categoryRule,
+      categories: Array.isArray(body.categories) ? body.categories.map((c) => c && c.url) : undefined,
     });
 
     if (body.action === "ingest") {
@@ -320,7 +354,17 @@ const server = http.createServer(async (req, res) => {
         seen: body.seen || [],
         limit: Number(body.limit) || 60,
       });
-      return json(200, { ok: true, ...plan });
+      // The route's question, asked the route's way (`chooseCategories`).
+      const question = readCategoryQuestion(body);
+      let categoryChoice = null;
+      if (question) {
+        try {
+          categoryChoice = await pickCategories({ ...question, store: new URL(body.url).hostname, model: "gpt-4o-mini", client: STAND_IN_MODEL });
+        } catch (e) {
+          categoryChoice = { error: e.message };
+        }
+      }
+      return json(200, { ok: true, ...plan, ...(categoryChoice ? { categoryChoice } : {}) });
     } catch (e) {
       return json(500, { error: e.message });
     }

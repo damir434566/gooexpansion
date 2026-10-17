@@ -1401,6 +1401,101 @@ async function main() {
   collect.close();
   await fetch(`http://127.0.0.1:${PORT}/json/close/${home2.id}`);
 
+  // ── Run W3: the whole store, AI choosing the categories ───────────────────
+  //
+  // "What to collect" in the popup: the rule goes to the site with the first
+  // plan, once, with the menu's categories; the site's answer (the shipping
+  // pick-categories.ts, the model stood in for in studio.js) decides which are
+  // walked. With a rule the sitemaps are not read: they list the whole store.
+  console.log("\n— run W3: the whole store, AI choosing the categories by a rule —");
+  await storeControl({ mode: "site", reset: true });
+  await studioReset();
+  collect = await openCollect();
+  const home3 = await newTab(HOME);
+  await sleep(1500);
+  popup = await popupOver(HOME);
+  await popup.evaluate(`(() => { const r = document.getElementById("rule"); r.value = "Coats and sale only"; r.dispatchEvent(new Event("change")); })()`);
+  await popup.evaluate(`document.getElementById("site").click()`, { userGesture: true });
+  await sleep(300);
+  await activate(home3.id);
+  {
+    const st = await untilEnded(popup, 300);
+    const { api } = await studioEvents();
+    const logW3 = (await storeLog()).log;
+    const asked = api.filter((a) => a.categoryRule);
+    check("run W3 finished", !!st && st.phase === "done", JSON.stringify(st && { phase: st.phase, message: st.message, site: st.site }));
+    check(
+      "the rule went to the site once, with the menu's four categories (not the page it started on)",
+      asked.length === 1 && asked[0].categoryRule === "Coats and sale only" &&
+        JSON.stringify(asked[0].categories.map((u) => u.replace(STORE, ""))) === JSON.stringify(["/c/coats", "/c/knitwear", "/c/sale", "/product/feature-coat"]),
+      JSON.stringify(asked),
+    );
+    const saved = await popup.evaluate("chrome.storage.local.get('siteRun').then((s) => s.siteRun)");
+    check(
+      "AI kept Coats and Sale, and left out Knitwear and the menu's own piece",
+      !!saved && JSON.stringify(saved.categories.map((c) => c.url.replace(STORE, ""))) === JSON.stringify(["/", "/c/coats", "/c/sale"]) &&
+        JSON.stringify(saved.skipped.map((c) => c.label)) === JSON.stringify(["Knitwear", "The coat of the season"]),
+      JSON.stringify(saved && { categories: saved.categories, skipped: saved.skipped, note: saved.aiNote }),
+    );
+    check("Knitwear was never opened", !logW3.some((l) => l.path === "/c/knitwear"));
+    check("nor the sitemaps: with a rule, the run is the categories AI chose", !logW3.some((l) => /sitemap/.test(l.path)));
+    const ingested = api.filter((a) => a.action === "ingest").map((a) => a.url.replace(STORE, "")).sort();
+    const want = [
+      ...Array.from({ length: 10 }, (_, i) => `/product/coat-${i + 1}`),
+      "/product/knit-1",
+      "/product/knit-3",
+      "/product/knit-8",
+    ].sort();
+    check("it collected the coats, and the knits the home page and Sale show: 13", JSON.stringify(ingested) === JSON.stringify(want), JSON.stringify(ingested));
+    check("a category AI left out is still not imported as a piece", !ingested.includes("/product/feature-coat"));
+    check("the run is written down as done", !!saved && saved.status === "done" && saved.stage === "done");
+    const rules = await popup.evaluate("chrome.storage.local.get('categoryRules').then((s) => s.categoryRules)");
+    check("the rule is remembered for this store", !!rules && rules["127.0.0.1"] === "Coats and sale only", JSON.stringify(rules));
+    popup.close();
+    popup = await popupOver(HOME);
+    await sleep(800);
+    const b = await buttons(popup);
+    const rule = await popup.evaluate(`document.getElementById("rule").value`);
+    check("the popup says AI chose 3 categories and left out 2, and shows the rule again", /AI chose \(2 left out\)|3 categories AI chose \(2 left out\)/.test(b.found) && /13 new/.test(b.counts) && rule === "Coats and sale only", JSON.stringify({ b, rule }));
+    popup.close();
+  }
+  await fetch(`http://127.0.0.1:${PORT}/json/close/${home3.id}`);
+
+  // ── Run W3b: AI cannot answer ─────────────────────────────────────────────
+  // No key, a key over its limit, a site without the AI choice: every
+  // category is walked, as without a rule, and the popup says why.
+  console.log("\n— run W3b: AI cannot answer, every category is walked —");
+  await storeControl({ mode: "site", reset: true });
+  await studioReset();
+  const home4 = await newTab(HOME);
+  await sleep(1500);
+  popup = await popupOver(HOME);
+  await popup.evaluate(`(() => { const r = document.getElementById("rule"); r.value = "coats, FAIL"; r.dispatchEvent(new Event("change")); })()`);
+  await popup.evaluate(`document.getElementById("site").click()`, { userGesture: true });
+  await sleep(300);
+  await activate(home4.id);
+  {
+    let saved = null;
+    for (let i = 0; i < 60; i++) {
+      await sleep(500);
+      saved = await popup.evaluate("chrome.storage.local.get('siteRun').then((s) => s.siteRun)");
+      if (saved && saved.stage === "categories" && saved.startedAt && /429/.test(saved.aiNote || "")) break;
+    }
+    check(
+      "all five categories are walked, and the run says AI could not choose",
+      !!saved && saved.categories.length === 5 && saved.rule === "" && /AI could not choose the categories \(429 Rate limit/.test(saved.aiNote),
+      JSON.stringify(saved && { n: saved.categories.length, rule: saved.rule, note: saved.aiNote }),
+    );
+    await sleep(1000);
+    const shown = await popup.evaluate(`document.getElementById("note").textContent`);
+    check("the popup shows it as a warning", /AI could not choose/.test(shown), shown);
+    await popup.evaluate(`document.getElementById("stop").click()`);
+    await untilEnded(popup, 60);
+    popup.close();
+  }
+  collect.close();
+  await fetch(`http://127.0.0.1:${PORT}/json/close/${home4.id}`);
+
   console.log("\n— run G: the extension reloaded under an open collect tab —");
   await storeControl({ mode: "normal", reset: true });
   await studioReset();
